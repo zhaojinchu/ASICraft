@@ -1,0 +1,19 @@
+# redfab-core has to run unchanged in a browser (wasm32-unknown-unknown) and give
+# byte-identical output there. So: no files, threads, clocks, processes or network,
+# and no hash containers (their iteration order is randomized; use BTreeMap/BTreeSet).
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order is not deterministic; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order is not deterministic; use BTreeSet" },
+    { path = "std::fs::File", reason = "core must not touch the filesystem" },
+    { path = "std::process::Command", reason = "core must not spawn processes" },
+    { path = "std::time::Instant", reason = "core must not read clocks" },
+    { path = "std::time::SystemTime", reason = "core must not read clocks" },
+    { path = "std::net::TcpStream", reason = "core must not use the network" },
+]
+disallowed-methods = [
+    { path = "std::thread::spawn", reason = "core must be single-threaded" },
+    { path = "std::fs::read", reason = "core must not touch the filesystem" },
+    { path = "std::fs::read_to_string", reason = "core must not touch the filesystem" },
+    { path = "std::fs::write", reason = "core must not touch the filesystem" },
+    { path = "std::env::var", reason = "core must not read the environment" },
+]
