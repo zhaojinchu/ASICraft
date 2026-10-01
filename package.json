@@ -1,0 +1,8 @@
+{
+  "name": "redfab",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@yowasp/yosys": "0.68.1207"
+  }
+}

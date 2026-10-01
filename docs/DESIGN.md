@@ -3,6 +3,22 @@
 This is a review of the redfab plan (a SystemVerilog to vanilla-redstone compiler) written before any code exists.
 Date: 2026-10-01. Tool facts in §9 and redstone facts in Appendix A were checked against upstream sources on that date. Everything else is my opinion, and I've tried to label it that way.
 
+The staged build plan and its status are in `PLAN.md`. Decisions made after this review are listed next; where they conflict with the text below, they win.
+
+## Changes since the review
+
+| Topic | The review said | What we do now | Why |
+|---|---|---|---|
+| Goal | A compiler that writes a schematic file | An online playground: write Verilog in a browser, watch it run on a real Minecraft server (§11) | Your stated end goal |
+| Language | Rust recommended | **Rust**, confirmed | Decision on 2026-10-01 |
+| Crates | One crate | Two: `redfab-core` (pure computation, also builds to WebAssembly) and `redfab-cli` (files and processes) | The core has to run unchanged in the browser |
+| Yosys | Native Yosys 0.69 from OSS CAD Suite | **YoWASP Yosys 0.68**, the WebAssembly build, from PyPI natively and npm in the browser | One synthesizer everywhere, so your machine and the browser produce the same netlist. 0.68 is the newest release published on both PyPI and npm |
+| `read_slang` | Works out of the box | Needs **`--threads 1`** | Measured in stage 0: the WebAssembly build can't create threads, and `read_slang` aborts with "thread constructor failed" without it |
+| Equivalence | EQY | Yosys's built-in equivalence commands | EQY needs a native Yosys; it isn't part of YoWASP |
+| Verilator | From OSS CAD Suite | Homebrew (5.052) | OSS CAD Suite is no longer needed |
+| Milestones | §8 "Revised milestones" | Stages 0–13 in `PLAN.md` | Each stage ends in checks runnable from a terminal |
+| Export order | `.nbt`, `.litematic`, `.schem` | `.nbt` from stage 2; the other two after the playground | Litematica loads `.nbt`, and the playground doesn't need the others |
+
 ---
 
 ## 0. Verdict
@@ -223,7 +239,7 @@ What you'd get in return is a placer (HeAP/SA) and router2. At your scale each o
 - **Verilator** as the golden simulator.
 - **fiction** (cda-tum), a physical-design framework for field-coupled nanotechnologies. Its problem is the same as yours: a clocked tile grid with gate tiles, wire tiles and crossing tiles, quantized delays, and no insulation. Its `ortho` algorithm is a linear-time, constructive P&R that always succeeds, but only for combinational DAGs with fan-in ≤ 2, and its area grows quadratically (Appendix B). Read the paper even if you never use the code.
 - **MCHPRS redpiler and `rilc`.** Read the source as a reference for compiling a block world into a component graph, which is exactly your extractor. Run `rilc` as a subprocess to get a second, independent extraction for diffing.
-- **OSS CAD Suite** (darwin-arm64 nightly) as the single install for Yosys, sv-elab, EQY, SBY and Verilator.
+- **YoWASP** (Yosys compiled to WebAssembly) as the synthesizer, on your machine and in the browser. See "Changes since the review".
 - **The vanilla server harness** (`/tick freeze|step`, `/place template`, `/execute if block` over RCON): automated ground truth with no mods. The commands only drive the test harness; the circuits themselves stay command-free.
 - **Prior art** from earlier HDL→Minecraft projects (Appendix B).
 
@@ -317,28 +333,33 @@ Notes:
 
 ### Layout
 
-Start with **one crate** with a module per stage and a CLI binary. Split it into a workspace only when compile times hurt; crate-per-stage on day one is premature.
+Two crates from the start: the core has to run in a browser, so everything that touches files or processes stays out of it. Modules are added to the core stage by stage (`PLAN.md`).
 
 ```
 redfab/
-  Cargo.toml
-  src/
-    main.rs            # `redfab build designs/adder4/top.sv -o build/adder4`
-    netlist/           # Yosys JSON import, validation (single clock, single driver, known cells)
-    lib/               # tile library loader; generators for .lib and Verilog cell models
-    place/  route/  timing/
-    world/             # Block enum, World, dust-shape computation, stamping
-    extract/           # World → Cg  (+ "why is this powered" query)
-    sim/               # Cg simulator, VCD writer, burnout counter
-    lvs/               # Cg ≅ Netlist (via netlist→Cg expansion; isomorphism with port anchors)
-    export/            # litematic.rs, structure_nbt.rs, sponge_schem.rs
-    view/              # per-layer SVG dump
-  cells/               # THE library: one dir per tile: template (ASCII layers), meta.toml, vanilla traces
-  synth/               # redfab.ys template, SV-subset lint
-  designs/             # nor2/, fa1/, adder4/, counter4/, fsm/, alu8/, cpu/  each with top.sv + stimulus spec
-  harness/             # Python: vanilla-server RCON driver, litemapy read-back, rilc wrapper
-  tests/               # integration tests (cargo test)
-  docs/DESIGN.md
+  check                  # runs every acceptance check so far; --vanilla adds the server checks
+  versions.env           # pinned tool versions and hashes
+  crates/
+    redfab-core/         # pure computation; also builds for wasm32. clippy.toml bans files, threads, clocks, hash maps
+      src/
+        netlist/         # Yosys JSON import, validation (single clock, single driver, known cells)
+        lib/             # tile library; generators for .lib and Verilog cell models
+        place/  route/  timing/
+        world/           # Block enum, World, dust-shape computation, stamping
+        extract/         # World → Cg  (+ "why is this powered" query)
+        sim/             # Cg simulator, burnout counter
+        lvs/             # Cg ≅ Netlist
+        export/          # structure_nbt.rs first; litematic.rs and sponge_schem.rs later
+        view/            # per-layer text and SVG dump
+    redfab-cli/          # the `redfab` command: reads files, calls the core
+  cells/                 # THE library: one dir per tile: template (ASCII layers), meta.toml, vanilla traces
+  synth/                 # Yosys script template, SV-subset lint
+  designs/               # nor2/, fa1/, adder4/, counter4/, fsm/  each with top.sv + stimulus spec
+  harness/               # Python: vanilla-server lifecycle, RCON, experiments
+  tools/                 # setup.sh, Yosys runners
+  tests/                 # smoke designs, integration tests
+  web/  mod/  server/    # playground, Fabric mod, backend (stages 10–12)
+  docs/                  # DESIGN.md, PLAN.md, trace-format.md, mechanics.md
 ```
 
 Write tile templates as **ASCII art, one grid per Y layer** with a legend, in text files. They're diffable, reviewable and greppable. Generate the in-game preview from them, never the other way round.
@@ -468,6 +489,24 @@ The `$dlatch` bug alone is a reason to make "no latches in the netlist" a **hard
 3. **Comparators and copper bulbs.** I recommend **no** for v1. Comparators make strength analog, which complicates extraction and legality. A waxed copper bulb plus a comparator is a T flip-flop that toggles in 0 gt plus the comparator's 2 gt, and it can't burn out. That's tempting for counters, but it's a T-FF, not a D-FF, and redpiler and `rilc` can't model it, so you'd lose the second extractor. Revisit both later, for XOR, ROM and counter density.
 4. **Rust.** If you're not willing to write Rust, use C++20, not Python (§5).
 5. **Which DFF design.** Master/slave repeater-lock, or a pulse-latch. Build both in-game and characterize both, then pick the one with the larger hold margin, not the smaller footprint.
+
+---
+
+## 11. Online playground
+
+The end goal: a web page with a code editor and a live view of the circuit running on a real Minecraft server.
+
+- **Untrusted code runs only as WebAssembly.** The browser compiles with YoWASP Yosys and the WebAssembly build of `redfab-core`, so previews need no server. The server recompiles from source inside a WebAssembly runtime with CPU and memory limits. It never accepts blocks from a browser.
+- **Verilator never runs on user code.** Its inline C++ (`$c`) is arbitrary code execution. It stays in the test suite.
+- **The view is drawn in the browser, not streamed as video.** The browser already has the geometry from its own compile. A small observe-only Fabric server mod streams block-state changes with their tick number over a WebSocket, in the trace format from `trace-format.md`. Streaming a real game client would need about one GPU machine per camera.
+- **Web levers** place or remove a `redstone_block` at each input's probe position, the same mechanism the test harness uses.
+- **Server:** Fabric, because Paper can change redstone behaviour. One plot per submission. Limits on gate count, footprint and minimum clock period. All plots share the game's 20 ticks per second, so server tick time is monitored.
+- **Legal:** "Minecraft" can't be the site's main name, the site needs the "NOT AN OFFICIAL MINECRAFT PRODUCT" notice, any game footage must be free to view, and a public site can't ship Mojang's textures.
+
+Things still to confirm, each at the start of the stage that needs it:
+
+- A Fabric mod loads on 26.3 (stage 11). Fabric lists 26.3 as stable, but I haven't built against it.
+- Whether 26.3's built-in management server (`management-server-*` in `server.properties`, seen in stage 0) can replace part of the mod.
 
 ---
 

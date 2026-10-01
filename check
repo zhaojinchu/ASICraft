@@ -6,6 +6,12 @@
 
 set -u
 cd "$(dirname "$0")"
+
+# Keep the Mac from idle-sleeping in the middle of a run (it stalls the server tests).
+if [ -z "${REDFAB_CAFFEINATED:-}" ] && command -v caffeinate >/dev/null; then
+    REDFAB_CAFFEINATED=1 exec caffeinate -i ./check "$@"
+fi
+
 ROOT=$PWD
 source ./versions.env
 
