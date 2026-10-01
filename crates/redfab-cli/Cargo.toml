@@ -1,0 +1,15 @@
+[package]
+name = "redfab-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "redfab"
+path = "src/main.rs"
+
+[dependencies]
+redfab-core = { path = "../redfab-core" }
+
+[lints]
+workspace = true

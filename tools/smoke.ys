@@ -1,0 +1,8 @@
+# Stage 0 smoke script, shared by the Python and Node runners so both run the
+# exact same commands. {top} is replaced with the top module name.
+# --threads 1 is required: the WebAssembly build cannot create threads, and
+# read_slang aborts with "thread constructor failed" without it.
+read_slang --threads 1 --top {top} in.sv
+proc
+opt_clean
+write_json out.json

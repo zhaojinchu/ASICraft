@@ -1,0 +1,11 @@
+[project]
+name = "redfab-harness"
+version = "0.0.0"
+description = "Test harness for redfab: drives Yosys and a vanilla Minecraft server"
+requires-python = ">=3.12"
+dependencies = [
+    "yowasp-yosys==0.68.0.0.post1208",
+]
+
+[tool.uv]
+package = false

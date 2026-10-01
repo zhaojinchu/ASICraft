@@ -6,7 +6,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 
 | # | Stage | Status | Result |
 |---|---|---|---|
-| 0 | Setup and synthesis check | in progress | |
+| 0 | Setup and synthesis check | **done** 2026-10-01 | All 11 checks pass. YoWASP Yosys reads SystemVerilog, with `--threads 1` |
 | 1 | Vanilla test harness | not started | |
 | 2 | Simulator, part 1 | not started | |
 | 3 | First circuit: one NOR gate | not started | |
@@ -24,6 +24,31 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 ## Stage log
 
 Findings and surprises from each stage go here, newest last.
+
+### Stage 0 (2026-10-01)
+
+**Pinned tools** (`versions.env`, `rust-toolchain.toml`, lock files): Minecraft server 26.3 (world version 5023, protocol 777, read from the jar), Temurin JDK 25.0.4.1, Rust 1.99.0, Verilator 5.052, YoWASP Yosys 0.68 (PyPI `0.68.0.0.post1208`, npm `0.68.1207`, same Yosys commit `38e001a6f`).
+
+**Findings:**
+
+1. **`read_slang` works in the WebAssembly Yosys build only with `--threads 1`.** Without it, it aborts with "thread constructor failed: Not supported". With it, the Python and Node builds produce byte-identical netlists. YoWASP is therefore the only synthesizer; OSS CAD Suite is not installed.
+2. **The server's RCON drops the connection if two requests arrive in one socket read.** My first client sent a command and an end-marker packet back to back and failed in 5 of 6 runs. The client now waits for the first reply before sending the end marker. Requests are also limited to 1446 bytes. Stage 1 must batch long command sequences with this in mind.
+3. **The server closes the connection while handling `stop`**, so the reply may never arrive. The harness treats that as normal and falls back to SIGTERM.
+4. The server starts in about 6–7 seconds on this machine, and a fresh world directory is about 2 MB.
+
+**Notes for stage 1** (seen in the generated `server.properties` and log):
+
+- `level-type=minecraft:flat` with no `generator-settings` logs "No key layers" and falls back to the default flat world. Stage 1 needs an explicit empty-world preset.
+- `pause-when-empty-seconds` defaults to 60, and the log shows "Server empty for 60 seconds, pausing". It must be disabled before any timing test.
+- `initial-enabled-packs` exists; it is the likely way to turn on Redstone Experiments at world creation.
+- `max-chained-neighbor-updates` exists and may matter for large circuits.
+- 26.3 has a built-in `management-server-*` (off by default). Worth a look in stage 11.
+
+**Other:**
+
+- The Mac sleeps when idle, which stalls long test runs (wall-clock gaps of 15+ minutes between 7-second tests). `./check` runs under `caffeinate -i` to prevent idle sleep while it runs.
+- `brew install verilator` also ran Homebrew's routine cleanup, which removed outdated copies of `nettle`, `p11-kit` and `pango` and some download caches.
+- Disk after stage 0: about 1.2 GB (`.tools` 420 MB, `~/.rustup` 570 MB, Python and Node packages 175 MB).
 
 ---
 
