@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Runs every acceptance check for every stage completed so far.
+#   ./check            fast checks (no Minecraft server)
+#   ./check --vanilla  also runs the checks that need the vanilla server
+# A stage is done only when this passes. Checks are added before the code they test.
+
+set -u
+cd "$(dirname "$0")"
+ROOT=$PWD
+source ./versions.env
+
+export PATH="$HOME/.cargo/bin:$ROOT/.tools/jdk/Contents/Home/bin:$PATH"
+export JAVA_HOME="$ROOT/.tools/jdk/Contents/Home"
+
+VANILLA=0
+for arg in "$@"; do
+    case "$arg" in
+        --vanilla) VANILLA=1 ;;
+        *) echo "unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+mkdir -p build/check
+FAILED=()
+PASSED=0
+
+# run <name> <command...>: runs the command, logs to build/check/<name>.log
+run() {
+    local name=$1; shift
+    local log="build/check/$name.log"
+    if "$@" >"$log" 2>&1; then
+        printf '  PASS  %s\n' "$name"
+        PASSED=$((PASSED + 1))
+    else
+        printf '  FAIL  %s   (see %s)\n' "$name" "$log"
+        tail -n 15 "$log" | sed 's/^/        | /'
+        FAILED+=("$name")
+    fi
+}
+
+# ---------------------------------------------------------------- stage 0
+
+pins_agree() {
+    grep -q "\"@yowasp/yosys\": \"$YOWASP_NPM\"" package.json &&
+    grep -q "yowasp-yosys==$YOWASP_PYPI" pyproject.toml
+}
+
+tool_hashes() {
+    [ "$(shasum -a 1 .tools/mc/server-$MC_VERSION.jar | cut -d' ' -f1)" = "$MC_SERVER_SHA1" ] &&
+    java -version 2>&1 | grep -q 'version "25\.'
+}
+
+# The core must stay free of files, threads, clocks and subprocesses so it runs in a browser.
+# crates/redfab-core/clippy.toml lists the banned APIs.
+rust_lint() {
+    cargo fmt --all --check &&
+    cargo clippy --workspace --all-targets -- -D warnings
+}
+
+rust_wasm() {
+    cargo build -p redfab-core --target wasm32-unknown-unknown
+}
+
+# read_slang must work in both WebAssembly builds of Yosys, and both must produce the same netlist.
+yosys_py() {
+    uv run --frozen python tools/yosys_py.py tests/smoke/nor2.sv nor2 build/check/nor2.py.json
+}
+yosys_node() {
+    node tools/yosys_node.mjs tests/smoke/nor2.sv nor2 build/check/nor2.node.json
+}
+yosys_same() {
+    uv run --frozen python tools/netlist_eq.py build/check/nor2.py.json build/check/nor2.node.json
+}
+
+# A file that only the slang frontend rejects correctly: if this "passes", read_slang is not really running.
+yosys_negative() {
+    printf 'module bad(input logic a, output logic y); assign y = a +; endmodule\n' > build/check/bad.sv
+    ! uv run --frozen python tools/yosys_py.py build/check/bad.sv bad build/check/bad.json
+}
+
+verilator_smoke() {
+    rm -rf build/check/vl &&
+    verilator --binary --timing -Wall -Wno-fatal --Mdir build/check/vl \
+        --top-module nor2_tb tests/smoke/nor2.sv tests/smoke/nor2_tb.sv &&
+    build/check/vl/Vnor2_tb | grep -q '^PASS$'
+}
+
+server_smoke() {
+    uv run --frozen python -m harness.smoke
+}
+
+echo "stage 0: setup"
+run pins-agree        pins_agree
+run tool-hashes       tool_hashes
+run rust-lint         rust_lint
+run rust-test         cargo test --workspace
+run rust-wasm         rust_wasm
+run yosys-slang-py    yosys_py
+run yosys-slang-node  yosys_node
+run yosys-same        yosys_same
+run yosys-negative    yosys_negative
+run verilator-smoke   verilator_smoke
+if [ $VANILLA = 1 ]; then
+    run server-smoke  server_smoke
+fi
+
+# ---------------------------------------------------------------- summary
+
+echo
+if [ ${#FAILED[@]} -eq 0 ]; then
+    echo "all $PASSED checks passed"
+    [ $VANILLA = 1 ] || echo "(vanilla-server checks skipped; run ./check --vanilla)"
+else
+    echo "${#FAILED[@]} failed: ${FAILED[*]}"
+    exit 1
+fi
