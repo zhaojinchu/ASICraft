@@ -1,0 +1,32 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "glass_down",
+ "doc": "Powered dust on glass, dust one block lower beside it. Wiki (Java): the signal never goes down from a non-conductive block.",
+ "size": [
+  3,
+  3,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "0,1,0": "minecraft:redstone_wire",
+  "1,1,0": "minecraft:glass",
+  "1,2,0": "minecraft:redstone_wire",
+  "2,1,0": "minecraft:stone",
+  "2,2,0": "minecraft:redstone_block"
+ },
+ "events": [],
+ "ticks": 2,
+ "expect": [
+  {
+   "tick": 0,
+   "pos": "0,1,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "from": 0,
+   "stable": true
+  }
+ ]
+}

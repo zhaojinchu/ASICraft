@@ -1,0 +1,33 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "diag_up_cut",
+ "doc": "Same, with a stone block above the lower dust. Wiki: a conductive block there cuts the connection.",
+ "size": [
+  3,
+  3,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,1,0": "minecraft:redstone_block",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire",
+  "1,2,0": "minecraft:stone",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:stone",
+  "2,2,0": "minecraft:redstone_wire"
+ },
+ "events": [],
+ "ticks": 2,
+ "expect": [
+  {
+   "tick": 0,
+   "pos": "2,2,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "from": 0,
+   "stable": true
+  }
+ ]
+}

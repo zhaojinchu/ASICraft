@@ -1,0 +1,36 @@
+{
+ "box": [
+  [
+   0,
+   60,
+   0
+  ],
+  [
+   31,
+   75,
+   31
+  ]
+ ],
+ "blocks": {
+  "20,70,20": "minecraft:glass",
+  "3,64,3": "minecraft:stone",
+  "3,65,3": "minecraft:redstone_block",
+  "4,64,3": "minecraft:stone",
+  "4,65,3": "minecraft:redstone_wire[east=side,north=none,power=15,south=none,west=side]",
+  "5,64,3": "minecraft:stone",
+  "5,65,3": "minecraft:redstone_wire[east=side,north=none,power=14,south=none,west=side]",
+  "6,64,3": "minecraft:stone",
+  "6,65,3": "minecraft:repeater[delay=3,facing=west,locked=false,powered=true]",
+  "8,64,8": "minecraft:stone",
+  "8,65,8": "minecraft:redstone_torch[lit=false]",
+  "9,65,8": "minecraft:stone"
+ },
+ "pending": [
+  {
+   "pos": "8,65,8",
+   "block": "minecraft:redstone_torch",
+   "delay": 2,
+   "priority": 0
+  }
+ ]
+}

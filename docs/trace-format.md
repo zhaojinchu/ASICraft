@@ -7,7 +7,7 @@ One JSON format for "what a redstone circuit did, tick by tick". It is produced 
 - **Units are game ticks** (20 per second). Redstone ticks are never used in files.
 - **Positions** are integer block coordinates in Minecraft's axes (+X east, +Y up, +Z south), written as the string `"x,y,z"`. In a fixture they are relative to the plot origin; `origin` is added when placing in the world and subtracted when recording.
 - **Block states** are written in command syntax with properties sorted by name: `minecraft:redstone_wire[east=side,north=none,power=15,south=none,west=side]`. Blocks without properties have no brackets: `minecraft:stone`. Air is written `minecraft:air`.
-- **Tick numbering.** Tick 0 is the settled state after placement, before anything has been stepped. "Tick t" means the state after the t-th step. Stimuli listed for tick t are applied *after* the state of tick t−1 was recorded and *before* step t runs, so their synchronous effects (dust power, lamp turn-on) show up at tick t together with that step's scheduled ticks.
+- **Tick numbering.** Tick 0 is the settled state after placement, before anything has been stepped. "Tick t" means the state after the t-th step. Stimuli listed for tick t are applied as the **last thing that happens in tick t**: after step t has run and before tick t's state is recorded. Their synchronous effects (dust power, lamp turn-on) are therefore visible at tick t, and a component with a delay of d game ticks reacts at tick t+d. (In the game, a command issued between ticks runs while the clock still reads the last completed tick, which is exactly this.)
 
 ## Fixture file (`*.fixture.json`)
 

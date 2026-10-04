@@ -5,6 +5,7 @@ between runs. The server only listens on 127.0.0.1.
 """
 
 import atexit
+import json
 import secrets
 import shutil
 import socket
@@ -46,8 +47,14 @@ class VanillaServer:
     stop, when the block exits.
     """
 
-    def __init__(self, name: str, properties: dict[str, str] | None = None):
+    def __init__(self, name: str, properties: dict[str, str] | None = None, *,
+                 empty_world: bool = True, redstone_experiments: bool = False):
+        """`empty_world` makes a void superflat world (nothing but the blocks we place).
+        `redstone_experiments` enables Mojang's experimental redstone data pack,
+        which must be chosen when the world is created."""
         pins = read_versions()
+        self.redstone_experiments = redstone_experiments
+        self.empty_world = empty_world
         self.mc_version = pins["MC_VERSION"]
         self.run_dir = ROOT / "build" / "mc" / name
         self.java = ROOT / ".tools" / "jdk" / "Contents" / "Home" / "bin" / "java"
@@ -78,6 +85,8 @@ class VanillaServer:
             "broadcast-rcon-to-ops": "false",
             "level-type": "minecraft\\:flat",
             "generate-structures": "false",
+            # The server would pause ticking 60 s after the last player left; we never have players.
+            "pause-when-empty-seconds": "-1",
             "spawn-protection": "0",
             "view-distance": "4",
             "simulation-distance": "4",
@@ -85,6 +94,11 @@ class VanillaServer:
             "difficulty": "peaceful",
             "motd": "redfab test server",
         }
+        if self.empty_world:
+            preset = json.dumps({"layers": [], "biome": "minecraft:the_void"})
+            properties["generator-settings"] = preset.replace(":", "\\:")
+        if self.redstone_experiments:
+            properties["initial-enabled-packs"] = "vanilla,redstone_experiments"
         properties.update(self._extra_properties)
         (self.run_dir / "server.properties").write_text(
             "".join(f"{key}={value}\n" for key, value in properties.items())
