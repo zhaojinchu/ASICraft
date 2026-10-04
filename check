@@ -110,6 +110,27 @@ if [ $VANILLA = 1 ]; then
     run server-smoke  server_smoke
 fi
 
+# ---------------------------------------------------------------- stage 1
+
+# Every mechanics fixture, in both redstone modes, at three positions and two
+# orientations: traces must equal the committed recordings and meet their
+# expectations. The run also proves the idle-pause is off (it lasts > 65 s).
+mechanics_verify() {
+    uv run --frozen python -m harness.mechanics verify
+}
+
+# A deliberately wrong expectation must be reported as a failure.
+mechanics_negative() {
+    ! uv run --frozen python -m harness.mechanics verify --only torch_delay --break-expectation
+}
+
+echo "stage 1: vanilla harness"
+run harness-unit        uv run --frozen pytest -q
+if [ $VANILLA = 1 ]; then
+    run mechanics-verify    mechanics_verify
+    run mechanics-negative  mechanics_negative
+fi
+
 # ---------------------------------------------------------------- summary
 
 echo
