@@ -1,0 +1,135 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "dust_decay",
+ "doc": "A redstone block feeding 16 dust. Wiki: power drops by 1 per block; the 16th dust is unpowered.",
+ "size": [
+  17,
+  2,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "0,1,0": "minecraft:redstone_block",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:redstone_wire",
+  "3,0,0": "minecraft:stone",
+  "3,1,0": "minecraft:redstone_wire",
+  "4,0,0": "minecraft:stone",
+  "4,1,0": "minecraft:redstone_wire",
+  "5,0,0": "minecraft:stone",
+  "5,1,0": "minecraft:redstone_wire",
+  "6,0,0": "minecraft:stone",
+  "6,1,0": "minecraft:redstone_wire",
+  "7,0,0": "minecraft:stone",
+  "7,1,0": "minecraft:redstone_wire",
+  "8,0,0": "minecraft:stone",
+  "8,1,0": "minecraft:redstone_wire",
+  "9,0,0": "minecraft:stone",
+  "9,1,0": "minecraft:redstone_wire",
+  "10,0,0": "minecraft:stone",
+  "10,1,0": "minecraft:redstone_wire",
+  "11,0,0": "minecraft:stone",
+  "11,1,0": "minecraft:redstone_wire",
+  "12,0,0": "minecraft:stone",
+  "12,1,0": "minecraft:redstone_wire",
+  "13,0,0": "minecraft:stone",
+  "13,1,0": "minecraft:redstone_wire",
+  "14,0,0": "minecraft:stone",
+  "14,1,0": "minecraft:redstone_wire",
+  "15,0,0": "minecraft:stone",
+  "15,1,0": "minecraft:redstone_wire",
+  "16,0,0": "minecraft:stone",
+  "16,1,0": "minecraft:redstone_wire"
+ },
+ "events": [],
+ "ticks": 2,
+ "expect": [
+  {
+   "tick": 0,
+   "pos": "1,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 0,
+   "pos": "2,1,0",
+   "state": "minecraft:redstone_wire[power=14]"
+  },
+  {
+   "tick": 0,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=13]"
+  },
+  {
+   "tick": 0,
+   "pos": "4,1,0",
+   "state": "minecraft:redstone_wire[power=12]"
+  },
+  {
+   "tick": 0,
+   "pos": "5,1,0",
+   "state": "minecraft:redstone_wire[power=11]"
+  },
+  {
+   "tick": 0,
+   "pos": "6,1,0",
+   "state": "minecraft:redstone_wire[power=10]"
+  },
+  {
+   "tick": 0,
+   "pos": "7,1,0",
+   "state": "minecraft:redstone_wire[power=9]"
+  },
+  {
+   "tick": 0,
+   "pos": "8,1,0",
+   "state": "minecraft:redstone_wire[power=8]"
+  },
+  {
+   "tick": 0,
+   "pos": "9,1,0",
+   "state": "minecraft:redstone_wire[power=7]"
+  },
+  {
+   "tick": 0,
+   "pos": "10,1,0",
+   "state": "minecraft:redstone_wire[power=6]"
+  },
+  {
+   "tick": 0,
+   "pos": "11,1,0",
+   "state": "minecraft:redstone_wire[power=5]"
+  },
+  {
+   "tick": 0,
+   "pos": "12,1,0",
+   "state": "minecraft:redstone_wire[power=4]"
+  },
+  {
+   "tick": 0,
+   "pos": "13,1,0",
+   "state": "minecraft:redstone_wire[power=3]"
+  },
+  {
+   "tick": 0,
+   "pos": "14,1,0",
+   "state": "minecraft:redstone_wire[power=2]"
+  },
+  {
+   "tick": 0,
+   "pos": "15,1,0",
+   "state": "minecraft:redstone_wire[power=1]"
+  },
+  {
+   "tick": 0,
+   "pos": "16,1,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "from": 0,
+   "stable": true
+  }
+ ]
+}

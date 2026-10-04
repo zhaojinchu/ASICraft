@@ -1,0 +1,36 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "weak_repeater",
+ "doc": "Dust pointing into a stone block, repeater taking input from that block. Wiki: a weakly powered block drives a repeater.",
+ "size": [
+  5,
+  2,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "0,1,0": "minecraft:redstone_block",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:stone",
+  "3,0,0": "minecraft:stone",
+  "3,1,0": "minecraft:repeater[delay=1,facing=west]",
+  "4,0,0": "minecraft:stone",
+  "4,1,0": "minecraft:redstone_wire"
+ },
+ "events": [],
+ "ticks": 2,
+ "expect": [
+  {
+   "tick": 0,
+   "pos": "4,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "from": 0,
+   "stable": true
+  }
+ ]
+}

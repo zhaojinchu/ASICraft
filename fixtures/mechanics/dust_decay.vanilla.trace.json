@@ -1,0 +1,53 @@
+{
+ "format": "redfab-trace/1",
+ "fixture": "dust_decay",
+ "source": {
+  "kind": "vanilla",
+  "mc_version": "26.3",
+  "jar_sha1": "33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c",
+  "redstone_experiments": false
+ },
+ "size": [
+  17,
+  2,
+  1
+ ],
+ "initial": {
+  "0,0,0": "minecraft:stone",
+  "0,1,0": "minecraft:redstone_block",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire[east=side,north=none,power=15,south=none,west=side]",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:redstone_wire[east=side,north=none,power=14,south=none,west=side]",
+  "3,0,0": "minecraft:stone",
+  "3,1,0": "minecraft:redstone_wire[east=side,north=none,power=13,south=none,west=side]",
+  "4,0,0": "minecraft:stone",
+  "4,1,0": "minecraft:redstone_wire[east=side,north=none,power=12,south=none,west=side]",
+  "5,0,0": "minecraft:stone",
+  "5,1,0": "minecraft:redstone_wire[east=side,north=none,power=11,south=none,west=side]",
+  "6,0,0": "minecraft:stone",
+  "6,1,0": "minecraft:redstone_wire[east=side,north=none,power=10,south=none,west=side]",
+  "7,0,0": "minecraft:stone",
+  "7,1,0": "minecraft:redstone_wire[east=side,north=none,power=9,south=none,west=side]",
+  "8,0,0": "minecraft:stone",
+  "8,1,0": "minecraft:redstone_wire[east=side,north=none,power=8,south=none,west=side]",
+  "9,0,0": "minecraft:stone",
+  "9,1,0": "minecraft:redstone_wire[east=side,north=none,power=7,south=none,west=side]",
+  "10,0,0": "minecraft:stone",
+  "10,1,0": "minecraft:redstone_wire[east=side,north=none,power=6,south=none,west=side]",
+  "11,0,0": "minecraft:stone",
+  "11,1,0": "minecraft:redstone_wire[east=side,north=none,power=5,south=none,west=side]",
+  "12,0,0": "minecraft:stone",
+  "12,1,0": "minecraft:redstone_wire[east=side,north=none,power=4,south=none,west=side]",
+  "13,0,0": "minecraft:stone",
+  "13,1,0": "minecraft:redstone_wire[east=side,north=none,power=3,south=none,west=side]",
+  "14,0,0": "minecraft:stone",
+  "14,1,0": "minecraft:redstone_wire[east=side,north=none,power=2,south=none,west=side]",
+  "15,0,0": "minecraft:stone",
+  "15,1,0": "minecraft:redstone_wire[east=side,north=none,power=1,south=none,west=side]",
+  "16,0,0": "minecraft:stone",
+  "16,1,0": "minecraft:redstone_wire[east=side,north=none,power=0,south=none,west=side]"
+ },
+ "pending0": [],
+ "ticks": []
+}

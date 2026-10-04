@@ -1,0 +1,90 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "torch_delay",
+ "doc": "Torch on a block powered through dust. Wiki: a torch changes state 2 game ticks after its input.",
+ "size": [
+  5,
+  3,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:redstone_wire",
+  "3,0,0": "minecraft:stone",
+  "3,1,0": "minecraft:stone",
+  "3,2,0": "minecraft:redstone_torch",
+  "4,0,0": "minecraft:stone",
+  "4,1,0": "minecraft:stone",
+  "4,2,0": "minecraft:redstone_wire"
+ },
+ "events": [
+  {
+   "tick": 2,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 10,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  }
+ ],
+ "ticks": 16,
+ "expect": [
+  {
+   "tick": 0,
+   "pos": "3,2,0",
+   "state": "minecraft:redstone_torch[lit=true]"
+  },
+  {
+   "tick": 0,
+   "pos": "4,2,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 2,
+   "pos": "1,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 3,
+   "pos": "3,2,0",
+   "state": "minecraft:redstone_torch[lit=true]"
+  },
+  {
+   "tick": 4,
+   "pos": "3,2,0",
+   "state": "minecraft:redstone_torch[lit=false]"
+  },
+  {
+   "tick": 4,
+   "pos": "4,2,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "tick": 11,
+   "pos": "3,2,0",
+   "state": "minecraft:redstone_torch[lit=false]"
+  },
+  {
+   "tick": 12,
+   "pos": "3,2,0",
+   "state": "minecraft:redstone_torch[lit=true]"
+  },
+  {
+   "tick": 12,
+   "pos": "4,2,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "from": 12,
+   "stable": true
+  }
+ ]
+}

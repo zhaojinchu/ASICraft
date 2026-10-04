@@ -1,0 +1,46 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "torch_strong_up",
+ "doc": "Torch with a stone block above it, dust beside the torch, and a stone block beside the torch with dust beyond. Wiki: the torch strongly powers the block above and powers adjacent dust; it does not power the block beside it.",
+ "size": [
+  3,
+  3,
+  3
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "0,1,0": "minecraft:redstone_wire",
+  "1,0,0": "minecraft:stone",
+  "1,0,2": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_torch",
+  "1,1,1": "minecraft:stone",
+  "1,1,2": "minecraft:redstone_wire",
+  "1,2,0": "minecraft:stone",
+  "2,1,0": "minecraft:stone",
+  "2,2,0": "minecraft:redstone_wire"
+ },
+ "events": [],
+ "ticks": 2,
+ "expect": [
+  {
+   "tick": 0,
+   "pos": "2,2,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 0,
+   "pos": "0,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 0,
+   "pos": "1,1,2",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "from": 0,
+   "stable": true
+  }
+ ]
+}

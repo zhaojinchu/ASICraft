@@ -1,0 +1,66 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "repeater_delay_3",
+ "doc": "Repeater set to 3. Wiki: delay is 6 game ticks, on and off.",
+ "size": [
+  4,
+  2,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:repeater[delay=3,facing=west]",
+  "3,0,0": "minecraft:stone",
+  "3,1,0": "minecraft:redstone_wire"
+ },
+ "events": [
+  {
+   "tick": 2,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 14,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  }
+ ],
+ "ticks": 22,
+ "expect": [
+  {
+   "tick": 2,
+   "pos": "1,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 7,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "tick": 8,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 19,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 20,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "from": 20,
+   "stable": true
+  }
+ ]
+}

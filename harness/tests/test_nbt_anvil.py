@@ -9,6 +9,7 @@ import struct
 from pathlib import Path
 
 from harness.anvil import read_region_blocks
+from harness.blockstate import format_pos
 from harness.nbt import read_nbt
 
 DATA = Path(__file__).resolve().parent.parent.parent / "tests" / "data"
@@ -17,7 +18,7 @@ DATA = Path(__file__).resolve().parent.parent.parent / "tests" / "data"
 def test_region_blocks_and_pending_ticks_match_expected():
     expected = json.loads((DATA / "r.0.0.expected.json").read_text())
     blocks, pending = read_region_blocks(DATA / "r.0.0.mca", expected["box"])
-    assert {k: str(v) for k, v in blocks.items()} == expected["blocks"]
+    assert {format_pos(k): str(v) for k, v in blocks.items()} == expected["blocks"]
     assert [p.to_json() for p in pending] == expected["pending"]
 
 

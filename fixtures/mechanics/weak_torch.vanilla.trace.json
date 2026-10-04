@@ -1,0 +1,29 @@
+{
+ "format": "redfab-trace/1",
+ "fixture": "weak_torch",
+ "source": {
+  "kind": "vanilla",
+  "mc_version": "26.3",
+  "jar_sha1": "33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c",
+  "redstone_experiments": false
+ },
+ "size": [
+  5,
+  2,
+  1
+ ],
+ "initial": {
+  "0,0,0": "minecraft:stone",
+  "0,1,0": "minecraft:redstone_block",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire[east=side,north=none,power=15,south=none,west=side]",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:stone",
+  "3,0,0": "minecraft:stone",
+  "3,1,0": "minecraft:redstone_wall_torch[facing=east,lit=false]",
+  "4,0,0": "minecraft:stone",
+  "4,1,0": "minecraft:redstone_wire[east=side,north=none,power=0,south=none,west=side]"
+ },
+ "pending0": [],
+ "ticks": []
+}

@@ -7,7 +7,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | # | Stage | Status | Result |
 |---|---|---|---|
 | 0 | Setup and synthesis check | **done** 2026-10-01 | All 11 checks pass. YoWASP Yosys reads SystemVerilog, with `--threads 1` |
-| 1 | Vanilla test harness | not started | |
+| 1 | Vanilla test harness | **done** 2026-10-04 | 25 mechanics fixtures recorded in both redstone modes; all expectations met except the wiki's burnout threshold (game burns out on the 8th turn-off, not the 9th) |
 | 2 | Simulator, part 1 | not started | |
 | 3 | First circuit: one NOR gate | not started | |
 | 4 | Simulator, part 2 | not started | |
@@ -49,6 +49,23 @@ Findings and surprises from each stage go here, newest last.
 - The Mac sleeps when idle, which stalls long test runs (wall-clock gaps of 15+ minutes between 7-second tests). `./check` runs under `caffeinate -i` to prevent idle sleep while it runs.
 - `brew install verilator` also ran Homebrew's routine cleanup, which removed outdated copies of `nettle`, `p11-kit` and `pango` and some download caches.
 - Disk after stage 0: about 1.2 GB (`.tools` 420 MB, `~/.rustup` 570 MB, Python and Node packages 175 MB).
+
+### Stage 1 (2026-10-04)
+
+**Built:** `harness/` can start a void-world server in either redstone mode, freeze it, place blocks with or without updates, step exact tick counts, and snapshot every block state and pending block tick by saving the world and parsing the region files. `harness/runner.py` runs many fixtures side by side on one tick clock, each at three placements (chunk-aligned, straddling a chunk border, rotated 90°), and maps results back to the fixture's frame. `python -m harness.mechanics record|verify` drives the 25 experiments in `fixtures/mechanics/`; the format is in `trace-format.md` and the results in `mechanics.md`.
+
+**Findings that changed the plan or the design doc:**
+
+1. **Torch burnout happens on the 8th turn-off in 60 game ticks**, not the 9th as the wiki says. The torch then relights 160 ticks later by itself. The design budget stays at 7.
+2. **A stimulus issued between ticks acts as the last event of the previous tick.** The trace format now says so, and every delay expectation is written in those terms.
+3. **`setblock lever[powered=true]` does not power anything.** Inputs are driven with `redstone_block`, which also fixes how the online playground will flip levers.
+4. **`setblock redstone_wire` makes a dot, not a cross.** Lone dust placed by commands powers nothing beside it.
+5. **Saved chunk files omit default property values, and `save-all` skips chunks whose only change is a new scheduled tick.** The harness restores defaults from the server's own registry and touches a marker block in every plot chunk before each save.
+6. The two redstone modes agreed on all 25 fixtures.
+
+**Harness performance:** 75 plots, 220 ticks, both modes: about 45 s per mode plus the 66 s idle-pause proof. Snapshot parsing was the bottleneck (0.5 s per tick) until the NBT reader became lazy and decoded only the plot boxes (0.05 s).
+
+**Still unmeasured:** `/place template` above 48³ (stage 2), flip-flop timing (stage 8).
 
 ---
 

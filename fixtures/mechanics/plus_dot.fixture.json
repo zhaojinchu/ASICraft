@@ -1,0 +1,57 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "plus_dot",
+ "doc": "Lone powered dust in the dot shape with a lamp on each side. Wiki: a dot powers only the block beneath it.",
+ "size": [
+  3,
+  3,
+  3
+ ],
+ "placement": "strict",
+ "blocks": {
+  "0,1,1": "minecraft:redstone_lamp[lit=false]",
+  "1,0,1": "minecraft:redstone_block",
+  "1,1,0": "minecraft:redstone_lamp[lit=false]",
+  "1,1,1": "minecraft:redstone_wire[east=none,north=none,power=15,south=none,west=none]",
+  "1,1,2": "minecraft:redstone_lamp[lit=false]",
+  "2,1,1": "minecraft:redstone_lamp[lit=false]"
+ },
+ "events": [
+  {
+   "tick": 2,
+   "set": {
+    "0,2,1": "minecraft:glass",
+    "1,2,0": "minecraft:glass",
+    "1,2,2": "minecraft:glass",
+    "2,2,1": "minecraft:glass"
+   }
+  }
+ ],
+ "ticks": 4,
+ "expect": [
+  {
+   "tick": 2,
+   "pos": "2,1,1",
+   "state": "minecraft:redstone_lamp[lit=false]"
+  },
+  {
+   "tick": 2,
+   "pos": "0,1,1",
+   "state": "minecraft:redstone_lamp[lit=false]"
+  },
+  {
+   "tick": 2,
+   "pos": "1,1,2",
+   "state": "minecraft:redstone_lamp[lit=false]"
+  },
+  {
+   "tick": 2,
+   "pos": "1,1,0",
+   "state": "minecraft:redstone_lamp[lit=false]"
+  },
+  {
+   "from": 2,
+   "stable": true
+  }
+ ]
+}

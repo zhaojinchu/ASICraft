@@ -1,0 +1,59 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "lamp_delay",
+ "doc": "Dust pointing into a lamp. Wiki: the lamp lights at once and goes out 4 game ticks after power is lost.",
+ "size": [
+  3,
+  2,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:redstone_lamp"
+ },
+ "events": [
+  {
+   "tick": 2,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 10,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  }
+ ],
+ "ticks": 16,
+ "expect": [
+  {
+   "tick": 1,
+   "pos": "2,1,0",
+   "state": "minecraft:redstone_lamp[lit=false]"
+  },
+  {
+   "tick": 2,
+   "pos": "2,1,0",
+   "state": "minecraft:redstone_lamp[lit=true]"
+  },
+  {
+   "tick": 13,
+   "pos": "2,1,0",
+   "state": "minecraft:redstone_lamp[lit=true]"
+  },
+  {
+   "tick": 14,
+   "pos": "2,1,0",
+   "state": "minecraft:redstone_lamp[lit=false]"
+  },
+  {
+   "from": 14,
+   "stable": true
+  }
+ ]
+}
