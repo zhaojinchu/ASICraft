@@ -1,0 +1,41 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "weak_torch",
+ "doc": "Dust pointing into a stone block with a torch on its far face. Wiki: the torch turns off (this is the NOT gate).",
+ "size": [
+  5,
+  2,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "0,1,0": "minecraft:redstone_block",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:stone",
+  "3,0,0": "minecraft:stone",
+  "3,1,0": "minecraft:redstone_wall_torch[facing=east]",
+  "4,0,0": "minecraft:stone",
+  "4,1,0": "minecraft:redstone_wire"
+ },
+ "events": [],
+ "ticks": 2,
+ "expect": [
+  {
+   "tick": 0,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wall_torch[lit=false]"
+  },
+  {
+   "tick": 0,
+   "pos": "4,1,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "from": 0,
+   "stable": true
+  }
+ ]
+}

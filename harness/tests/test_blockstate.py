@@ -21,6 +21,7 @@ def test_no_defaulting():
 
 
 def test_from_palette_entry_both_shapes():
+    assert str(BlockState.from_palette("minecraft:air")) == "minecraft:air"
     assert str(BlockState.from_palette({"": "minecraft:air"})) == "minecraft:air"
     entry = {"id": "minecraft:redstone_torch", "properties": {"lit": "false"}}
     assert str(BlockState.from_palette(entry)) == "minecraft:redstone_torch[lit=false]"

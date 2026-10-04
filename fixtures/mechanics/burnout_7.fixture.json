@@ -1,0 +1,122 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "burnout_7",
+ "doc": "Inverter pulsed so its torch turns off 7 times in 60 game ticks. The wiki says burnout needs more than eight turn-offs in 60 ticks; the game (measured here) burns out on the eighth. So this torch should keep working.",
+ "size": [
+  5,
+  3,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:redstone_wire",
+  "3,0,0": "minecraft:stone",
+  "3,1,0": "minecraft:stone",
+  "3,2,0": "minecraft:redstone_torch",
+  "4,0,0": "minecraft:stone",
+  "4,1,0": "minecraft:stone",
+  "4,2,0": "minecraft:redstone_wire"
+ },
+ "events": [
+  {
+   "tick": 2,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 5,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  },
+  {
+   "tick": 8,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 11,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  },
+  {
+   "tick": 14,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 17,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  },
+  {
+   "tick": 20,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 23,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  },
+  {
+   "tick": 26,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 29,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  },
+  {
+   "tick": 32,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 35,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  },
+  {
+   "tick": 38,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 41,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  }
+ ],
+ "ticks": 220,
+ "expect": [
+  {
+   "tick": 120,
+   "pos": "3,2,0",
+   "state": "minecraft:redstone_torch[lit=true]"
+  },
+  {
+   "from": 46,
+   "stable": true
+  }
+ ]
+}
