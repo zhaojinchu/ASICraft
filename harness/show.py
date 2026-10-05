@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import signal
 import sys
 import time
 
@@ -35,8 +36,18 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     design, module = load(args.name)
 
-    server = VanillaServer("show", {"gamemode": "creative", "force-gamemode": "true", "spawn-monsters": "false"},
-                           empty_world=False)
+    properties = {
+        "gamemode": "creative",
+        "force-gamemode": "true",
+        # 26.3 turns the whitelist on by default, and ours is empty: nobody could join.
+        # The server only listens on 127.0.0.1, so it is safe to turn off.
+        "white-list": "false",
+        "enforce-whitelist": "false",
+    }
+    server = VanillaServer("show", properties, empty_world=False)
+    # Stop cleanly on Ctrl-C or `kill`, however this script was started.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     if not args.self_test:
         server.game_port = args.port
     with server:
@@ -81,12 +92,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Minecraft {server.mc_version} server running. Join localhost:{server.game_port}.")
         print(f"Levers (on top of the stone blocks): {inputs}")
         print(f"Lamps: {outputs}")
-        print("Ctrl-C to stop.")
+        print("Ctrl-C to stop.", flush=True)
         try:
             while server.is_running():
                 time.sleep(1)
         except KeyboardInterrupt:
-            pass
+            print("stopping the server...")
     return 0
 
 
