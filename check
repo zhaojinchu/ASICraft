@@ -152,8 +152,9 @@ sim_corpus() {
 sim_mutations() {
     for m in $($REDFAB list-mutations); do
         if $REDFAB check-traces --mutate "$m" fixtures/fuzz >/dev/null 2>&1 &&
+           $REDFAB check-traces --mutate "$m" fixtures/fuzz-repeaters >/dev/null 2>&1 &&
            $REDFAB check-traces --mutate "$m" fixtures/mechanics >/dev/null 2>&1; then
-            echo "mutation '$m' was NOT caught by the corpus or the mechanics fixtures"; return 1
+            echo "mutation '$m' was NOT caught by either corpus or the mechanics fixtures"; return 1
         fi
         echo "mutation '$m' caught"
     done
@@ -182,6 +183,23 @@ if [ $VANILLA = 1 ]; then
     run fuzz-vanilla      fuzz_vanilla
     run place-template    place_template
 fi
+
+# ---------------------------------------------------------------- stage 4
+
+# With repeaters in the simulator, every mechanics recording must replay; none may be
+# skipped for using a block the simulator lacks.
+sim_fixtures_complete() {
+    $REDFAB check-traces --no-skips fixtures/mechanics
+}
+
+# A second corpus of random circuits, this one with repeaters and repeater locks.
+sim_corpus_repeaters() {
+    $REDFAB check-traces --no-skips fixtures/fuzz-repeaters
+}
+
+echo "stage 4: simulator, part 2"
+run sim-fixtures-complete   sim_fixtures_complete
+run sim-corpus-repeaters    sim_corpus_repeaters
 
 # ---------------------------------------------------------------- stage 3
 
