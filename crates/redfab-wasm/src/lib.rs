@@ -16,25 +16,16 @@ use std::fmt::Write as _;
 
 fn respond(request: &[u8]) -> String {
     let result = (|| -> Result<serde_json::Value, String> {
-        let request: serde_json::Value =
-            serde_json::from_slice(request).map_err(|e| format!("request: {e}"))?;
-        let text = |key: &str| {
-            request[key]
-                .as_str()
-                .ok_or_else(|| format!("request is missing {key:?}"))
-        };
+        let request: serde_json::Value = serde_json::from_slice(request).map_err(|e| format!("request: {e}"))?;
+        let text = |key: &str| request[key].as_str().ok_or_else(|| format!("request is missing {key:?}"));
         let built = redfab_core::build::build(text("mapped")?, text("top")?, text("name")?)?;
         let mut hex = String::with_capacity(built.structure.len() * 2);
         for byte in &built.structure {
             write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
         }
-        Ok(
-            serde_json::json!({"ok": true, "design": built.design.to_json(), "structure": hex, "report": built.report}),
-        )
+        Ok(serde_json::json!({"ok": true, "design": built.design.to_json(), "structure": hex, "report": built.report}))
     })();
-    result
-        .unwrap_or_else(|error| serde_json::json!({"ok": false, "error": error}))
-        .to_string()
+    result.unwrap_or_else(|error| serde_json::json!({"ok": false, "error": error})).to_string()
 }
 
 #[unsafe(no_mangle)]

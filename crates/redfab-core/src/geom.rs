@@ -44,11 +44,7 @@ impl FromStr for Pos {
         if parts.len() != 3 {
             return Err(format!("not a position: {s:?}"));
         }
-        let num = |p: &str| {
-            p.trim()
-                .parse::<i32>()
-                .map_err(|_| format!("not a position: {s:?}"))
-        };
+        let num = |p: &str| p.trim().parse::<i32>().map_err(|_| format!("not a position: {s:?}"));
         Ok(Pos::new(num(parts[0])?, num(parts[1])?, num(parts[2])?))
     }
 }
@@ -66,34 +62,13 @@ pub enum Dir {
 
 impl Dir {
     /// The game's `Direction.values()` order.
-    pub const ALL: [Dir; 6] = [
-        Dir::Down,
-        Dir::Up,
-        Dir::North,
-        Dir::South,
-        Dir::West,
-        Dir::East,
-    ];
+    pub const ALL: [Dir; 6] = [Dir::Down, Dir::Up, Dir::North, Dir::South, Dir::West, Dir::East];
     /// The game's `Direction.Plane.HORIZONTAL` order.
     pub const HORIZONTAL: [Dir; 4] = [Dir::North, Dir::East, Dir::South, Dir::West];
     /// The order in which a block update is delivered to the six neighbours.
-    pub const UPDATE_ORDER: [Dir; 6] = [
-        Dir::West,
-        Dir::East,
-        Dir::Down,
-        Dir::Up,
-        Dir::North,
-        Dir::South,
-    ];
+    pub const UPDATE_ORDER: [Dir; 6] = [Dir::West, Dir::East, Dir::Down, Dir::Up, Dir::North, Dir::South];
     /// The order in which neighbours are asked to update their shape.
-    pub const SHAPE_ORDER: [Dir; 6] = [
-        Dir::West,
-        Dir::East,
-        Dir::North,
-        Dir::South,
-        Dir::Down,
-        Dir::Up,
-    ];
+    pub const SHAPE_ORDER: [Dir; 6] = [Dir::West, Dir::East, Dir::North, Dir::South, Dir::Down, Dir::Up];
 
     pub fn delta(self) -> (i32, i32, i32) {
         match self {
@@ -114,6 +89,17 @@ impl Dir {
             Dir::South => Dir::North,
             Dir::West => Dir::East,
             Dir::East => Dir::West,
+        }
+    }
+
+    /// The next horizontal direction clockwise, seen from above. Up and down stay put.
+    pub fn clockwise(self) -> Dir {
+        match self {
+            Dir::North => Dir::East,
+            Dir::East => Dir::South,
+            Dir::South => Dir::West,
+            Dir::West => Dir::North,
+            other => other,
         }
     }
 

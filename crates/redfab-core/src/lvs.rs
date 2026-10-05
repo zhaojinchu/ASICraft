@@ -14,16 +14,10 @@ use crate::netlist::Netlist;
 /// Returns one message per mismatch; an empty list means the layout is correct.
 pub fn lvs(netlist: &Netlist, circuit: &Circuit, probes: &[Pos], lamps: &[Pos]) -> Vec<String> {
     let mut problems = Vec::new();
-    let at = |net: usize| {
-        circuit.nets[net]
-            .first()
-            .map_or_else(|| "?".to_string(), Pos::to_string)
-    };
+    let at = |net: usize| circuit.nets[net].first().map_or_else(|| "?".to_string(), Pos::to_string);
 
     for (from, to) in &circuit.one_way {
-        problems.push(format!(
-            "power passes from the wire at {from} to the wire at {to} but not back"
-        ));
+        problems.push(format!("power passes from the wire at {from} to the wire at {to} but not back"));
     }
 
     // Every net needs exactly one driver.
@@ -35,10 +29,7 @@ pub fn lvs(netlist: &Netlist, circuit: &Circuit, probes: &[Pos], lamps: &[Pos]) 
     }
     for net in 0..circuit.nets.len() {
         match drivers.get(&net).map_or(&[][..], Vec::as_slice) {
-            [] => problems.push(format!(
-                "the wires at {} are connected to no driver",
-                at(net)
-            )),
+            [] => problems.push(format!("the wires at {} are connected to no driver", at(net))),
             [_] => {}
             many => {
                 let list: Vec<String> = many.iter().map(Pos::to_string).collect();
@@ -53,35 +44,24 @@ pub fn lvs(netlist: &Netlist, circuit: &Circuit, probes: &[Pos], lamps: &[Pos]) 
     }
     for component in circuit.torches.iter().chain(&circuit.sources) {
         for other in &component.direct {
-            problems.push(format!("the block at {} powers the component at {other} directly, with no wire between them", component.pos));
+            problems.push(format!(
+                "the block at {} powers the component at {other} directly, with no wire between them",
+                component.pos
+            ));
         }
     }
 
     // Inputs anchor the matching.
     let mut net_map: Vec<Option<usize>> = vec![None; netlist.net_count];
     for (i, port) in netlist.inputs.iter().enumerate() {
-        match circuit
-            .sources
-            .iter()
-            .find(|s| s.pos == probes[i])
-            .map(|s| s.drives.as_slice())
-        {
+        match circuit.sources.iter().find(|s| s.pos == probes[i]).map(|s| s.drives.as_slice()) {
             Some([net]) => net_map[port.net] = Some(*net),
-            Some([]) | None => problems.push(format!(
-                "input {} at {} drives no wire",
-                port.name, probes[i]
-            )),
-            Some(_) => problems.push(format!(
-                "input {} at {} drives more than one net",
-                port.name, probes[i]
-            )),
+            Some([]) | None => problems.push(format!("input {} at {} drives no wire", port.name, probes[i])),
+            Some(_) => problems.push(format!("input {} at {} drives more than one net", port.name, probes[i])),
         }
     }
     for source in circuit.sources.iter().filter(|s| !probes.contains(&s.pos)) {
-        problems.push(format!(
-            "there is a redstone block at {} that is not a design input",
-            source.pos
-        ));
+        problems.push(format!("there is a redstone block at {} that is not a design input", source.pos));
     }
 
     // Cells: match forward from mapped nets.
@@ -93,12 +73,7 @@ pub fn lvs(netlist: &Netlist, circuit: &Circuit, probes: &[Pos], lamps: &[Pos]) 
             if torch_of_cell[c].is_some() {
                 continue;
             }
-            let Some(mut want) = cell
-                .inputs
-                .iter()
-                .map(|&n| net_map[n])
-                .collect::<Option<Vec<usize>>>()
-            else {
+            let Some(mut want) = cell.inputs.iter().map(|&n| net_map[n]).collect::<Option<Vec<usize>>>() else {
                 continue;
             };
             want.sort_unstable();
@@ -114,10 +89,8 @@ pub fn lvs(netlist: &Netlist, circuit: &Circuit, probes: &[Pos], lamps: &[Pos]) 
                 progress = true;
                 match circuit.torches[t].drives.as_slice() {
                     [net] => net_map[cell.output] = Some(*net),
-                    [] => problems.push(format!(
-                        "the torch at {} (cell {}) drives no wire",
-                        circuit.torches[t].pos, cell.name
-                    )),
+                    [] => problems
+                        .push(format!("the torch at {} (cell {}) drives no wire", circuit.torches[t].pos, cell.name)),
                     _ => problems.push(format!(
                         "the torch at {} (cell {}) drives more than one net",
                         circuit.torches[t].pos, cell.name
@@ -150,38 +123,24 @@ pub fn lvs(netlist: &Netlist, circuit: &Circuit, probes: &[Pos], lamps: &[Pos]) 
     // Outputs.
     for (j, port) in netlist.outputs.iter().enumerate() {
         let Some(lamp) = circuit.lamps.iter().find(|l| l.pos == lamps[j]) else {
-            problems.push(format!(
-                "output {}: there is no lamp at {}",
-                port.name, lamps[j]
-            ));
+            problems.push(format!("output {}: there is no lamp at {}", port.name, lamps[j]));
             continue;
         };
         match (net_map[port.net], lamp.reads.as_slice()) {
             (Some(want), [got]) if want == *got => {}
-            (_, []) => problems.push(format!(
-                "output {}: nothing powers the lamp at {}",
-                port.name, lamp.pos
-            )),
-            _ => problems.push(format!(
-                "output {}: the lamp at {} is not powered by exactly its own net",
-                port.name, lamp.pos
-            )),
+            (_, []) => problems.push(format!("output {}: nothing powers the lamp at {}", port.name, lamp.pos)),
+            _ => problems
+                .push(format!("output {}: the lamp at {} is not powered by exactly its own net", port.name, lamp.pos)),
         }
     }
     for lamp in circuit.lamps.iter().filter(|l| !lamps.contains(&l.pos)) {
-        problems.push(format!(
-            "there is a lamp at {} that is not a design output",
-            lamp.pos
-        ));
+        problems.push(format!("there is a lamp at {} that is not a design output", lamp.pos));
     }
 
     // Nothing left over.
     for net in 0..circuit.nets.len() {
         if !net_map.contains(&Some(net)) && drivers.get(&net).is_some_and(|d| d.len() == 1) {
-            problems.push(format!(
-                "the wires at {} belong to no net of the design",
-                at(net)
-            ));
+            problems.push(format!("the wires at {} belong to no net of the design", at(net)));
         }
     }
     problems
@@ -198,14 +157,7 @@ fn describe_reads(torch: &Component, circuit: &Circuit) -> String {
     if torch.reads.is_empty() {
         return "nothing powers it".to_string();
     }
-    let nets: Vec<String> = torch
-        .reads
-        .iter()
-        .map(|&n| {
-            circuit.nets[n]
-                .first()
-                .map_or_else(|| "?".to_string(), Pos::to_string)
-        })
-        .collect();
+    let nets: Vec<String> =
+        torch.reads.iter().map(|&n| circuit.nets[n].first().map_or_else(|| "?".to_string(), Pos::to_string)).collect();
     format!("powered by the nets at {}", nets.join(", "))
 }

@@ -1,0 +1,4 @@
+# Wider lines and fewer forced line breaks than the defaults: the block and
+# signal tables read better when one case fits on one line.
+max_width = 120
+use_small_heuristics = "Max"

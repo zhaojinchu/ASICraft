@@ -100,10 +100,7 @@ pub fn build(mapped_json: &str, top: &str, name: &str) -> Result<Built, String> 
 
     let problems = check_world(&world, &netlist, &realized.probes, &realized.lamps);
     if !problems.is_empty() {
-        return Err(format!(
-            "the layout does not implement the netlist:\n  - {}",
-            problems.join("\n  - ")
-        ));
+        return Err(format!("the layout does not implement the netlist:\n  - {}", problems.join("\n  - ")));
     }
 
     let (sx, sy, sz) = world.size();
@@ -126,16 +123,10 @@ pub fn build(mapped_json: &str, top: &str, name: &str) -> Result<Built, String> 
             .outputs
             .iter()
             .zip(&realized.lamps)
-            .map(|(port, lamp)| OutputPin {
-                name: port.name.clone(),
-                lamp: lamp.to_string(),
-            })
+            .map(|(port, lamp)| OutputPin { name: port.name.clone(), lamp: lamp.to_string() })
             .collect(),
         settle_ticks: library.nor.delay + LAMP_OFF_DELAY,
-        blocks: world
-            .iter()
-            .map(|(pos, block)| (pos.to_string(), block.to_string()))
-            .collect(),
+        blocks: world.iter().map(|(pos, block)| (pos.to_string(), block.to_string())).collect(),
     };
     let (cols, rows) = layout.size();
     let report = format!(
@@ -145,11 +136,7 @@ pub fn build(mapped_json: &str, top: &str, name: &str) -> Result<Built, String> 
         design.blocks.len(),
         design.settle_ticks,
     );
-    Ok(Built {
-        structure: structure_file(&world),
-        design,
-        report,
-    })
+    Ok(Built { structure: structure_file(&world), design, report })
 }
 
 /// The layout-versus-netlist check and the signal-strength check on a block world.
@@ -161,19 +148,10 @@ pub fn check_world(world: &World, netlist: &Netlist, probes: &[Pos], lamps: &[Po
 }
 
 /// Re-checks a design file against a netlist. Used to prove that broken layouts are caught.
-pub fn check_design(
-    design_json: &str,
-    mapped_json: &str,
-    top: &str,
-) -> Result<Vec<String>, String> {
+pub fn check_design(design_json: &str, mapped_json: &str, top: &str) -> Result<Vec<String>, String> {
     let design = Design::from_json(design_json)?;
     let netlist = Netlist::from_yosys_json(mapped_json, top, &Library::builtin()?)?;
-    Ok(check_world(
-        &design.world()?,
-        &netlist,
-        &design.probes()?,
-        &design.lamps()?,
-    ))
+    Ok(check_world(&design.world()?, &netlist, &design.probes()?, &design.lamps()?))
 }
 
 /// Applies input vectors to a design in the simulator, one after another, and
@@ -183,8 +161,7 @@ pub fn check_design(
 /// result is a JSON list of objects mapping output names to 0 or 1.
 pub fn simulate(design_json: &str, vectors_json: &str) -> Result<String, String> {
     let design = Design::from_json(design_json)?;
-    let vectors: Vec<BTreeMap<String, u8>> =
-        serde_json::from_str(vectors_json).map_err(|e| format!("vectors: {e}"))?;
+    let vectors: Vec<BTreeMap<String, u8>> = serde_json::from_str(vectors_json).map_err(|e| format!("vectors: {e}"))?;
     let probes = design.probes()?;
     let lamps = design.lamps()?;
     let mut sim = Sim::new(design.world()?);
@@ -192,14 +169,8 @@ pub fn simulate(design_json: &str, vectors_json: &str) -> Result<String, String>
     for vector in &vectors {
         let mut changes = Vec::new();
         for (input, &probe) in design.inputs.iter().zip(&probes) {
-            let value = *vector
-                .get(&input.name)
-                .ok_or_else(|| format!("vector is missing input {}", input.name))?;
-            let block: Block = if value != 0 {
-                input.on.parse()?
-            } else {
-                input.off.parse()?
-            };
+            let value = *vector.get(&input.name).ok_or_else(|| format!("vector is missing input {}", input.name))?;
+            let block: Block = if value != 0 { input.on.parse()? } else { input.off.parse()? };
             changes.push((probe, block));
         }
         // Same order as the trace format gives stimuli that share a tick.
@@ -211,17 +182,11 @@ pub fn simulate(design_json: &str, vectors_json: &str) -> Result<String, String>
             sim.step();
         }
         if !sim.pending().is_empty() {
-            return Err(format!(
-                "the design is still active {} ticks after an input change",
-                design.settle_ticks
-            ));
+            return Err(format!("the design is still active {} ticks after an input change", design.settle_ticks));
         }
         let mut outputs = BTreeMap::new();
         for (output, &lamp) in design.outputs.iter().zip(&lamps) {
-            outputs.insert(
-                output.name.clone(),
-                u8::from(sim.world().get(lamp) == Block::Lamp { lit: true }),
-            );
+            outputs.insert(output.name.clone(), u8::from(sim.world().get(lamp) == Block::Lamp { lit: true }));
         }
         results.push(outputs);
     }
@@ -244,10 +209,7 @@ mod tests {
     fn a_nor_gate_builds_and_computes_nor() {
         let built = build(NOR2, "top", "nor2").unwrap();
         let vectors = r#"[{"a":0,"b":0},{"a":0,"b":1},{"a":1,"b":0},{"a":1,"b":1}]"#;
-        assert_eq!(
-            outputs(&built.design, vectors),
-            r#"[{"y":1},{"y":0},{"y":0},{"y":0}]"#
-        );
+        assert_eq!(outputs(&built.design, vectors), r#"[{"y":1},{"y":0},{"y":0},{"y":0}]"#);
     }
 
     #[test]
@@ -263,20 +225,10 @@ mod tests {
     #[test]
     fn removing_the_torch_is_caught() {
         let mut design = build(NOR2, "top", "nor2").unwrap().design;
-        let torch = design
-            .blocks
-            .iter()
-            .find(|(_, s)| s.contains("wall_torch"))
-            .map(|(p, _)| p.clone())
-            .unwrap();
+        let torch = design.blocks.iter().find(|(_, s)| s.contains("wall_torch")).map(|(p, _)| p.clone()).unwrap();
         design.blocks.remove(&torch);
         let problems = check_design(&design.to_json(), NOR2, "top").unwrap();
-        assert!(
-            problems
-                .iter()
-                .any(|p| p.contains("no torch implements cell g")),
-            "{problems:?}"
-        );
+        assert!(problems.iter().any(|p| p.contains("no torch implements cell g")), "{problems:?}");
     }
 
     #[test]
@@ -294,14 +246,8 @@ mod tests {
     #[test]
     fn designs_needing_routing_are_refused_for_now() {
         let two_cells = NOR2
-            .replace(
-                r#""cells":{"#,
-                r#""cells":{"h":{"type":"NOT","connections":{"A":[4],"Y":[5]}},"#,
-            )
-            .replace(
-                r#""y":{"direction":"output","bits":[4]}"#,
-                r#""y":{"direction":"output","bits":[5]}"#,
-            );
+            .replace(r#""cells":{"#, r#""cells":{"h":{"type":"NOT","connections":{"A":[4],"Y":[5]}},"#)
+            .replace(r#""y":{"direction":"output","bits":[4]}"#, r#""y":{"direction":"output","bits":[5]}"#);
         let err = build(&two_cells, "top", "x").err().unwrap();
         assert!(err.contains("placement and routing"), "{err}");
     }

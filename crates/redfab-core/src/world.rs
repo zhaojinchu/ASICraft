@@ -12,14 +12,8 @@ pub struct World {
 impl World {
     /// An all-air world covering `0..size` on each axis.
     pub fn new(size: (i32, i32, i32)) -> World {
-        assert!(
-            size.0 > 0 && size.1 > 0 && size.2 > 0,
-            "world size must be positive"
-        );
-        World {
-            size,
-            blocks: vec![Block::Air; (size.0 * size.1 * size.2) as usize],
-        }
+        assert!(size.0 > 0 && size.1 > 0 && size.2 > 0, "world size must be positive");
+        World { size, blocks: vec![Block::Air; (size.0 * size.1 * size.2) as usize] }
     }
 
     pub fn size(&self) -> (i32, i32, i32) {
@@ -27,9 +21,7 @@ impl World {
     }
 
     pub fn contains(&self, pos: Pos) -> bool {
-        (0..self.size.0).contains(&pos.x)
-            && (0..self.size.1).contains(&pos.y)
-            && (0..self.size.2).contains(&pos.z)
+        (0..self.size.0).contains(&pos.x) && (0..self.size.1).contains(&pos.y) && (0..self.size.2).contains(&pos.z)
     }
 
     // Same cell order as Litematica and vanilla sections: y, then z, then x.
@@ -38,11 +30,7 @@ impl World {
     }
 
     pub fn get(&self, pos: Pos) -> Block {
-        if self.contains(pos) {
-            self.blocks[self.index(pos)]
-        } else {
-            Block::Air
-        }
+        if self.contains(pos) { self.blocks[self.index(pos)] } else { Block::Air }
     }
 
     /// Panics if `pos` is outside the box; callers decide what that means for them.
