@@ -232,6 +232,48 @@ def fixtures() -> list[Fixture]:
     b.expects(0, (2, 2, 0), f"{D}[power=15]").expects(0, (0, 1, 0), f"{D}[power=15]").expects(0, (1, 1, 2), f"{D}[power=0]")
     out.append(b.stable(0).build())
 
+    # -- repeaters (stage 4)
+    R = "minecraft:repeater"
+
+    b = Build("repeater_on_glass", "A repeater standing on glass, between two dust lines on glass. The tile library puts everything on glass, so this must work.", 12)
+    b.floor(0, 0, 3, 0, block=G).put((1, 1, 0), D).put((2, 1, 0), f"{R}[facing=west,delay=1]").put((3, 1, 0), D)
+    b.at(2, (0, 1, 0), RB).at(8, (0, 1, 0), AIR)
+    b.expects(3, (3, 1, 0), f"{D}[power=0]").expects(4, (3, 1, 0), f"{D}[power=15]").expects(10, (3, 1, 0), f"{D}[power=0]")
+    out.append(b.stable(10).build())
+
+    b = Build("repeater_strong_front", "A repeater facing a stone block, with dust on the far side of the block. Wiki: a repeater strongly powers the block in front, and a strongly powered block powers dust.", 12)
+    b.floor(0, 0, 4, 0).put((1, 1, 0), D).put((2, 1, 0), f"{R}[facing=west,delay=1]").put((3, 1, 0), S).put((4, 1, 0), D)
+    b.at(2, (0, 1, 0), RB)
+    b.expects(3, (4, 1, 0), f"{D}[power=0]").expects(4, (4, 1, 0), f"{D}[power=15]")
+    out.append(b.stable(4).build())
+
+    b = Build("repeater_side_dust", "Dust beside a repeater (at its side, not its front or back). Wiki: dust connects to a repeater only at its front and back, and a repeater powers only what is in front.", 12)
+    b.floor(0, 0, 3, 1).put((1, 1, 0), D).put((2, 1, 0), f"{R}[facing=west,delay=1]").put((3, 1, 0), D).put((2, 1, 1), D)
+    b.at(2, (0, 1, 0), RB)
+    b.expects(4, (3, 1, 0), f"{D}[power=15]").expects(4, (2, 1, 1), f"{D}[power=0,north=none]").expects(12, (2, 1, 1), f"{D}[power=0]")
+    out.append(b.stable(4).build())
+
+    b = Build("repeater_pulse_stretch", "A 2-tick pulse into a repeater set to 3 (6 game ticks). Wiki: a repeater stretches an on-pulse shorter than its delay to the length of its delay.", 24)
+    b.floor(0, 0, 3, 0).put((1, 1, 0), D).put((2, 1, 0), f"{R}[facing=west,delay=3]").put((3, 1, 0), D)
+    b.at(2, (0, 1, 0), RB).at(4, (0, 1, 0), AIR)
+    b.expects(7, (3, 1, 0), f"{D}[power=0]").expects(8, (3, 1, 0), f"{D}[power=15]")
+    b.expects(13, (3, 1, 0), f"{D}[power=15]").expects(14, (3, 1, 0), f"{D}[power=0]")
+    out.append(b.stable(14).build())
+
+    b = Build("lock_hold_release", "A data repeater with a lock repeater facing into its side. Wiki: while locked it keeps its output whatever its input does; when released it follows its input again after its delay.", 40)
+    b.floor(0, 0, 3, 3).put((1, 1, 0), D).put((2, 1, 0), f"{R}[facing=west,delay=1]").put((3, 1, 0), D)
+    b.put((2, 1, 1), f"{R}[facing=south,delay=1]").put((2, 1, 2), D)
+    data, lock = (0, 1, 0), (2, 1, 3)
+    b.at(2, lock, RB)      # lock engages at 4 with the data repeater off
+    b.at(8, data, RB)      # input rises while locked: no change
+    b.at(16, lock, AIR)    # lock releases at 18; the repeater then turns on at 20
+    b.at(24, lock, RB)     # lock again at 26 with the repeater on
+    b.at(28, data, AIR)    # input falls while locked: no change
+    b.expects(4, (2, 1, 0), f"{R}[locked=true,powered=false]").expects(14, (3, 1, 0), f"{D}[power=0]")
+    b.expects(18, (2, 1, 0), f"{R}[locked=false]").expects(19, (3, 1, 0), f"{D}[power=0]").expects(20, (3, 1, 0), f"{D}[power=15]")
+    b.expects(26, (2, 1, 0), f"{R}[locked=true,powered=true]").expects(40, (3, 1, 0), f"{D}[power=15]")
+    out.append(b.stable(26).build())
+
     names = [f.name for f in out]
     assert len(names) == len(set(names)), "duplicate fixture names"
     return out

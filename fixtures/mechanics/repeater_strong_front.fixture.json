@@ -1,0 +1,47 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "repeater_strong_front",
+ "doc": "A repeater facing a stone block, with dust on the far side of the block. Wiki: a repeater strongly powers the block in front, and a strongly powered block powers dust.",
+ "size": [
+  5,
+  2,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:repeater[delay=1,facing=west]",
+  "3,0,0": "minecraft:stone",
+  "3,1,0": "minecraft:stone",
+  "4,0,0": "minecraft:stone",
+  "4,1,0": "minecraft:redstone_wire"
+ },
+ "events": [
+  {
+   "tick": 2,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  }
+ ],
+ "ticks": 12,
+ "expect": [
+  {
+   "tick": 3,
+   "pos": "4,1,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "tick": 4,
+   "pos": "4,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "from": 4,
+   "stable": true
+  }
+ ]
+}

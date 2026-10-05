@@ -1,0 +1,61 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "repeater_pulse_stretch",
+ "doc": "A 2-tick pulse into a repeater set to 3 (6 game ticks). Wiki: a repeater stretches an on-pulse shorter than its delay to the length of its delay.",
+ "size": [
+  4,
+  2,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:stone",
+  "1,0,0": "minecraft:stone",
+  "1,1,0": "minecraft:redstone_wire",
+  "2,0,0": "minecraft:stone",
+  "2,1,0": "minecraft:repeater[delay=3,facing=west]",
+  "3,0,0": "minecraft:stone",
+  "3,1,0": "minecraft:redstone_wire"
+ },
+ "events": [
+  {
+   "tick": 2,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 4,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  }
+ ],
+ "ticks": 24,
+ "expect": [
+  {
+   "tick": 7,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "tick": 8,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 13,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 14,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "from": 14,
+   "stable": true
+  }
+ ]
+}
