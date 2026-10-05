@@ -22,6 +22,11 @@ The staged build plan and its status are in `PLAN.md`. Decisions made after this
 | Wire power rule | Not decided | The game's **Redstone Experiments** evaluator: a wire network settles before any neighbour is notified | The default mode's intermediate dust states depend on block position. Circuits must behave the same in both modes, and the harness checks both |
 | Races | "Order fuzzing" as a test (§7) | Built into the simulator: tick order and update-delivery order can be shuffled, and a circuit whose result changes has a race | Stage 2 found the game itself is order-dependent on about 1–2% of random circuits, by position in default mode and by a random choice in experiments mode |
 | Extractor / circuit graph | Stage 2 | Stage 3, with the layout-versus-netlist check that uses it | The simulator no longer needs it |
+| Where Yosys runs | The PyPI build natively, the npm build in the browser | **The npm build everywhere**, under Node on your machine (`synth/yosys.mjs`) | Stage 3 found that technology mapping (ABC) silently kills the PyPI build under its runtime. The npm build is the one the browser uses anyway |
+| Cell library | NOT, NOR, OR, AND, BUF, DFF | `NOT`, `NOR2`, `NOR3` (one NOR tile with one to three inputs) plus `BUF` | ABC refuses a library without a buffer. `BUF` is priced so it is never preferred, and a buffer in a netlist becomes plain wire |
+| Tile grid | "Pick P and H after building NOR3, crossing and DFF" | Provisionally **5 × 5 blocks, 4 high**, glass floor, ports at edge midpoints at y = 1, gates take inputs on W/N/S and drive E (`cells/README.md`) | 5 is the smallest pitch at which one wire can bridge another inside a tile. Stage 5 confirms or changes it |
+| How the layout is read back | A rule-based extractor | **By asking the simulator**: raise one net, or switch one torch or input on, and see what it powers (`extract.rs`) | The extractor then cannot disagree with the rules that were checked against the game |
+| Driving inputs | Levers | The lever sits on a stone block; tests and the playground swap that block for a redstone block | A command that changes a lever's state powers nothing (stage 1) |
 
 ---
 

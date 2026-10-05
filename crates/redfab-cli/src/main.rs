@@ -15,6 +15,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("check-traces") => check_traces(&args[1..]),
+        Some("build") => build_command(&args[1..]),
+        Some("lvs") => lvs_command(&args[1..]),
+        Some("simulate") => simulate_command(&args[1..]),
         Some("replay") => replay_report_command(&args[1..]),
         Some("structure") => structure_command(&args[1..]),
         Some("structure-pattern") => structure_pattern_command(&args[1..]),
@@ -186,6 +189,160 @@ fn structure_pattern_command(args: &[String]) -> Result<bool, String> {
     }
     fs::write(out, redfab_core::structure::structure_file(&world))
         .map_err(|e| format!("{out}: {e}"))?;
+    Ok(true)
+}
+
+/// The Yosys commands that map a design to the tile library.
+const MAP_SCRIPT: &str = "\
+read_slang --threads 1 --top {top} top.sv
+proc
+opt
+techmap
+opt
+abc -liberty cells.lib
+opt_clean
+write_json mapped.json
+write_verilog -noattr mapped.v
+";
+
+/// The Yosys commands that prove the mapped netlist equals the source.
+const EQUIV_SCRIPT: &str = "\
+read_slang --threads 1 --top {top} top.sv
+proc
+opt_clean
+rename {top} gold
+design -stash gold
+read_verilog mapped.v
+read_verilog cells.v
+hierarchy -top {top}
+flatten
+proc
+opt_clean
+rename {top} gate
+design -stash gate
+design -copy-from gold -as gold gold
+design -copy-from gate -as gate gate
+equiv_make gold gate equiv
+hierarchy -top equiv
+equiv_simple
+equiv_induct
+equiv_status -assert
+";
+
+/// `redfab build SOURCE.sv [--top NAME] -o DIR`
+///
+/// Synthesizes the design to the tile library, proves the mapped netlist equals
+/// the source, lays it out, computes its settled state and checks the layout
+/// against the netlist. Writes `design.json`, `world.nbt` and `report.txt` to DIR.
+fn build_command(args: &[String]) -> Result<bool, String> {
+    let mut source = None;
+    let mut top = "top".to_string();
+    let mut out = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--top" => top = it.next().ok_or("--top needs a module name")?.clone(),
+            "-o" => out = Some(PathBuf::from(it.next().ok_or("-o needs a directory")?)),
+            other => source = Some(PathBuf::from(other)),
+        }
+    }
+    let (Some(source), Some(out)) = (source, out) else {
+        return Err("usage: redfab build SOURCE.sv [--top NAME] -o DIR".into());
+    };
+    let name = out
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("design")
+        .to_string();
+
+    let library = redfab_core::tile::Library::builtin()?;
+    fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let write = |file: &str, data: &[u8]| {
+        fs::write(out.join(file), data).map_err(|e| format!("{}: {e}", out.join(file).display()))
+    };
+    write("top.sv", read(&source)?.as_bytes())?;
+    write("cells.lib", library.liberty().as_bytes())?;
+    write("cells.v", library.verilog_models().as_bytes())?;
+    write("map.ys", MAP_SCRIPT.replace("{top}", &top).as_bytes())?;
+    write("equiv.ys", EQUIV_SCRIPT.replace("{top}", &top).as_bytes())?;
+    for stale in [
+        "mapped.json",
+        "mapped.v",
+        "design.json",
+        "world.nbt",
+        "report.txt",
+    ] {
+        let _ = fs::remove_file(out.join(stale));
+    }
+
+    run_yosys(&out, "map.ys").map_err(|e| format!("synthesis failed: {e}"))?;
+    run_yosys(&out, "equiv.ys")
+        .map_err(|e| format!("the mapped netlist is NOT proven equal to the source: {e}"))?;
+
+    let built = redfab_core::build::build(&read(&out.join("mapped.json"))?, &top, &name)?;
+    write("design.json", built.design.to_json().as_bytes())?;
+    write("world.nbt", &built.structure)?;
+    let report = format!(
+        "{}  mapped netlist proven equal to the source\n",
+        built.report
+    );
+    write("report.txt", report.as_bytes())?;
+    print!("{report}");
+    Ok(true)
+}
+
+/// Runs the WebAssembly build of Yosys (under Node) on the files in `dir`.
+fn run_yosys(dir: &Path, script: &str) -> Result<(), String> {
+    let runner = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../synth/yosys.mjs");
+    let output = std::process::Command::new("node")
+        .arg(&runner)
+        .arg(dir)
+        .arg(script)
+        .output()
+        .map_err(|e| format!("could not run node: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}\n(full log: {})",
+            String::from_utf8_lossy(&output.stderr).trim(),
+            dir.join(format!("{script}.log")).display()
+        ))
+    }
+}
+
+/// `redfab lvs DESIGN.json MAPPED.json [--top NAME]`: checks a design file's
+/// blocks against a netlist. Prints each mismatch and fails if there is any.
+fn lvs_command(args: &[String]) -> Result<bool, String> {
+    let (design, mapped, top) = match args {
+        [design, mapped] => (design, mapped, "top"),
+        [design, mapped, flag, top] if flag == "--top" => (design, mapped, top.as_str()),
+        _ => return Err("usage: redfab lvs DESIGN.json MAPPED.json [--top NAME]".into()),
+    };
+    let problems = redfab_core::build::check_design(
+        &read(Path::new(design))?,
+        &read(Path::new(mapped))?,
+        top,
+    )?;
+    for problem in &problems {
+        println!("{problem}");
+    }
+    if problems.is_empty() {
+        println!("layout matches the netlist");
+    }
+    Ok(problems.is_empty())
+}
+
+/// `redfab simulate DESIGN.json VECTORS.json`: applies input vectors in the
+/// simulator and prints the outputs as JSON.
+fn simulate_command(args: &[String]) -> Result<bool, String> {
+    let [design, vectors] = args else {
+        return Err("usage: redfab simulate DESIGN.json VECTORS.json".into());
+    };
+    println!(
+        "{}",
+        redfab_core::build::simulate(&read(Path::new(design))?, &read(Path::new(vectors))?)?
+    );
     Ok(true)
 }
 

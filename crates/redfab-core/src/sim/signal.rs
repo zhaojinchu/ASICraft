@@ -30,6 +30,13 @@ impl Sim {
     fn own_signal(&self, pos: Pos, block: Block, dir: Dir, wires: bool) -> u8 {
         match block {
             Block::RedstoneBlock => 15,
+            Block::Lever { powered, .. } => {
+                if powered {
+                    15
+                } else {
+                    0
+                }
+            }
             Block::Torch { lit } => {
                 let blocked =
                     dir == Dir::Up && self.mutation != Some(Mutation::TorchPowersBlockBelow);
@@ -79,6 +86,8 @@ impl Sim {
                 }
             }
             Block::Wire(_) => self.own_signal(pos, block, dir, wires),
+            // A lever strongly powers only the block it is mounted on.
+            Block::Lever { powered: true, .. } if block.lever_mount() == Some(dir.opposite()) => 15,
             _ => 0,
         }
     }

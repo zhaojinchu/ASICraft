@@ -9,7 +9,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | 0 | Setup and synthesis check | **done** 2026-10-01 | All 11 checks pass. YoWASP Yosys reads SystemVerilog, with `--threads 1` |
 | 1 | Vanilla test harness | **done** 2026-10-04 | 25 mechanics fixtures recorded in both redstone modes; all expectations met except the wiki's burnout threshold (game burns out on the 8th turn-off, not the 9th) |
 | 2 | Simulator, part 1 | **done** 2026-10-05 | Block-level simulator matches all 417 recorded traces (36 mechanics, 381 random); structure files load in the game |
-| 3 | First circuit: one NOR gate | not started | |
+| 3 | First circuit: one NOR gate | **done** 2026-10-05 | `not1`, `nor2`, `nor3` go from SystemVerilog to working circuits in the game; every check from the plan passes |
 | 4 | Simulator, part 2 | not started | |
 | 5 | Full combinational tile set | not started | |
 | 6 | Placement and routing | not started | |
@@ -88,6 +88,32 @@ Findings and surprises from each stage go here, newest last.
 **Measured along the way:** the 26.3 structure format uses `{id, properties}` palette entries; `/place template` reads `generated/<ns>/structure/`; a 70×2×70 structure loads, so there is no 48-block limit there.
 
 **Not done:** the SVG layer view (the text view in `redfab replay` has been enough so far).
+
+### Stage 3 (2026-10-05)
+
+**Built:** the whole path once, for single-gate designs.
+
+- `cells/`: four tiles as text (`input`, `output`, `wire`, `nor`) with their rules in `cells/README.md`; the parser rejects a tile that touches its border or has a non-glass floor.
+- `redfab build top.sv -o DIR`: Yosys maps to the library and proves the mapped netlist equal to the source; the core reads the netlist, places the tiles, computes the settled all-inputs-off state, reads the circuit back from the blocks, and checks it against the netlist. Output: `design.json`, `world.nbt`, `report.txt`.
+- `harness/design.py`: Verilator versus the block simulator on every input combination; the same in the game; broken copies. `harness/show.py NAME` starts a server you can join to look at a build.
+- `crates/redfab-wasm`: the core as a WebAssembly module with a three-function interface.
+
+**Results** (designs `not1`, `nor2`, `nor3`):
+
+- Simulator and Verilator agree on every input combination (2, 4 and 8).
+- In the game the outputs are right at three placements in both redstone modes, and the recorded traces equal the simulator's.
+- `world.nbt` placed strictly does not move in 20 ticks; placed with updates it settles to the same state.
+- Broken copies are rejected: four by the netlist check (cut wire, missing torch, redstone block in place of the torch, shorted inputs) and two in the game (cut wire, stuck output). A tampered netlist fails the equivalence proof.
+- The WebAssembly build's `design.json` and `world.nbt` are byte-identical to the native ones.
+- With time running normally on an ordinary flat world, the NOR gate answers correctly through the server console.
+
+**Findings:**
+
+1. **ABC does not run in the PyPI build of YoWASP Yosys** under its Python runtime: the process exits during the `abc` pass, with status 0 and no error. The npm build under Node works, so all synthesis goes through Node. The stage 0 checks that compare the two builds on `read_slang` stay as they are.
+2. **ABC needs a buffer cell in the library** ("Cannot find buffer gate"). `BUF` is in the Liberty file with a high area; the importer turns buffers into wire.
+3. **The order of stimuli within one tick matters.** When two inputs of the NOR swap values in the same tick, the gate sees one of the intermediate states and may schedule a torch tick that changes nothing. The trace format now fixes that order (height, then x, then z), and the harness and the replay both follow it.
+
+**Limits, by design:** the placer handles one gate fed directly by inputs. Anything else is refused with a message until stage 6. Constants are refused until stage 5 adds tie tiles.
 
 ---
 

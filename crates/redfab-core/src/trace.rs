@@ -121,7 +121,7 @@ pub fn replay(
         }
     }
     for list in events.values_mut() {
-        list.sort_by_key(|(pos, _)| pos.y); // the harness places lower blocks first
+        list.sort_by_key(|(pos, _)| event_order(*pos));
     }
 
     let mut sim = Sim::new(world).with_mutation(mutation);
@@ -279,6 +279,12 @@ fn permutations(items: &[usize], limit: usize) -> Vec<Vec<usize>> {
     out
 }
 
+/// Stimuli that share a tick are applied in this order: by height, then x, then z.
+/// The order matters when two inputs of one gate change together.
+pub fn event_order(pos: Pos) -> (i32, i32, i32) {
+    (pos.y, pos.x, pos.z)
+}
+
 /// The tick-0 state of a recorded trace as a world.
 pub fn initial_world(trace_json: &str) -> Result<World, String> {
     let trace: TraceFile = serde_json::from_str(trace_json).map_err(|e| format!("trace: {e}"))?;
@@ -319,7 +325,7 @@ pub fn replay_report(fixture_json: &str, trace_json: &str, until: u32) -> Result
             for (pos, state) in &event.set {
                 sets.push((pos.parse()?, state.parse()?));
             }
-            sets.sort_by_key(|(pos, _)| pos.y);
+            sets.sort_by_key(|(pos, _)| event_order(*pos));
             for (pos, block) in sets {
                 sim.set_block(pos, block, false)?;
                 applied.push(format!("{pos}={block}"));

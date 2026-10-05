@@ -214,7 +214,8 @@ class Runner:
             for ev_tick, changes in plot.fixture.events:
                 if ev_tick == tick:
                     pl = plot.placement
-                    for pos, state in sorted(changes.items(), key=lambda kv: kv[0][1]):
+                    # Order within one tick is part of the trace format: by height, then x, then z.
+                    for pos, state in sorted(changes.items(), key=lambda kv: (kv[0][1], kv[0][0], kv[0][2])):
                         self.session.setblock(pl.to_world(pos), pl.state_to_world(state), False)
 
     @staticmethod

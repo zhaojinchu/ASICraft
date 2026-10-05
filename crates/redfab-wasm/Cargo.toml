@@ -1,0 +1,15 @@
+[package]
+name = "redfab-wasm"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+redfab-core = { path = "../redfab-core" }
+serde_json = "1"
+
+# This crate is the one place that hands raw memory across the WebAssembly
+# boundary, so it cannot inherit the workspace's ban on `unsafe`.
