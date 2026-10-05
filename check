@@ -131,6 +131,55 @@ if [ $VANILLA = 1 ]; then
     run mechanics-negative  mechanics_negative
 fi
 
+# ---------------------------------------------------------------- stage 2
+
+REDFAB="cargo run -q -p redfab-cli --"
+
+# The simulator must reproduce every recorded mechanics fixture tick for tick,
+# block states and pending ticks, in both redstone modes.
+sim_fixtures() {
+    $REDFAB check-traces fixtures/mechanics
+}
+
+# ... and the committed corpus of random block arrangements (recorded from the game).
+sim_corpus() {
+    $REDFAB check-traces fixtures/fuzz
+}
+
+# Each deliberately wrong rule must make the corpus check fail.
+sim_mutations() {
+    for m in $($REDFAB list-mutations); do
+        if $REDFAB check-traces --mutate "$m" fixtures/fuzz >/dev/null 2>&1; then
+            echo "mutation '$m' was NOT caught by the corpus"; return 1
+        fi
+        echo "mutation '$m' caught"
+    done
+}
+
+# Structure files: written by the core, read back by the independent Python NBT reader.
+nbt_roundtrip() {
+    uv run --frozen python tools/nbt_roundtrip.py
+}
+
+# Fresh random arrangements recorded from the game and simulated; and structure files
+# placed with /place template (strict and normal, including one larger than 48 blocks).
+fuzz_vanilla() {
+    uv run --frozen python -m harness.fuzz verify --count 40
+}
+place_template() {
+    uv run --frozen python -m harness.place_template
+}
+
+echo "stage 2: simulator, part 1"
+run sim-fixtures      sim_fixtures
+run sim-corpus        sim_corpus
+run sim-mutations     sim_mutations
+run nbt-roundtrip     nbt_roundtrip
+if [ $VANILLA = 1 ]; then
+    run fuzz-vanilla      fuzz_vanilla
+    run place-template    place_template
+fi
+
 # ---------------------------------------------------------------- summary
 
 echo
