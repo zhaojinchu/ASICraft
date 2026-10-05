@@ -1,0 +1,56 @@
+{
+ "format": "redfab-fixture/1",
+ "name": "repeater_on_glass",
+ "doc": "A repeater standing on glass, between two dust lines on glass. The tile library puts everything on glass, so this must work.",
+ "size": [
+  4,
+  2,
+  1
+ ],
+ "placement": "update",
+ "blocks": {
+  "0,0,0": "minecraft:glass",
+  "1,0,0": "minecraft:glass",
+  "1,1,0": "minecraft:redstone_wire",
+  "2,0,0": "minecraft:glass",
+  "2,1,0": "minecraft:repeater[delay=1,facing=west]",
+  "3,0,0": "minecraft:glass",
+  "3,1,0": "minecraft:redstone_wire"
+ },
+ "events": [
+  {
+   "tick": 2,
+   "set": {
+    "0,1,0": "minecraft:redstone_block"
+   }
+  },
+  {
+   "tick": 8,
+   "set": {
+    "0,1,0": "minecraft:air"
+   }
+  }
+ ],
+ "ticks": 12,
+ "expect": [
+  {
+   "tick": 3,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "tick": 4,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=15]"
+  },
+  {
+   "tick": 10,
+   "pos": "3,1,0",
+   "state": "minecraft:redstone_wire[power=0]"
+  },
+  {
+   "from": 10,
+   "stable": true
+  }
+ ]
+}
