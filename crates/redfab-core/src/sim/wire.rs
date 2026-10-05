@@ -236,24 +236,45 @@ impl Sim {
     /// (`getIncomingWireSignal`). Wires one level up or down count when the
     /// blocks in between allow it.
     fn incoming_wire_signal(&self, net: &Network, pos: Pos) -> u8 {
-        let above_conducts = self.conducts(self.world.get(pos.up()));
-        let mut best = 0;
-        for dir in Dir::HORIZONTAL {
-            let beside = pos.offset(dir);
-            let beside_conducts = self.conducts(self.world.get(beside));
-            best = best.max(self.wire_signal(net, beside));
-            if beside_conducts && !above_conducts {
-                best = best.max(self.wire_signal(net, beside.up()));
-            } else if !beside_conducts && self.mutation != Some(Mutation::NoStepDownConnection) {
-                best = best.max(self.wire_signal(net, beside.down()));
-            }
-        }
+        let best = self
+            .wire_sources(pos)
+            .into_iter()
+            .map(|from| self.wire_signal(net, from))
+            .max()
+            .unwrap_or(0);
         let loss = if self.mutation == Some(Mutation::DustLosesTwoPerBlock) {
             2
         } else {
             1
         };
         best.saturating_sub(loss)
+    }
+
+    /// The positions a wire at `pos` takes wire power from: the four beside it,
+    /// and one level up or down where the blocks in between allow it. Positions
+    /// are listed whether or not a wire is there.
+    fn wire_sources(&self, pos: Pos) -> Vec<Pos> {
+        let above_conducts = self.conducts(self.world.get(pos.up()));
+        let mut out = Vec::with_capacity(8);
+        for dir in Dir::HORIZONTAL {
+            let beside = pos.offset(dir);
+            let beside_conducts = self.conducts(self.world.get(beside));
+            out.push(beside);
+            if beside_conducts && !above_conducts {
+                out.push(beside.up());
+            } else if !beside_conducts && self.mutation != Some(Mutation::NoStepDownConnection) {
+                out.push(beside.down());
+            }
+        }
+        out
+    }
+
+    /// The wires that the wire at `pos` takes power from.
+    pub fn wire_neighbors(&self, pos: Pos) -> Vec<Pos> {
+        self.wire_sources(pos)
+            .into_iter()
+            .filter(|&p| matches!(self.world.get(p), Block::Wire(_)))
+            .collect()
     }
 
     /// The game's `propagateChangeToNeighbors`: queue the wires this one can reach.

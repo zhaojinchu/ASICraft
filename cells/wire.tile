@@ -1,0 +1,33 @@
+# Dust from each used edge to the centre. Used with two ports it is a straight or a
+# turn; with three or four it joins them all into one net.
+tile wire
+size 5 4 5
+port W io 0 1 2
+port E io 4 1 2
+port N io 2 1 0
+port S io 2 1 4
+
+legend
+  C minecraft:glass
+  c minecraft:redstone_wire
+  W minecraft:glass if W
+  w minecraft:redstone_wire if W
+  E minecraft:glass if E
+  e minecraft:redstone_wire if E
+  N minecraft:glass if N
+  n minecraft:redstone_wire if N
+  S minecraft:glass if S
+  s minecraft:redstone_wire if S
+
+layer 0
+  ..N..
+  ..N..
+  WWCEE
+  ..S..
+  ..S..
+layer 1
+  ..n..
+  ..n..
+  wwcee
+  ..s..
+  ..s..

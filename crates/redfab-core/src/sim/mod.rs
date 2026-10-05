@@ -161,6 +161,7 @@ impl Sim {
         let support = match block {
             Block::Wire(_) | Block::Torch { .. } => pos.down(),
             Block::WallTorch { facing, .. } => pos.offset(facing.opposite()),
+            Block::Lever { .. } => pos.offset(block.lever_mount().expect("levers have a mount")),
             _ => return Ok(()),
         };
         if self.world.get(support).is_full_block() {
@@ -171,6 +172,84 @@ impl Sim {
                 block.name()
             ))
         }
+    }
+
+    // ------------------------------------------------------------ whole-world operations
+
+    pub fn into_world(self) -> World {
+        self.world
+    }
+
+    /// Gives every wire the shape the game would give it from its surroundings
+    /// (lines and corners; a wire with no connections becomes a cross).
+    pub fn fix_wire_shapes(&mut self) {
+        let wires: Vec<(Pos, Block)> = self
+            .world
+            .iter()
+            .filter(|(_, b)| matches!(b, Block::Wire(_)))
+            .collect();
+        for (pos, block) in wires {
+            let Block::Wire(w) = block else { continue };
+            // Start from a cross so the "stays a dot" rule does not apply.
+            let cross = crate::block::Wire {
+                power: w.power,
+                north: crate::block::Side::Side,
+                east: crate::block::Side::Side,
+                south: crate::block::Side::Side,
+                west: crate::block::Side::Side,
+            };
+            self.world
+                .set(pos, Block::Wire(self.wire_connection_state(pos, cross)));
+        }
+    }
+
+    /// Sends a block update to every block, as if each had just noticed its surroundings.
+    pub fn poke_all(&mut self) {
+        let positions: Vec<Pos> = self.world.iter().map(|(pos, _)| pos).collect();
+        for pos in positions {
+            self.neighbor_changed(pos);
+        }
+    }
+
+    /// Sends block updates to `pos` and to everything within two blocks of it,
+    /// which is what the game does around a component that changed.
+    pub fn wake(&mut self, pos: Pos) {
+        self.neighbor_changed(pos);
+        self.update_neighbors_at(pos);
+        for dir in Dir::ALL {
+            self.update_neighbors_at(pos.offset(dir));
+        }
+    }
+
+    /// Steps until no scheduled tick is left. Returns the number of ticks run, or
+    /// an error if the circuit is still active after `max_ticks`.
+    pub fn settle(&mut self, max_ticks: u32) -> Result<u32, String> {
+        for tick in 0..=max_ticks {
+            if self.queue.is_empty() {
+                return Ok(tick);
+            }
+            self.step();
+        }
+        Err(format!(
+            "the circuit has not settled after {max_ticks} ticks; it oscillates or has burned out a torch"
+        ))
+    }
+
+    // ------------------------------------------------------------ queries
+
+    /// Is the torch at `pos` receiving power (so that it is, or will turn, off)?
+    pub fn torch_is_powered(&self, pos: Pos) -> bool {
+        self.torch_has_signal(pos, self.world.get(pos))
+    }
+
+    /// Is anything powering the block at `pos`? This is what a lamp looks at.
+    pub fn is_powered(&self, pos: Pos) -> bool {
+        self.has_neighbor_signal(pos)
+    }
+
+    /// Power the wire at `pos` receives from blocks other than wire.
+    pub fn wire_block_signal(&self, pos: Pos) -> u8 {
+        self.block_signal_for_wire(pos)
     }
 
     /// Checks that every wire and torch in the world is supported.
@@ -237,6 +316,7 @@ impl Sim {
             let rests_here = match self.world.get(beside) {
                 Block::Wire(_) | Block::Torch { .. } => dir == Dir::Up,
                 Block::WallTorch { facing, .. } => facing == dir,
+                lever @ Block::Lever { .. } => lever.lever_mount() == Some(dir.opposite()),
                 _ => false,
             };
             if rests_here && !block.is_full_block() {

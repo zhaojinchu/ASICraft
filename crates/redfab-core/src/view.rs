@@ -2,7 +2,7 @@
 //!
 //! North is up and east is right. Legend:
 //! `.` air, `#` stone, `G` glass, `R` redstone block, `L`/`l` lamp lit/unlit,
-//! `0`-`f` dust with that power, `T`/`t` standing torch lit/unlit,
+//! `0`-`f` dust with that power, `T`/`t` standing torch lit/unlit, `P`/`/` lever on/off,
 //! arrows for a lit wall torch pointing away from its block, `n e s w` for an unlit one.
 
 use crate::block::Block;
@@ -28,6 +28,13 @@ pub fn symbol(block: Block) -> char {
                 'T'
             } else {
                 't'
+            }
+        }
+        Block::Lever { powered, .. } => {
+            if powered {
+                'P'
+            } else {
+                '/'
             }
         }
         Block::WallTorch { facing, lit } => match (facing, lit) {

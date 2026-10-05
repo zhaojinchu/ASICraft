@@ -1,0 +1,36 @@
+# NOR of one to three inputs: each used input's dust points into the stone block,
+# and the torch on the block's east face is lit only while none of them is powered.
+# With one input this is NOT.
+tile nor
+size 5 4 5
+port W in 0 1 2
+port N in 2 1 0
+port S in 2 1 4
+port E out 4 1 2
+function nor
+delay 2
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  > minecraft:redstone_wall_torch[facing=east]
+  e minecraft:redstone_wire
+  W minecraft:glass if W
+  w minecraft:redstone_wire if W
+  N minecraft:glass if N
+  n minecraft:redstone_wire if N
+  S minecraft:glass if S
+  s minecraft:redstone_wire if S
+
+layer 0
+  ..N..
+  ..N..
+  WW..G
+  ..S..
+  ..S..
+layer 1
+  ..n..
+  ..n..
+  ww#>e
+  ..s..
+  ..s..

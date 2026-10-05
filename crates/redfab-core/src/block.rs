@@ -114,6 +114,39 @@ pub enum Block {
     Lamp {
         lit: bool,
     },
+    /// A lever. `face` says which kind of surface it is mounted on.
+    Lever {
+        face: Face,
+        facing: Dir,
+        powered: bool,
+    },
+}
+
+/// Where a lever is mounted.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Face {
+    Floor,
+    Wall,
+    Ceiling,
+}
+
+impl Face {
+    fn name(self) -> &'static str {
+        match self {
+            Face::Floor => "floor",
+            Face::Wall => "wall",
+            Face::Ceiling => "ceiling",
+        }
+    }
+
+    fn from_name(s: &str) -> Option<Face> {
+        match s {
+            "floor" => Some(Face::Floor),
+            "wall" => Some(Face::Wall),
+            "ceiling" => Some(Face::Ceiling),
+            _ => None,
+        }
+    }
 }
 
 impl Block {
@@ -128,6 +161,26 @@ impl Block {
             Block::Torch { .. } => "minecraft:redstone_torch",
             Block::WallTorch { .. } => "minecraft:redstone_wall_torch",
             Block::Lamp { .. } => "minecraft:redstone_lamp",
+            Block::Lever { .. } => "minecraft:lever",
+        }
+    }
+
+    /// For a lever: the direction from the lever to the block it is mounted on.
+    pub fn lever_mount(&self) -> Option<Dir> {
+        match self {
+            Block::Lever {
+                face: Face::Floor, ..
+            } => Some(Dir::Down),
+            Block::Lever {
+                face: Face::Ceiling,
+                ..
+            } => Some(Dir::Up),
+            Block::Lever {
+                face: Face::Wall,
+                facing,
+                ..
+            } => Some(facing.opposite()),
+            _ => None,
         }
     }
 
@@ -152,7 +205,11 @@ impl Block {
     pub fn is_signal_source(&self) -> bool {
         matches!(
             self,
-            Block::RedstoneBlock | Block::Wire(_) | Block::Torch { .. } | Block::WallTorch { .. }
+            Block::RedstoneBlock
+                | Block::Wire(_)
+                | Block::Torch { .. }
+                | Block::WallTorch { .. }
+                | Block::Lever { .. }
         )
     }
 
@@ -192,6 +249,15 @@ impl Block {
                     ("lit", bool_name(*lit).to_string()),
                 ]
             }
+            Block::Lever {
+                face,
+                facing,
+                powered,
+            } => vec![
+                ("face", face.name().to_string()),
+                ("facing", facing.name().to_string()),
+                ("powered", bool_name(*powered).to_string()),
+            ],
             Block::Air | Block::Stone | Block::Glass | Block::RedstoneBlock => Vec::new(),
         }
     }
@@ -297,6 +363,20 @@ impl FromStr for Block {
             "minecraft:redstone_lamp" => Block::Lamp {
                 lit: parse_bool(take("lit", "false"))?,
             },
+            "minecraft:lever" => {
+                let face = take("face", "wall");
+                let face =
+                    Face::from_name(&face).ok_or_else(|| format!("bad face {face:?} in {s:?}"))?;
+                let facing = take("facing", "north");
+                let facing = Dir::from_name(&facing)
+                    .filter(|d| d.is_horizontal())
+                    .ok_or_else(|| format!("bad facing {facing:?} in {s:?}"))?;
+                Block::Lever {
+                    face,
+                    facing,
+                    powered: parse_bool(take("powered", "false"))?,
+                }
+            }
             other => return Err(format!("unsupported block {other}")),
         };
         if let Some(extra) = props.keys().next() {
@@ -321,6 +401,7 @@ mod tests {
             "minecraft:redstone_torch[lit=false]",
             "minecraft:redstone_wall_torch[facing=west,lit=true]",
             "minecraft:redstone_lamp[lit=true]",
+            "minecraft:lever[face=floor,facing=east,powered=false]",
         ] {
             let block: Block = s.parse().unwrap();
             assert_eq!(block.to_string(), s);
