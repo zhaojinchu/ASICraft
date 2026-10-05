@@ -53,11 +53,8 @@ fn quiet(world: &World, probes: &[Pos]) -> World {
             Block::Torch { .. } => Block::Torch { lit: false },
             Block::WallTorch { facing, .. } => Block::WallTorch { facing, lit: false },
             Block::Lamp { .. } => Block::Lamp { lit: false },
-            Block::Lever { face, facing, .. } => Block::Lever {
-                face,
-                facing,
-                powered: false,
-            },
+            Block::Lever { face, facing, .. } => Block::Lever { face, facing, powered: false },
+            Block::Repeater { facing, delay, .. } => Block::Repeater { facing, delay, locked: false, powered: false },
             Block::RedstoneBlock if probes.contains(&pos) => Block::Stone,
             Block::RedstoneBlock => Block::Glass,
             other => other,
@@ -73,11 +70,7 @@ pub fn extract(world: &World, probes: &[Pos]) -> Circuit {
     let sim = Sim::new(base.clone());
 
     // Nets: wires joined by the same adjacency the power rules use.
-    let wires: Vec<Pos> = base
-        .iter()
-        .filter(|(_, b)| matches!(b, Block::Wire(_)))
-        .map(|(p, _)| p)
-        .collect();
+    let wires: Vec<Pos> = base.iter().filter(|(_, b)| matches!(b, Block::Wire(_))).map(|(p, _)| p).collect();
     let mut net_of: BTreeMap<Pos, usize> = wires.iter().enumerate().map(|(i, &p)| (p, i)).collect();
     let mut one_way = Vec::new();
     for &wire in &wires {
@@ -97,32 +90,17 @@ pub fn extract(world: &World, probes: &[Pos]) -> Circuit {
     let mut ids: Vec<usize> = net_of.values().copied().collect();
     ids.sort_unstable();
     ids.dedup();
-    let nets: Vec<Vec<Pos>> = ids
-        .iter()
-        .map(|&id| wires.iter().copied().filter(|w| net_of[w] == id).collect())
-        .collect();
+    let nets: Vec<Vec<Pos>> =
+        ids.iter().map(|&id| wires.iter().copied().filter(|w| net_of[w] == id).collect()).collect();
 
-    let positions = |pred: fn(&Block) -> bool| -> Vec<Pos> {
-        base.iter()
-            .filter(|(_, b)| pred(b))
-            .map(|(p, _)| p)
-            .collect()
-    };
+    let positions =
+        |pred: fn(&Block) -> bool| -> Vec<Pos> { base.iter().filter(|(_, b)| pred(b)).map(|(p, _)| p).collect() };
     let torch_positions = positions(|b| b.is_torch());
     let lamp_positions = positions(|b| matches!(b, Block::Lamp { .. }));
     let mut source_positions: Vec<Pos> = probes.to_vec();
-    source_positions.extend(
-        world
-            .iter()
-            .filter(|(p, b)| *b == Block::RedstoneBlock && !probes.contains(p))
-            .map(|(p, _)| p),
-    );
-    let component = |pos: Pos| Component {
-        pos,
-        reads: Vec::new(),
-        drives: Vec::new(),
-        direct: Vec::new(),
-    };
+    source_positions
+        .extend(world.iter().filter(|(p, b)| *b == Block::RedstoneBlock && !probes.contains(p)).map(|(p, _)| p));
+    let component = |pos: Pos| Component { pos, reads: Vec::new(), drives: Vec::new(), direct: Vec::new() };
     let mut torches: Vec<Component> = torch_positions.iter().map(|&p| component(p)).collect();
     let mut lamps: Vec<Component> = lamp_positions.iter().map(|&p| component(p)).collect();
     let mut sources: Vec<Component> = source_positions.iter().map(|&p| component(p)).collect();
@@ -168,11 +146,7 @@ pub fn extract(world: &World, probes: &[Pos]) -> Circuit {
             }
         }
     };
-    let all_sinks: Vec<Pos> = torch_positions
-        .iter()
-        .chain(&lamp_positions)
-        .copied()
-        .collect();
+    let all_sinks: Vec<Pos> = torch_positions.iter().chain(&lamp_positions).copied().collect();
     for torch in &mut torches {
         let lit = match base.get(torch.pos) {
             Block::WallTorch { facing, .. } => Block::WallTorch { facing, lit: true },
@@ -184,13 +158,7 @@ pub fn extract(world: &World, probes: &[Pos]) -> Circuit {
         drive(source, Block::RedstoneBlock, &all_sinks);
     }
 
-    Circuit {
-        nets,
-        torches,
-        lamps,
-        sources,
-        one_way,
-    }
+    Circuit { nets, torches, lamps, sources, one_way }
 }
 
 /// With each driver switched on alone, every wire of the nets it drives must
@@ -198,11 +166,7 @@ pub fn extract(world: &World, probes: &[Pos]) -> Circuit {
 pub fn weak_signals(world: &World, probes: &[Pos], circuit: &Circuit) -> Vec<String> {
     let base = quiet(world, probes);
     let mut problems = Vec::new();
-    let drivers = circuit
-        .torches
-        .iter()
-        .map(|t| (t, true))
-        .chain(circuit.sources.iter().map(|s| (s, false)));
+    let drivers = circuit.torches.iter().map(|t| (t, true)).chain(circuit.sources.iter().map(|s| (s, false)));
     for (driver, is_torch) in drivers {
         let on = match (is_torch, base.get(driver.pos)) {
             (true, Block::WallTorch { facing, .. }) => Block::WallTorch { facing, lit: true },
@@ -216,16 +180,8 @@ pub fn weak_signals(world: &World, probes: &[Pos], circuit: &Circuit) -> Vec<Str
         sim.wake(driver.pos);
         for &net in &driver.drives {
             for &wire in &circuit.nets[net] {
-                if sim
-                    .world()
-                    .get(wire)
-                    .as_wire()
-                    .is_some_and(|w| w.power == 0)
-                {
-                    problems.push(format!(
-                        "the signal from {} dies before reaching the wire at {wire}",
-                        driver.pos
-                    ));
+                if sim.world().get(wire).as_wire().is_some_and(|w| w.power == 0) {
+                    problems.push(format!("the signal from {} dies before reaching the wire at {wire}", driver.pos));
                 }
             }
         }

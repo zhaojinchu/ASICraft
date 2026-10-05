@@ -29,6 +29,19 @@ Units are game ticks (gt). "Tick t" follows `trace-format.md`: a stimulus at tic
 | Lock and input changing on the same tick | `lock_same_tick` | Both repeaters schedule for +2. The lock repeater (priority −3, because it faces into another repeater) runs first; the data repeater (priority −1) is locked when its own tick comes and does not switch. Output stays 0 for the whole run. | yes |
 | Scheduled-tick priorities | `lock_same_tick`, saved `block_ticks` | repeater facing a diode: −3; other repeater: −1; torch: 0 | yes |
 
+## Repeaters in more detail (stage 4)
+
+| Fact | Fixture | Measured | Matches the wiki? |
+|---|---|---|---|
+| A repeater works standing on glass | `repeater_on_glass` | passes its input on after its delay | yes (and the tile library depends on it) |
+| A repeater strongly powers the block in front of it | `repeater_strong_front` | dust beyond that block gets 15 | yes |
+| Dust beside a repeater does not join it | `repeater_side_dust` | the side dust stays at 0 and does not connect | yes |
+| An on-pulse shorter than the delay is stretched to the delay | `repeater_pulse_stretch` | a 2-gt pulse into a 6-gt repeater comes out 6 gt long | yes |
+| A locked repeater holds its output whatever its input does, and follows its input again once released | `lock_hold_release` | held through an input rise and an input fall; 2 gt after the lock repeater turned off, the data repeater caught up | yes |
+| A repeater placed by command beside a powered locking repeater is locked at once | probe | `locked=true` on placement | yes |
+
+Tick priorities seen in the saved pending ticks, all as documented: a repeater feeding the back or side of another repeater −3, a repeater turning off −2, any other repeater −1, torches and lamps 0.
+
 ## Connectivity and powering
 
 | Fact | Fixture | Measured | Matches the wiki? |
@@ -75,9 +88,9 @@ Units are game ticks (gt). "Tick t" follows `trace-format.md`: a stimulus at tic
 
 ## Random circuits and races (stage 2)
 
-`python -m harness.fuzz` builds random small circuits (dust, blocks, lamps, torches, inverter chains, some fed back into themselves), switches redstone blocks, and sometimes edits the circuit mid-run. Each is recorded in both modes at two placements.
+`python -m harness.fuzz` builds random small circuits (dust, blocks, lamps, torches, repeaters, inverter chains, some fed back into themselves, and latches made of a repeater locked from its side), switches redstone blocks, and sometimes edits the circuit mid-run. Each is recorded in both modes at two placements.
 
-Of the 200 circuits in the committed corpus (`fixtures/fuzz/`, seed 1):
+There are two committed corpora of 200 circuits each: `fixtures/fuzz/` (seed 1, recorded before repeaters existed in the generator) and `fixtures/fuzz-repeaters/` (seed 2, with repeaters and latches; the simulator matches all 383 of its traces, 3 of them only with another order of same-moment events). The numbers below are for the first:
 
 | | Experiments mode | Default mode |
 |---|---|---|

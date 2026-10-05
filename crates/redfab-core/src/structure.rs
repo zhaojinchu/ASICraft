@@ -29,10 +29,7 @@ pub fn structure_file(world: &World) -> Vec<u8> {
                 palette.len() - 1
             }
         };
-        blocks.push(Tag::compound(vec![
-            ("pos", Tag::ints([pos.x, pos.y, pos.z])),
-            ("state", Tag::Int(state as i32)),
-        ]));
+        blocks.push(Tag::compound(vec![("pos", Tag::ints([pos.x, pos.y, pos.z])), ("state", Tag::Int(state as i32))]));
     }
     let palette: Vec<Tag> = palette
         .iter()
@@ -42,12 +39,7 @@ pub fn structure_file(world: &World) -> Vec<u8> {
             if !props.is_empty() {
                 entry.push((
                     "properties",
-                    Tag::Compound(
-                        props
-                            .into_iter()
-                            .map(|(k, v)| (k.to_string(), Tag::Str(v)))
-                            .collect(),
-                    ),
+                    Tag::Compound(props.into_iter().map(|(k, v)| (k.to_string(), Tag::Str(v))).collect()),
                 ));
             }
             Tag::compound(entry)
@@ -62,8 +54,6 @@ pub fn structure_file(world: &World) -> Vec<u8> {
         ("entities", Tag::List(Vec::new())),
     ]);
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder
-        .write_all(&write_root(&root))
-        .expect("writing to a Vec cannot fail");
+    encoder.write_all(&write_root(&root)).expect("writing to a Vec cannot fail");
     encoder.finish().expect("writing to a Vec cannot fail")
 }

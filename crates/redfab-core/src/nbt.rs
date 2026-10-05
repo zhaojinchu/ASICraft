@@ -43,12 +43,7 @@ impl Tag {
     }
 
     pub fn compound(entries: Vec<(&str, Tag)>) -> Tag {
-        Tag::Compound(
-            entries
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
-        )
+        Tag::Compound(entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
     }
 
     pub fn ints(values: [i32; 3]) -> Tag {

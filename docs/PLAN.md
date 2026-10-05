@@ -10,7 +10,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | 1 | Vanilla test harness | **done** 2026-10-04 | 25 mechanics fixtures recorded in both redstone modes; all expectations met except the wiki's burnout threshold (game burns out on the 8th turn-off, not the 9th) |
 | 2 | Simulator, part 1 | **done** 2026-10-05 | Block-level simulator matches all 417 recorded traces (36 mechanics, 381 random); structure files load in the game |
 | 3 | First circuit: one NOR gate | **done** 2026-10-05 | `not1`, `nor2`, `nor3` go from SystemVerilog to working circuits in the game; every check from the plan passes |
-| 4 | Simulator, part 2 | not started | |
+| 4 | Simulator, part 2 | **done** 2026-10-05 | Repeaters, locking and tick priorities; all 60 mechanics traces and both random corpora (764 traces) match |
 | 5 | Full combinational tile set | not started | |
 | 6 | Placement and routing | not started | |
 | 7 | Timing analysis | not started | |
@@ -114,6 +114,21 @@ Findings and surprises from each stage go here, newest last.
 3. **The order of stimuli within one tick matters.** When two inputs of the NOR swap values in the same tick, the gate sees one of the intermediate states and may schedule a torch tick that changes nothing. The trace format now fixes that order (height, then x, then z), and the harness and the replay both follow it.
 
 **Limits, by design:** the placer handles one gate fed directly by inputs. Anything else is refused with a message until stage 6. Constants are refused until stage 5 adds tie tiles.
+
+### Stage 4 (2026-10-05)
+
+**Built:** repeaters in the simulator (`sim/repeater.rs`): the four delays, pulse stretching, locking from the side, the three tick priorities, the `locked` property, and the updates a repeater sends when it changes. The fuzzer now builds repeaters and latches. Torch burnout was already done in stage 2.
+
+**Results:**
+
+- All 60 mechanics traces replay, none skipped (stage 2 had to skip the 12 with repeaters). Five new repeater experiments were recorded first; all five behaved as the wiki says.
+- About 770 fresh random circuits with repeaters (seeds 31–34 and the new corpus): every trace matched. No simulator change was needed after the first run.
+- The new corpus `fixtures/fuzz-repeaters/` has 200 circuits and 383 traces; 3 need another order of same-moment events.
+- Five deliberately wrong repeater rules (delay off by two ticks, lock ignored, no pulse stretching, one priority for everything, no strong power in front) are each caught by both the corpus and the mechanics fixtures.
+
+**Also:** the Rust code now has a `rustfmt.toml` (120 columns, fewer forced line breaks); the one-time reformat touched every file.
+
+**Not in this stage:** reading repeaters back out of a layout for the netlist check. That comes with the repeater tile in stage 5.
 
 ---
 

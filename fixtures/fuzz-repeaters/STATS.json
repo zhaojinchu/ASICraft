@@ -1,0 +1,14 @@
+{
+ "seed": 2,
+ "generated": 200,
+ "experiments_mode": {
+  "kept": 197,
+  "placement_dependent": 3
+ },
+ "default_mode": {
+  "kept": 196,
+  "placement_dependent": 4
+ },
+ "kept_in_both_and_identical": 186,
+ "kept_in_both_but_different": 9
+}

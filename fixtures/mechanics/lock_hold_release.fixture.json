@@ -101,7 +101,7 @@
    "state": "minecraft:redstone_wire[power=15]"
   },
   {
-   "from": 26,
+   "from": 28,
    "stable": true
   }
  ]

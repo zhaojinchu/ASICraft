@@ -20,16 +20,10 @@ use crate::tile::Edge;
 pub fn place_single_gate(netlist: &Netlist) -> Result<Layout, String> {
     const LATER: &str = "this design needs placement and routing, which redfab does not have yet";
     let [cell] = netlist.cells.as_slice() else {
-        return Err(format!(
-            "{LATER} (it has {} cells; only single-gate designs work so far)",
-            netlist.cells.len()
-        ));
+        return Err(format!("{LATER} (it has {} cells; only single-gate designs work so far)", netlist.cells.len()));
     };
     let [output] = netlist.outputs.as_slice() else {
-        return Err(format!(
-            "{LATER} (it has {} outputs)",
-            netlist.outputs.len()
-        ));
+        return Err(format!("{LATER} (it has {} outputs)", netlist.outputs.len()));
     };
     if output.net != cell.output {
         return Err(format!("{LATER} (the output is not driven by the gate)"));
@@ -40,9 +34,7 @@ pub fn place_single_gate(netlist: &Netlist) -> Result<Layout, String> {
         match drivers[net] {
             Driver::Input(port) if !pin_ports.contains(&port) => pin_ports.push(port),
             _ => {
-                return Err(format!(
-                    "{LATER} (a gate input is not its own design input)"
-                ));
+                return Err(format!("{LATER} (a gate input is not its own design input)"));
             }
         }
     }
@@ -62,19 +54,10 @@ pub fn place_single_gate(netlist: &Netlist) -> Result<Layout, String> {
         layout.tiles.insert((0, row), Placed::Input { port });
         if pin > 0 {
             // Turn from the input's row into the gate's north or south edge.
-            layout.tiles.insert(
-                (1, row),
-                Placed::Wire {
-                    edges: vec![Edge::West, edge.opposite()],
-                },
-            );
+            layout.tiles.insert((1, row), Placed::Wire { edges: vec![Edge::West, edge.opposite()] });
         }
     }
-    layout
-        .tiles
-        .insert((1, gate_row), Placed::Gate { cell: 0, pin_edges });
-    layout
-        .tiles
-        .insert((2, gate_row), Placed::Output { port: 0 });
+    layout.tiles.insert((1, gate_row), Placed::Gate { cell: 0, pin_edges });
+    layout.tiles.insert((2, gate_row), Placed::Output { port: 0 });
     Ok(layout)
 }

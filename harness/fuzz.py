@@ -84,9 +84,36 @@ def random_fixture(rng: random.Random, name: str, ticks: int = FUZZ_TICKS) -> Fi
                 cells.setdefault((fx, 0, z1), S)
                 cells.setdefault((fx, 1, z1), D)
 
+    def repeater(facing: str | None = None, delay: int | None = None) -> str:
+        facing = facing or rng.choice(list(HORIZONTAL))
+        return f"minecraft:repeater[facing={facing},delay={delay or rng.randint(1, 4)}]"
+
+    # -- a latch: a data repeater in a wire, with a second repeater pointing into its side
+    #    slot, dust, data repeater, dust        (row z)
+    #                lock repeater              (row z+1, fed straight from a slot in row z+2)
+    if rng.random() < 0.5 and sz >= 3:
+        z = rng.randrange(sz - 2)
+        x = rng.randrange(sx - 3)
+        spots = [(x + dx, y, z + dz) for dx in range(4) for dz in range(3) for y in (0, 1, 2)]
+        if not any(spot in cells for spot in spots):
+            for dx in range(4):
+                cells[(x + dx, 0, z)] = S
+                cells[(x + dx, 2, z)] = None
+            cells[(x, 1, z)] = None
+            cells[(x + 1, 1, z)] = D
+            cells[(x + 2, 1, z)] = repeater("west")
+            cells[(x + 3, 1, z)] = D
+            cells[(x + 2, 0, z + 1)] = S
+            cells[(x + 2, 1, z + 1)] = repeater("south")
+            cells[(x + 2, 2, z + 1)] = None
+            cells[(x + 2, 1, z + 2)] = None
+            cells[(x + 2, 2, z + 2)] = None
+            forced_slots += [(x, 1, z), (x + 2, 1, z + 2)]
+
     # -- random filling around it
     density = rng.choice([0.3, 0.6, 1.0])
     torchy = rng.choice([0.5, 1.0, 2.0, 3.0])
+    repeaters = rng.choice([0.0, 0.5, 1.0, 2.0])
     for x in range(sx):
         for z in range(sz):
             if (x, 0, z) not in cells:
@@ -96,7 +123,8 @@ def random_fixture(rng: random.Random, name: str, ticks: int = FUZZ_TICKS) -> Fi
     for x in range(sx):
         for z in range(sz):
             if (x, 1, z) not in cells and cells.get((x, 0, z)) in FULL:
-                block = pick([(0.42 * density, D), (0.16 * density, S), (0.04 * density, G), (0.07 * density, L), (0.03 * torchy * density, T)])
+                block = pick([(0.42 * density, D), (0.16 * density, S), (0.04 * density, G), (0.07 * density, L),
+                              (0.03 * torchy * density, T), (0.05 * repeaters * density, repeater())])
                 if block:
                     cells[(x, 1, z)] = block
     for x in range(sx):
@@ -105,7 +133,8 @@ def random_fixture(rng: random.Random, name: str, ticks: int = FUZZ_TICKS) -> Fi
                 continue
             below = cells.get((x, 1, z))
             if below in FULL:
-                block = pick([(0.40 * density, D), (min(0.45, 0.15 * torchy) * density, T), (0.04 * density, L), (0.04 * density, S)])
+                block = pick([(0.40 * density, D), (min(0.45, 0.15 * torchy) * density, T), (0.04 * density, L),
+                              (0.04 * density, S), (0.05 * repeaters * density, repeater())])
                 if block:
                     cells[(x, 2, z)] = block
             elif below in (D, None) and rng.random() < 0.06 * density:
@@ -179,7 +208,7 @@ def random_fixture(rng: random.Random, name: str, ticks: int = FUZZ_TICKS) -> Fi
         below_pos = (pos[0], pos[1] - 1, pos[2])
         # Supported only by a block that is there for the whole run.
         supported = cells.get(below_pos) in FULL and below_pos not in edits
-        block = rng.choice([D, D, T, S, G, L, RB] if supported else [S, G, L, RB])
+        block = rng.choice([D, D, T, repeater(), S, G, L, RB] if supported else [S, G, L, RB])
         occupied.add(pos)
         edits.append(pos)
         cells[pos] = block
@@ -240,6 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, help="random seed (default: from the clock for verify, 1 for record)")
     ap.add_argument("--count", type=int, default=40)
     ap.add_argument("--long", type=int, default=0, help="how many of the fixtures run for 230 ticks instead of 60")
+    ap.add_argument("--out", type=Path, help="where `record` writes the corpus (default: fixtures/fuzz)")
     args = ap.parse_args(argv)
 
     if args.action == "show":
@@ -250,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
     seed = args.seed if args.seed is not None else (1 if args.action == "record" else int(time.time()))
     rng = random.Random(seed)
     fxs = [random_fixture(rng, f"fz_{seed}_{i:03d}", LONG_TICKS if i < args.long else FUZZ_TICKS) for i in range(args.count)]
-    out = CORPUS_DIR if args.action == "record" else ROOT / "build" / "fuzz" / str(seed)
+    out = (args.out or CORPUS_DIR) if args.action == "record" else ROOT / "build" / "fuzz" / str(seed)
     if out.exists() and args.action == "verify":
         shutil.rmtree(out)
     stats = record(fxs, out)

@@ -74,19 +74,11 @@ pub enum Replay {
 
 /// Starts the simulator from the trace's recorded tick-0 state, applies the
 /// fixture's stimuli, and compares every tick with the recording.
-pub fn replay(
-    fixture_json: &str,
-    trace_json: &str,
-    mutation: Option<Mutation>,
-) -> Result<Replay, String> {
-    let fixture: FixtureFile =
-        serde_json::from_str(fixture_json).map_err(|e| format!("fixture: {e}"))?;
+pub fn replay(fixture_json: &str, trace_json: &str, mutation: Option<Mutation>) -> Result<Replay, String> {
+    let fixture: FixtureFile = serde_json::from_str(fixture_json).map_err(|e| format!("fixture: {e}"))?;
     let trace: TraceFile = serde_json::from_str(trace_json).map_err(|e| format!("trace: {e}"))?;
     if fixture.format != "redfab-fixture/1" || trace.format != "redfab-trace/1" {
-        return Err(format!(
-            "unexpected formats {:?} / {:?}",
-            fixture.format, trace.format
-        ));
+        return Err(format!("unexpected formats {:?} / {:?}", fixture.format, trace.format));
     }
     if fixture.name != trace.fixture || fixture.size != trace.size {
         return Err(format!(
@@ -111,10 +103,7 @@ pub fn replay(
     for event in &fixture.events {
         for (pos, state) in &event.set {
             match state.parse::<Block>() {
-                Ok(block) => events
-                    .entry(event.tick)
-                    .or_default()
-                    .push((pos.parse()?, block)),
+                Ok(block) => events.entry(event.tick).or_default().push((pos.parse()?, block)),
                 Err(e) if e.starts_with("unsupported block") => return Ok(Replay::Unsupported(e)),
                 Err(e) => return Err(e),
             }
@@ -147,17 +136,8 @@ pub fn replay(
             }
         }
         let mut want: Vec<Pending> = Vec::new();
-        for p in recorded
-            .and_then(|t| t.pending.as_ref())
-            .into_iter()
-            .flatten()
-        {
-            want.push(Pending {
-                pos: p.pos.parse()?,
-                block: p.block.clone(),
-                delay: p.delay,
-                priority: p.priority,
-            });
+        for p in recorded.and_then(|t| t.pending.as_ref()).into_iter().flatten() {
+            want.push(Pending { pos: p.pos.parse()?, block: p.block.clone(), delay: p.delay, priority: p.priority });
         }
         want.sort();
         let tick_events = events.get(&tick).unwrap_or(&no_events);
@@ -166,16 +146,12 @@ pub fn replay(
                 return Some(diff);
             }
             let got = sim.pending();
-            (compare_pending && got != want)
-                .then(|| format!("pending ticks: game {want:?}, simulator {got:?}"))
+            (compare_pending && got != want).then(|| format!("pending ticks: game {want:?}, simulator {got:?}"))
         };
 
         // One attempt at this tick: a tick order (empty = default) and a delivery
         // shuffle (None = default). Returns the stepped simulator if it matches.
-        let attempt = |before: &Sim,
-                       order: &[usize],
-                       delivery: Option<u64>|
-         -> Result<Result<Sim, String>, String> {
+        let attempt = |before: &Sim, order: &[usize], delivery: Option<u64>| -> Result<Result<Sim, String>, String> {
             let mut candidate = before.clone();
             candidate.shuffle_delivery(delivery);
             candidate.step_in_order(order);
@@ -299,8 +275,7 @@ pub fn initial_world(trace_json: &str) -> Result<World, String> {
 /// tick up to `until`, the layers the game recorded beside the simulator's, with
 /// both pending lists.
 pub fn replay_report(fixture_json: &str, trace_json: &str, until: u32) -> Result<String, String> {
-    let fixture: FixtureFile =
-        serde_json::from_str(fixture_json).map_err(|e| format!("fixture: {e}"))?;
+    let fixture: FixtureFile = serde_json::from_str(fixture_json).map_err(|e| format!("fixture: {e}"))?;
     let trace: TraceFile = serde_json::from_str(trace_json).map_err(|e| format!("trace: {e}"))?;
     let size = (fixture.size[0], fixture.size[1], fixture.size[2]);
     let mut game = World::new(size);
@@ -311,11 +286,7 @@ pub fn replay_report(fixture_json: &str, trace_json: &str, until: u32) -> Result
     for p in trace.pending0.iter().flatten() {
         sim.seed_pending(p.pos.parse()?, p.delay, p.priority)?;
     }
-    let mut out = format!(
-        "tick 0\n{}pending: {:?}\n",
-        crate::view::layers(&game),
-        sim.pending()
-    );
+    let mut out = format!("tick 0\n{}pending: {:?}\n", crate::view::layers(&game), sim.pending());
     let by_tick: BTreeMap<u32, &TickFile> = trace.ticks.iter().map(|t| (t.tick, t)).collect();
     for tick in 1..=until.min(fixture.ticks) {
         sim.step();
@@ -339,41 +310,20 @@ pub fn replay_report(fixture_json: &str, trace_json: &str, until: u32) -> Result
             .and_then(|t| t.pending.as_ref())
             .into_iter()
             .flatten()
-            .map(|p| {
-                format!(
-                    "{}@{}+{}p{}",
-                    p.block.trim_start_matches("minecraft:"),
-                    p.pos,
-                    p.delay,
-                    p.priority
-                )
-            })
+            .map(|p| format!("{}@{}+{}p{}", p.block.trim_start_matches("minecraft:"), p.pos, p.delay, p.priority))
             .collect();
         let sim_pending: Vec<String> = sim
             .pending()
             .iter()
-            .map(|p| {
-                format!(
-                    "{}@{}+{}p{}",
-                    p.block.trim_start_matches("minecraft:"),
-                    p.pos,
-                    p.delay,
-                    p.priority
-                )
-            })
+            .map(|p| format!("{}@{}+{}p{}", p.block.trim_start_matches("minecraft:"), p.pos, p.delay, p.priority))
             .collect();
         let same = &game == sim.world();
-        out.push_str(&format!(
-            "\ntick {tick}  events: {applied:?}  {}\n",
-            if same { "(same)" } else { "(DIFFERENT)" }
-        ));
+        out.push_str(&format!("\ntick {tick}  events: {applied:?}  {}\n", if same { "(same)" } else { "(DIFFERENT)" }));
         out.push_str(&format!("game:\n{}", crate::view::layers(&game)));
         if !same {
             out.push_str(&format!("simulator:\n{}", crate::view::layers(sim.world())));
         }
-        out.push_str(&format!(
-            "game pending: {game_pending:?}\nsim pending:  {sim_pending:?}\n"
-        ));
+        out.push_str(&format!("game pending: {game_pending:?}\nsim pending:  {sim_pending:?}\n"));
     }
     Ok(out)
 }
@@ -397,11 +347,7 @@ fn first_block_difference(world: &World, expected: &BTreeMap<Pos, String>) -> Op
         None
     } else {
         let shown = diffs.len().min(4);
-        Some(format!(
-            "{} block(s) differ; {}",
-            diffs.len(),
-            diffs[..shown].join("; ")
-        ))
+        Some(format!("{} block(s) differ; {}", diffs.len(), diffs[..shown].join("; ")))
     }
 }
 

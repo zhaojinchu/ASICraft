@@ -123,8 +123,7 @@ impl Tile {
                     let Some(entry) = self.legend.get(&c) else {
                         continue;
                     };
-                    if entry.when.is_some_and(|edge| !used.contains(&edge)) || entry.block.is_air()
-                    {
+                    if entry.when.is_some_and(|edge| !used.contains(&edge)) || entry.block.is_air() {
                         continue;
                     }
                     out.push((Pos::new(x as i32, y as i32, z as i32), entry.block));
@@ -143,8 +142,7 @@ impl Tile {
         let mut probe = None;
         let mut lamp = None;
         let mut legend = BTreeMap::new();
-        let mut layers: Vec<Vec<Vec<char>>> =
-            vec![vec![vec!['.'; PITCH as usize]; PITCH as usize]; HEIGHT as usize];
+        let mut layers: Vec<Vec<Vec<char>>> = vec![vec![vec!['.'; PITCH as usize]; PITCH as usize]; HEIGHT as usize];
         let mut section = Section::Header;
 
         for (number, raw) in text.lines().enumerate() {
@@ -167,14 +165,7 @@ impl Tile {
                 }
             };
             match (first, &section) {
-                ("tile", _) => {
-                    name = Some(
-                        words
-                            .get(1)
-                            .ok_or_else(|| at("tile needs a name".into()))?
-                            .to_string(),
-                    )
-                }
+                ("tile", _) => name = Some(words.get(1).ok_or_else(|| at("tile needs a name".into()))?.to_string()),
                 ("size", _) => {
                     let size = pos_at(1)?;
                     if (size.x, size.y, size.z) != (PITCH, HEIGHT, PITCH) {
@@ -192,34 +183,21 @@ impl Tile {
                         Some(&"io") => PortKind::Io,
                         _ => return Err(at("port needs in, out or io".into())),
                     };
-                    ports.push(Port {
-                        edge,
-                        kind,
-                        pos: pos_at(3)?,
-                    });
+                    ports.push(Port { edge, kind, pos: pos_at(3)? });
                 }
                 ("function", _) => {
-                    function = Some(
-                        words
-                            .get(1)
-                            .ok_or_else(|| at("function needs a name".into()))?
-                            .to_string(),
-                    )
+                    function = Some(words.get(1).ok_or_else(|| at("function needs a name".into()))?.to_string())
                 }
                 ("delay", _) => {
-                    delay = words
-                        .get(1)
-                        .and_then(|w| w.parse().ok())
-                        .ok_or_else(|| at("delay needs a number".into()))?
+                    delay =
+                        words.get(1).and_then(|w| w.parse().ok()).ok_or_else(|| at("delay needs a number".into()))?
                 }
                 ("probe", _) => probe = Some(pos_at(1)?),
                 ("lamp", _) => lamp = Some(pos_at(1)?),
                 ("legend", _) => section = Section::Legend,
                 ("layer", _) => {
-                    let y: usize = words
-                        .get(1)
-                        .and_then(|w| w.parse().ok())
-                        .ok_or_else(|| at("layer needs a number".into()))?;
+                    let y: usize =
+                        words.get(1).and_then(|w| w.parse().ok()).ok_or_else(|| at("layer needs a number".into()))?;
                     if y >= HEIGHT as usize {
                         return Err(at(format!("layer {y} is above the tile height {HEIGHT}")));
                     }
@@ -228,20 +206,15 @@ impl Tile {
                 (_, Section::Legend) => {
                     let symbol: Vec<char> = first.chars().collect();
                     if symbol.len() != 1 {
-                        return Err(at(format!(
-                            "legend symbols are one character, got {first:?}"
-                        )));
+                        return Err(at(format!("legend symbols are one character, got {first:?}")));
                     }
-                    let state = words
-                        .get(1)
-                        .ok_or_else(|| at("legend entry needs a block".into()))?;
+                    let state = words.get(1).ok_or_else(|| at("legend entry needs a block".into()))?;
                     let block: Block = state.parse().map_err(at)?;
                     let when = match (words.get(2), words.get(3)) {
                         (None, _) => None,
-                        (Some(&"if"), Some(w)) => Some(
-                            Edge::from_letter(w)
-                                .ok_or_else(|| at(format!("unknown port {w:?}")))?,
-                        ),
+                        (Some(&"if"), Some(w)) => {
+                            Some(Edge::from_letter(w).ok_or_else(|| at(format!("unknown port {w:?}")))?)
+                        }
                         _ => return Err(at(format!("expected 'if <port>' in {line:?}"))),
                     };
                     legend.insert(symbol[0], LegendEntry { block, when });
@@ -250,9 +223,7 @@ impl Tile {
                     let (y, row) = (*y, *row);
                     let cells: Vec<char> = first.chars().collect();
                     if cells.len() != PITCH as usize || words.len() != 1 || row >= PITCH as usize {
-                        return Err(at(format!(
-                            "each layer is {PITCH} rows of {PITCH} characters"
-                        )));
+                        return Err(at(format!("each layer is {PITCH} rows of {PITCH} characters")));
                     }
                     layers[y][row] = cells;
                     section = Section::Layer { y, row: row + 1 };
@@ -261,16 +232,8 @@ impl Tile {
             }
         }
 
-        let tile = Tile {
-            name: name.ok_or("missing 'tile <name>'")?,
-            ports,
-            function,
-            delay,
-            probe,
-            lamp,
-            legend,
-            layers,
-        };
+        let tile =
+            Tile { name: name.ok_or("missing 'tile <name>'")?, ports, function, delay, probe, lamp, legend, layers };
         tile.validate()?;
         Ok(tile)
     }
@@ -287,11 +250,7 @@ impl Tile {
                 Edge::South => Pos::new(mid, 1, last),
             };
             if port.pos != expected {
-                return Err(format!(
-                    "{}: port {} must be at {expected}",
-                    self.name,
-                    port.edge.letter()
-                ));
+                return Err(format!("{}: port {} must be at {expected}", self.name, port.edge.letter()));
             }
         }
         let all: Vec<Edge> = self.ports.iter().map(|p| p.edge).collect();
@@ -299,10 +258,7 @@ impl Tile {
         for (y, layer) in self.layers.iter().enumerate() {
             for &c in layer.iter().flatten() {
                 if c != '.' && !self.legend.contains_key(&c) {
-                    return Err(format!(
-                        "{}: symbol {c:?} at layer {y} is not in the legend",
-                        self.name
-                    ));
+                    return Err(format!("{}: symbol {c:?} at layer {y} is not in the legend", self.name));
                 }
             }
         }
@@ -314,20 +270,12 @@ impl Tile {
             let allowed = port_cells.contains(&pos) && matches!(block, Block::Wire(_));
             let io_block = Some(pos) == self.probe || Some(pos.down()) == self.probe;
             if !allowed && !io_block {
-                return Err(format!(
-                    "{}: {} at {pos} touches the tile border",
-                    self.name,
-                    block.name()
-                ));
+                return Err(format!("{}: {} at {pos} touches the tile border", self.name, block.name()));
             }
         }
         for (pos, block) in self.blocks(&all) {
             if pos.y == 0 && block != Block::Glass {
-                return Err(format!(
-                    "{}: the floor must be glass, found {} at {pos}",
-                    self.name,
-                    block.name()
-                ));
+                return Err(format!("{}: the floor must be glass, found {} at {pos}", self.name, block.name()));
             }
         }
         Ok(())
@@ -352,9 +300,7 @@ impl Library {
     /// The built-in library. The tile files are compiled in, so the same library
     /// is available in a browser.
     pub fn builtin() -> Result<Library, String> {
-        let parse = |name: &str, text: &str| {
-            Tile::parse(text).map_err(|e| format!("cells/{name}.tile: {e}"))
-        };
+        let parse = |name: &str, text: &str| Tile::parse(text).map_err(|e| format!("cells/{name}.tile: {e}"));
         Ok(Library {
             input: parse("input", include_str!("../../../cells/input.tile"))?,
             output: parse("output", include_str!("../../../cells/output.tile"))?,
@@ -366,11 +312,7 @@ impl Library {
     /// The synthesis cells this library offers, as (name, input pins) pairs.
     /// `NOT`, `NOR2` and `NOR3` are the NOR tile with one to three inputs.
     pub fn cells(&self) -> Vec<(&'static str, Vec<&'static str>)> {
-        vec![
-            ("NOT", vec!["A"]),
-            ("NOR2", vec!["A", "B"]),
-            ("NOR3", vec!["A", "B", "C"]),
-        ]
+        vec![("NOT", vec!["A"]), ("NOR2", vec!["A", "B"]), ("NOR3", vec!["A", "B", "C"])]
     }
 
     /// The cell library in Liberty format, for Yosys's `abc -liberty`.
@@ -386,10 +328,7 @@ impl Library {
             for pin in &pins {
                 out.push_str(&format!("    pin({pin}) {{ direction: input; }}\n"));
             }
-            out.push_str(&format!(
-                "    pin(Y) {{ direction: output; function: \"!({})\"; }}\n  }}\n",
-                pins.join("+")
-            ));
+            out.push_str(&format!("    pin(Y) {{ direction: output; function: \"!({})\"; }}\n  }}\n", pins.join("+")));
         }
         out.push_str("}\n");
         out
@@ -423,17 +362,8 @@ mod tests {
     #[test]
     fn unused_ports_leave_their_dust_out() {
         let lib = Library::builtin().unwrap();
-        let wires = |used: &[Edge]| {
-            lib.nor
-                .blocks(used)
-                .iter()
-                .filter(|(_, b)| matches!(b, Block::Wire(_)))
-                .count()
-        };
-        assert_eq!(
-            wires(&[Edge::West, Edge::North, Edge::South, Edge::East]),
-            7
-        );
+        let wires = |used: &[Edge]| lib.nor.blocks(used).iter().filter(|(_, b)| matches!(b, Block::Wire(_))).count();
+        assert_eq!(wires(&[Edge::West, Edge::North, Edge::South, Edge::East]), 7);
         assert_eq!(wires(&[Edge::West, Edge::East]), 3);
         assert_eq!(wires(&[Edge::East]), 1);
     }

@@ -48,25 +48,25 @@ fn main() -> ExitCode {
     }
 }
 
-/// `redfab check-traces [--mutate NAME] [--verbose] DIR`
+/// `redfab check-traces [--mutate NAME] [--verbose] [--no-skips] DIR`
 ///
 /// Replays every recorded trace in DIR in the simulator. Succeeds only if every
-/// replayed trace matches and at least one was replayed.
+/// replayed trace matches and at least one was replayed. With `--no-skips`, a
+/// trace that uses a block the simulator lacks is a failure too.
 fn check_traces(args: &[String]) -> Result<bool, String> {
     let mut mutation = None;
     let mut verbose = false;
+    let mut no_skips = false;
     let mut dir = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--mutate" => {
                 let name = it.next().ok_or("--mutate needs a name")?;
-                mutation = Some(
-                    Mutation::from_name(name)
-                        .ok_or_else(|| format!("unknown mutation {name:?}"))?,
-                );
+                mutation = Some(Mutation::from_name(name).ok_or_else(|| format!("unknown mutation {name:?}"))?);
             }
             "--verbose" => verbose = true,
+            "--no-skips" => no_skips = true,
             other => dir = Some(PathBuf::from(other)),
         }
     }
@@ -75,30 +75,21 @@ fn check_traces(args: &[String]) -> Result<bool, String> {
     let mut fixtures: Vec<PathBuf> = fs::read_dir(&dir)
         .map_err(|e| format!("{}: {e}", dir.display()))?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(".fixture.json"))
-        })
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".fixture.json")))
         .collect();
     fixtures.sort();
 
     let (mut matched, mut mismatched, mut unsupported, mut racy) = (0, 0, 0, 0);
     for fixture_path in &fixtures {
-        let name = fixture_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .trim_end_matches(".fixture.json");
+        let name =
+            fixture_path.file_name().and_then(|n| n.to_str()).unwrap_or_default().trim_end_matches(".fixture.json");
         let fixture_json = read(fixture_path)?;
         for mode in TRACE_MODES {
             let trace_path = dir.join(format!("{name}.{mode}.trace.json"));
             if !trace_path.exists() {
                 continue;
             }
-            match replay(&fixture_json, &read(&trace_path)?, mutation)
-                .map_err(|e| format!("{name} [{mode}]: {e}"))?
-            {
+            match replay(&fixture_json, &read(&trace_path)?, mutation).map_err(|e| format!("{name} [{mode}]: {e}"))? {
                 Replay::Match { reordered_ticks } => {
                     matched += 1;
                     if reordered_ticks > 0 {
@@ -130,7 +121,7 @@ fn check_traces(args: &[String]) -> Result<bool, String> {
         "{}: {matched} matched ({racy} of them only with a different order of same-tick events), {mismatched} mismatched, {unsupported} skipped (unsupported blocks)",
         dir.display()
     );
-    Ok(mismatched == 0 && matched > 0)
+    Ok(mismatched == 0 && matched > 0 && !(no_skips && unsupported > 0))
 }
 
 /// `redfab replay FIXTURE TRACE [TICKS]`: prints the game's recording beside the
@@ -139,18 +130,8 @@ fn replay_report_command(args: &[String]) -> Result<bool, String> {
     let [fixture, trace, rest @ ..] = args else {
         return Err("usage: redfab replay FIXTURE.json TRACE.json [TICKS]".into());
     };
-    let until = rest.first().map_or(Ok(10), |t| {
-        t.parse::<u32>()
-            .map_err(|_| format!("bad tick count {t:?}"))
-    })?;
-    print!(
-        "{}",
-        redfab_core::trace::replay_report(
-            &read(Path::new(fixture))?,
-            &read(Path::new(trace))?,
-            until
-        )?
-    );
+    let until = rest.first().map_or(Ok(10), |t| t.parse::<u32>().map_err(|_| format!("bad tick count {t:?}")))?;
+    print!("{}", redfab_core::trace::replay_report(&read(Path::new(fixture))?, &read(Path::new(trace))?, until)?);
     Ok(true)
 }
 
@@ -161,8 +142,7 @@ fn structure_command(args: &[String]) -> Result<bool, String> {
         return Err("usage: redfab structure TRACE.json OUT.nbt".into());
     };
     let world = redfab_core::trace::initial_world(&read(Path::new(trace))?)?;
-    fs::write(out, redfab_core::structure::structure_file(&world))
-        .map_err(|e| format!("{out}: {e}"))?;
+    fs::write(out, redfab_core::structure::structure_file(&world)).map_err(|e| format!("{out}: {e}"))?;
     Ok(true)
 }
 
@@ -187,8 +167,7 @@ fn structure_pattern_command(args: &[String]) -> Result<bool, String> {
             }
         }
     }
-    fs::write(out, redfab_core::structure::structure_file(&world))
-        .map_err(|e| format!("{out}: {e}"))?;
+    fs::write(out, redfab_core::structure::structure_file(&world)).map_err(|e| format!("{out}: {e}"))?;
     Ok(true)
 }
 
@@ -249,11 +228,7 @@ fn build_command(args: &[String]) -> Result<bool, String> {
     let (Some(source), Some(out)) = (source, out) else {
         return Err("usage: redfab build SOURCE.sv [--top NAME] -o DIR".into());
     };
-    let name = out
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("design")
-        .to_string();
+    let name = out.file_name().and_then(|n| n.to_str()).unwrap_or("design").to_string();
 
     let library = redfab_core::tile::Library::builtin()?;
     fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
@@ -265,27 +240,17 @@ fn build_command(args: &[String]) -> Result<bool, String> {
     write("cells.v", library.verilog_models().as_bytes())?;
     write("map.ys", MAP_SCRIPT.replace("{top}", &top).as_bytes())?;
     write("equiv.ys", EQUIV_SCRIPT.replace("{top}", &top).as_bytes())?;
-    for stale in [
-        "mapped.json",
-        "mapped.v",
-        "design.json",
-        "world.nbt",
-        "report.txt",
-    ] {
+    for stale in ["mapped.json", "mapped.v", "design.json", "world.nbt", "report.txt"] {
         let _ = fs::remove_file(out.join(stale));
     }
 
     run_yosys(&out, "map.ys").map_err(|e| format!("synthesis failed: {e}"))?;
-    run_yosys(&out, "equiv.ys")
-        .map_err(|e| format!("the mapped netlist is NOT proven equal to the source: {e}"))?;
+    run_yosys(&out, "equiv.ys").map_err(|e| format!("the mapped netlist is NOT proven equal to the source: {e}"))?;
 
     let built = redfab_core::build::build(&read(&out.join("mapped.json"))?, &top, &name)?;
     write("design.json", built.design.to_json().as_bytes())?;
     write("world.nbt", &built.structure)?;
-    let report = format!(
-        "{}  mapped netlist proven equal to the source\n",
-        built.report
-    );
+    let report = format!("{}  mapped netlist proven equal to the source\n", built.report);
     write("report.txt", report.as_bytes())?;
     print!("{report}");
     Ok(true)
@@ -319,11 +284,7 @@ fn lvs_command(args: &[String]) -> Result<bool, String> {
         [design, mapped, flag, top] if flag == "--top" => (design, mapped, top.as_str()),
         _ => return Err("usage: redfab lvs DESIGN.json MAPPED.json [--top NAME]".into()),
     };
-    let problems = redfab_core::build::check_design(
-        &read(Path::new(design))?,
-        &read(Path::new(mapped))?,
-        top,
-    )?;
+    let problems = redfab_core::build::check_design(&read(Path::new(design))?, &read(Path::new(mapped))?, top)?;
     for problem in &problems {
         println!("{problem}");
     }
@@ -339,10 +300,7 @@ fn simulate_command(args: &[String]) -> Result<bool, String> {
     let [design, vectors] = args else {
         return Err("usage: redfab simulate DESIGN.json VECTORS.json".into());
     };
-    println!(
-        "{}",
-        redfab_core::build::simulate(&read(Path::new(design))?, &read(Path::new(vectors))?)?
-    );
+    println!("{}", redfab_core::build::simulate(&read(Path::new(design))?, &read(Path::new(vectors))?)?);
     Ok(true)
 }
 

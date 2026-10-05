@@ -272,7 +272,7 @@ def fixtures() -> list[Fixture]:
     b.expects(4, (2, 1, 0), f"{R}[locked=true,powered=false]").expects(14, (3, 1, 0), f"{D}[power=0]")
     b.expects(18, (2, 1, 0), f"{R}[locked=false]").expects(19, (3, 1, 0), f"{D}[power=0]").expects(20, (3, 1, 0), f"{D}[power=15]")
     b.expects(26, (2, 1, 0), f"{R}[locked=true,powered=true]").expects(40, (3, 1, 0), f"{D}[power=15]")
-    out.append(b.stable(26).build())
+    out.append(b.stable(28).build())
 
     names = [f.name for f in out]
     assert len(names) == len(set(names)), "duplicate fixture names"

@@ -48,16 +48,12 @@ impl Netlist {
     /// nets, undriven or multiply driven nets. Buffers are dissolved into wire.
     pub fn from_yosys_json(json: &str, top: &str, library: &Library) -> Result<Netlist, String> {
         let root: Value = serde_json::from_str(json).map_err(|e| format!("netlist JSON: {e}"))?;
-        let module = root["modules"]
-            .get(top)
-            .ok_or_else(|| format!("module {top:?} not found in the netlist"))?;
+        let module = root["modules"].get(top).ok_or_else(|| format!("module {top:?} not found in the netlist"))?;
         let cells_of_library: BTreeMap<&str, Vec<&str>> = library.cells().into_iter().collect();
 
         // Yosys numbers nets from 2; strings are constants.
         let bit = |value: &Value, what: &str| -> Result<u64, String> {
-            value.as_u64().ok_or_else(|| {
-                format!("{what} is tied to constant {value}; constants are not supported yet")
-            })
+            value.as_u64().ok_or_else(|| format!("{what} is tied to constant {value}; constants are not supported yet"))
         };
 
         let mut alias: BTreeMap<u64, u64> = BTreeMap::new(); // buffer output -> buffer input
@@ -66,9 +62,7 @@ impl Netlist {
         for (name, cell) in module["cells"].as_object().unwrap_or(&empty) {
             let kind = cell["type"].as_str().unwrap_or_default();
             let pin = |pin: &str| -> Result<u64, String> {
-                let bits = cell["connections"][pin]
-                    .as_array()
-                    .ok_or_else(|| format!("cell {name}: no pin {pin}"))?;
+                let bits = cell["connections"][pin].as_array().ok_or_else(|| format!("cell {name}: no pin {pin}"))?;
                 match bits.as_slice() {
                     [one] => bit(one, &format!("cell {name} pin {pin}")),
                     _ => Err(format!("cell {name}: pin {pin} is not one bit")),
@@ -78,9 +72,9 @@ impl Netlist {
                 alias.insert(pin("Y")?, pin("A")?);
                 continue;
             }
-            let pins = cells_of_library.get(kind).ok_or_else(|| {
-                format!("cell {name} has type {kind}, which is not in the tile library")
-            })?;
+            let pins = cells_of_library
+                .get(kind)
+                .ok_or_else(|| format!("cell {name} has type {kind}, which is not in the tile library"))?;
             let inputs = pins.iter().map(|p| pin(p)).collect::<Result<Vec<_>, _>>()?;
             raw_cells.push((name.clone(), kind.to_string(), inputs, pin("Y")?));
         }
@@ -99,19 +93,10 @@ impl Netlist {
         let mut inputs = Vec::new();
         let mut outputs = Vec::new();
         for (name, port) in module["ports"].as_object().unwrap_or(&empty) {
-            let bits = port["bits"]
-                .as_array()
-                .ok_or_else(|| format!("port {name} has no bits"))?;
+            let bits = port["bits"].as_array().ok_or_else(|| format!("port {name} has no bits"))?;
             for (i, value) in bits.iter().enumerate() {
-                let bit_name = if bits.len() == 1 {
-                    name.clone()
-                } else {
-                    format!("{name}[{i}]")
-                };
-                let entry = PortBit {
-                    net: net(bit(value, &format!("port {bit_name}"))?),
-                    name: bit_name,
-                };
+                let bit_name = if bits.len() == 1 { name.clone() } else { format!("{name}[{i}]") };
+                let entry = PortBit { net: net(bit(value, &format!("port {bit_name}"))?), name: bit_name };
                 match port["direction"].as_str() {
                     Some("input") => inputs.push(entry),
                     Some("output") => outputs.push(entry),
@@ -133,12 +118,7 @@ impl Netlist {
             })
             .collect();
 
-        let netlist = Netlist {
-            inputs,
-            outputs,
-            cells,
-            net_count: ids.len(),
-        };
+        let netlist = Netlist { inputs, outputs, cells, net_count: ids.len() };
         netlist.drivers()?; // every net has exactly one driver
         Ok(netlist)
     }
@@ -159,11 +139,7 @@ impl Netlist {
         for (i, cell) in self.cells.iter().enumerate() {
             claim(cell.output, Driver::Cell(i), &format!("cell {}", cell.name))?;
         }
-        drivers
-            .into_iter()
-            .enumerate()
-            .map(|(net, d)| d.ok_or_else(|| format!("net {net} has no driver")))
-            .collect()
+        drivers.into_iter().enumerate().map(|(net, d)| d.ok_or_else(|| format!("net {net} has no driver"))).collect()
     }
 }
 
@@ -178,10 +154,7 @@ mod tests {
     #[test]
     fn reads_a_mapped_nor() {
         let n = Netlist::from_yosys_json(NOR2, "top", &Library::builtin().unwrap()).unwrap();
-        assert_eq!(
-            (n.inputs.len(), n.outputs.len(), n.cells.len(), n.net_count),
-            (2, 1, 1, 3)
-        );
+        assert_eq!((n.inputs.len(), n.outputs.len(), n.cells.len(), n.net_count), (2, 1, 1, 3));
         assert_eq!(n.cells[0].inputs, vec![n.inputs[0].net, n.inputs[1].net]);
         assert_eq!(n.cells[0].output, n.outputs[0].net);
     }
@@ -190,30 +163,16 @@ mod tests {
     fn rejects_cells_outside_the_library_and_constants() {
         let lib = Library::builtin().unwrap();
         let unknown = NOR2.replace("NOR2", "$_AND_");
-        assert!(
-            Netlist::from_yosys_json(&unknown, "top", &lib)
-                .unwrap_err()
-                .contains("not in the tile library")
-        );
+        assert!(Netlist::from_yosys_json(&unknown, "top", &lib).unwrap_err().contains("not in the tile library"));
         let constant = NOR2.replace(r#""B":[3]"#, r#""B":["0"]"#);
-        assert!(
-            Netlist::from_yosys_json(&constant, "top", &lib)
-                .unwrap_err()
-                .contains("constant")
-        );
+        assert!(Netlist::from_yosys_json(&constant, "top", &lib).unwrap_err().contains("constant"));
     }
 
     #[test]
     fn a_buffer_becomes_wire() {
         let buffered = NOR2
-            .replace(
-                r#""cells":{"#,
-                r#""cells":{"b":{"type":"BUF","connections":{"A":[4],"Y":[5]}},"#,
-            )
-            .replace(
-                r#""y":{"direction":"output","bits":[4]}"#,
-                r#""y":{"direction":"output","bits":[5]}"#,
-            );
+            .replace(r#""cells":{"#, r#""cells":{"b":{"type":"BUF","connections":{"A":[4],"Y":[5]}},"#)
+            .replace(r#""y":{"direction":"output","bits":[4]}"#, r#""y":{"direction":"output","bits":[5]}"#);
         let n = Netlist::from_yosys_json(&buffered, "top", &Library::builtin().unwrap()).unwrap();
         assert_eq!(n.cells.len(), 1);
         assert_eq!(n.cells[0].output, n.outputs[0].net);

@@ -14,6 +14,8 @@ impl Sim {
     fn should_connect_to(block: Block, dir: Option<Dir>) -> bool {
         match block {
             Block::Wire(_) => true,
+            // Dust joins a repeater only at its front and back.
+            Block::Repeater { facing, .. } => dir.is_some_and(|d| d == facing || d == facing.opposite()),
             other => other.is_signal_source() && dir.is_some(),
         }
     }
@@ -22,20 +24,14 @@ impl Sim {
     fn wire_connecting_side(&self, pos: Pos, dir: Dir, can_connect_up: bool) -> Side {
         let beside = pos.offset(dir);
         let beside_block = self.world.get(beside);
-        if can_connect_up
-            && beside_block.is_full_block()
-            && Self::should_connect_to(self.world.get(beside.up()), None)
+        if can_connect_up && beside_block.is_full_block() && Self::should_connect_to(self.world.get(beside.up()), None)
         {
             return Side::Up;
         }
         let steps_down = !self.conducts(beside_block)
             && self.mutation != Some(Mutation::NoStepDownConnection)
             && Self::should_connect_to(self.world.get(beside.down()), None);
-        if Self::should_connect_to(beside_block, Some(dir)) || steps_down {
-            Side::Side
-        } else {
-            Side::None
-        }
+        if Self::should_connect_to(beside_block, Some(dir)) || steps_down { Side::Side } else { Side::None }
     }
 
     fn wire_can_connect_up(&self, pos: Pos) -> bool {
@@ -47,10 +43,7 @@ impl Sim {
     pub(super) fn wire_connection_state(&self, pos: Pos, wire: Wire) -> Wire {
         let was_dot = wire.is_dot();
         let can_up = self.wire_can_connect_up(pos);
-        let mut shape = Wire {
-            power: wire.power,
-            ..Wire::DOT
-        };
+        let mut shape = Wire { power: wire.power, ..Wire::DOT };
         for dir in Dir::HORIZONTAL {
             shape = shape.with_side(dir, self.wire_connecting_side(pos, dir, can_up));
         }
@@ -106,9 +99,7 @@ impl Sim {
     /// from each connected side re-check the side that faces back.
     pub(super) fn wire_update_indirect_shapes(&mut self, pos: Pos, wire: Wire) {
         for dir in Dir::HORIZONTAL {
-            if wire.side(dir) == Side::None
-                || matches!(self.world.get(pos.offset(dir)), Block::Wire(_))
-            {
+            if wire.side(dir) == Side::None || matches!(self.world.get(pos.offset(dir)), Block::Wire(_)) {
                 continue;
             }
             for diagonal in [pos.offset(dir).down(), pos.offset(dir).up()] {
@@ -149,11 +140,7 @@ impl Sim {
     /// every wire whose power changed. This is the game's experimental wire
     /// evaluator: all strengths are final before any neighbour is notified.
     pub(super) fn update_power(&mut self, start: Pos) {
-        let mut net = Network {
-            updated: Vec::new(),
-            turn_off: VecDeque::new(),
-            turn_on: VecDeque::new(),
-        };
+        let mut net = Network { updated: Vec::new(), turn_off: VecDeque::new(), turn_on: VecDeque::new() };
 
         if let Block::Wire(w) = self.world.get(start) {
             net.set_power(start, w.power);
@@ -180,9 +167,7 @@ impl Sim {
         }
         while let Some(pos) = net.turn_on.pop_front() {
             let current = net.power_of(pos).unwrap_or(0);
-            let incoming = self
-                .block_signal_for_wire(pos)
-                .max(self.incoming_wire_signal(&net, pos));
+            let incoming = self.block_signal_for_wire(pos).max(self.incoming_wire_signal(&net, pos));
             if incoming > current {
                 net.set_power(pos, incoming);
             }
@@ -236,17 +221,8 @@ impl Sim {
     /// (`getIncomingWireSignal`). Wires one level up or down count when the
     /// blocks in between allow it.
     fn incoming_wire_signal(&self, net: &Network, pos: Pos) -> u8 {
-        let best = self
-            .wire_sources(pos)
-            .into_iter()
-            .map(|from| self.wire_signal(net, from))
-            .max()
-            .unwrap_or(0);
-        let loss = if self.mutation == Some(Mutation::DustLosesTwoPerBlock) {
-            2
-        } else {
-            1
-        };
+        let best = self.wire_sources(pos).into_iter().map(|from| self.wire_signal(net, from)).max().unwrap_or(0);
+        let loss = if self.mutation == Some(Mutation::DustLosesTwoPerBlock) { 2 } else { 1 };
         best.saturating_sub(loss)
     }
 
@@ -271,10 +247,7 @@ impl Sim {
 
     /// The wires that the wire at `pos` takes power from.
     pub fn wire_neighbors(&self, pos: Pos) -> Vec<Pos> {
-        self.wire_sources(pos)
-            .into_iter()
-            .filter(|&p| matches!(self.world.get(p), Block::Wire(_)))
-            .collect()
+        self.wire_sources(pos).into_iter().filter(|&p| matches!(self.world.get(p), Block::Wire(_))).collect()
     }
 
     /// The game's `propagateChangeToNeighbors`: queue the wires this one can reach.
@@ -321,10 +294,7 @@ struct Network {
 
 impl Network {
     fn power_of(&self, pos: Pos) -> Option<u8> {
-        self.updated
-            .iter()
-            .find(|(p, _)| *p == pos)
-            .map(|&(_, power)| power)
+        self.updated.iter().find(|(p, _)| *p == pos).map(|&(_, power)| power)
     }
 
     fn set_power(&mut self, pos: Pos, power: u8) {

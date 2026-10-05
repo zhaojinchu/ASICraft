@@ -73,10 +73,8 @@ impl Layout {
         for (&(col, row), placed) in &self.tiles {
             for edge in placed.edges() {
                 let (dc, dr) = edge.step();
-                let faces = self
-                    .tiles
-                    .get(&(col + dc, row + dr))
-                    .is_some_and(|other| other.edges().contains(&edge.opposite()));
+                let faces =
+                    self.tiles.get(&(col + dc, row + dr)).is_some_and(|other| other.edges().contains(&edge.opposite()));
                 if !faces {
                     return Err(format!(
                         "tile at column {col}, row {row} has an open port on its {} edge",
@@ -113,16 +111,8 @@ impl Layout {
             }
         }
         let all = |found: Vec<Option<Pos>>, what: &str| -> Result<Vec<Pos>, String> {
-            found
-                .into_iter()
-                .enumerate()
-                .map(|(i, p)| p.ok_or_else(|| format!("{what} {i} was not placed")))
-                .collect()
+            found.into_iter().enumerate().map(|(i, p)| p.ok_or_else(|| format!("{what} {i} was not placed"))).collect()
         };
-        Ok(Realized {
-            world,
-            probes: all(probes, "input")?,
-            lamps: all(lamps, "output")?,
-        })
+        Ok(Realized { world, probes: all(probes, "input")?, lamps: all(lamps, "output")? })
     }
 }

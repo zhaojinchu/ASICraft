@@ -3,7 +3,8 @@
 //! North is up and east is right. Legend:
 //! `.` air, `#` stone, `G` glass, `R` redstone block, `L`/`l` lamp lit/unlit,
 //! `0`-`f` dust with that power, `T`/`t` standing torch lit/unlit, `P`/`/` lever on/off,
-//! arrows for a lit wall torch pointing away from its block, `n e s w` for an unlit one.
+//! arrows for a lit wall torch pointing away from its block, `n e s w` for an unlit one,
+//! triangles for a repeater pointing the way it drives (filled when powered).
 
 use crate::block::Block;
 use crate::geom::{Dir, Pos};
@@ -30,6 +31,17 @@ pub fn symbol(block: Block) -> char {
                 't'
             }
         }
+        // A repeater is drawn as an arrow in the direction it drives, filled when powered.
+        Block::Repeater { facing, powered, .. } => match (facing.opposite(), powered) {
+            (Dir::North, true) => '▲',
+            (Dir::East, true) => '▶',
+            (Dir::South, true) => '▼',
+            (Dir::West, true) => '◀',
+            (Dir::North, false) => '△',
+            (Dir::East, false) => '▷',
+            (Dir::South, false) => '▽',
+            _ => '◁',
+        },
         Block::Lever { powered, .. } => {
             if powered {
                 'P'
