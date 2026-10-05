@@ -196,6 +196,15 @@ build_designs() {
     done
 }
 
+# The equivalence proof must be able to fail: swap the inverter for a buffer in a
+# copy of the mapped netlist and the proof has to reject it.
+equiv_negative() {
+    rm -rf build/designs/_tampered && cp -r build/designs/not1 build/designs/_tampered &&
+    grep -q "NOT " build/designs/_tampered/mapped.v &&
+    sed -i '' 's/NOT /BUF /' build/designs/_tampered/mapped.v &&
+    ! node synth/yosys.mjs build/designs/_tampered equiv.ys
+}
+
 # Every input combination: Verilator on the source vs the block simulator on the layout.
 sim_vs_verilator() {
     uv run --frozen python -m harness.design sim $DESIGNS
@@ -224,14 +233,21 @@ design_negative_vanilla() {
     uv run --frozen python -m harness.design vanilla-negative nor2
 }
 
+# With time running normally (no freezing or stepping), as a player would see it.
+design_live() {
+    uv run --frozen python -m harness.show nor2 --self-test
+}
+
 echo "stage 3: first circuit"
 run build-designs       build_designs
+run equiv-negative      equiv_negative
 run sim-vs-verilator    sim_vs_verilator
 run lvs-negative        lvs_negative
 run wasm-identical      wasm_identical
 if [ $VANILLA = 1 ]; then
     run design-vanilla           design_vanilla
     run design-negative-vanilla  design_negative_vanilla
+    run design-live              design_live
 fi
 
 # ---------------------------------------------------------------- summary

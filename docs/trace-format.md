@@ -32,7 +32,7 @@ What to build and what to do to it.
 
 - `size`: the plot's bounding box; everything in it is recorded.
 - `placement`: `"update"` places blocks normally and lets the game settle them (shapes, power, pending ticks run out) before tick 0; `"strict"` places them exactly as written with no updates. Blocks in `blocks` may omit properties under `"update"`.
-- `events`: stimuli, applied with normal (update-triggering) `setblock` at the start of the given tick.
+- `events`: stimuli, applied with normal (update-triggering) `setblock` as the last thing in the given tick. Several in one tick are applied in order of height, then x, then z. The order is part of the format because it can matter: if two inputs of one gate swap values in the same tick, the gate briefly sees one of the two intermediate states.
 - `expect`: checks evaluated against a recorded trace. `state` matches if every property it names has the given value (so `redstone_wire[power=15]` ignores the shape). `{"from": t, "stable": true}` means nothing changes and nothing is pending from tick t to the end.
 
 ## Trace file (`*.trace.json`)
