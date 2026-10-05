@@ -4,5 +4,11 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pure-Rust gzip, so the crate still builds for WebAssembly.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 [lints]
 workspace = true

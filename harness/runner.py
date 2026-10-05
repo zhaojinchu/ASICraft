@@ -115,7 +115,14 @@ class Runner:
         self.session = session
         self.source = source
 
-    def run(self, plots: list[Plot], log=print) -> dict[tuple[str, str], Trace]:
+    def run(self, plots: list[Plot], log=print, settle_ticks: int = SETTLE_TICKS,
+            allow_pending_at_start: bool = False) -> dict[tuple[str, str], Trace]:
+        """Place every plot, let update-placed ones settle, then step all of them together.
+
+        A plot that still has pending ticks at tick 0 is an error unless
+        `allow_pending_at_start` is set; the trace then records them in `pending0`.
+        With `settle_ticks=0` nothing has ticked yet at tick 0, so the trace starts
+        from the exact moment after placement."""
         session = self.session
         if not plots:
             return {}
@@ -155,7 +162,8 @@ class Runner:
                             wp = pl.to_world(above)
                             session.setblock(wp, GLASS, False)
                             session.setblock(wp, AIR, False)
-            session.step(SETTLE_TICKS)
+            if settle_ticks:
+                session.step(settle_ticks)
         log(f"placed {len(plots)} plots in {time.monotonic() - t0:.1f}s")
 
         # --- tick 0 (stimuli listed for tick 0 are applied before it is recorded)
@@ -164,7 +172,7 @@ class Runner:
         traces: dict[tuple[str, str], Trace] = {}
         for plot in plots:
             states, pend = self._extract(plot, blocks, pending)
-            if plot.fixture.placement == "update" and pend:
+            if plot.fixture.placement == "update" and pend and not allow_pending_at_start:
                 raise SessionError(f"{plot.fixture.name}/{plot.variant} did not settle: pending {[p.to_json() for p in pend]}")
             traces[(plot.fixture.name, plot.variant)] = Trace.start(
                 plot.fixture.name, self.source, plot.fixture.size, states, pend, plot.fixture.ticks
@@ -181,9 +189,10 @@ class Runner:
             self._apply_events(plots, tick)
             blocks, pending = self._snapshot(boxes)
             for plot in plots:
-                if tick <= plot.fixture.ticks:
+                key = (plot.fixture.name, plot.variant)
+                if tick <= plot.fixture.ticks and key in traces:
                     states, pend = self._extract(plot, blocks, pending)
-                    traces[(plot.fixture.name, plot.variant)].record(tick, states, pend)
+                    traces[key].record(tick, states, pend)
             if tick % 50 == 0:
                 log(f"  tick {tick}/{total} ({time.monotonic() - t0:.1f}s)")
         log(f"ran {total} ticks in {time.monotonic() - t0:.1f}s, {session.commands_sent} commands so far")

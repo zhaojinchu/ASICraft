@@ -48,7 +48,9 @@ run() {
 
 pins_agree() {
     grep -q "\"@yowasp/yosys\": \"$YOWASP_NPM\"" package.json &&
-    grep -q "yowasp-yosys==$YOWASP_PYPI" pyproject.toml
+    grep -q "yowasp-yosys==$YOWASP_PYPI" pyproject.toml &&
+    cargo run -q -p redfab-cli -- --version | grep -q "(Minecraft $MC_VERSION, data version $MC_DATA_VERSION)" &&
+    grep -q "\"mc_version\": \"$MC_VERSION\"" harness/data/block_defaults.json
 }
 
 tool_hashes() {
@@ -149,8 +151,9 @@ sim_corpus() {
 # Each deliberately wrong rule must make the corpus check fail.
 sim_mutations() {
     for m in $($REDFAB list-mutations); do
-        if $REDFAB check-traces --mutate "$m" fixtures/fuzz >/dev/null 2>&1; then
-            echo "mutation '$m' was NOT caught by the corpus"; return 1
+        if $REDFAB check-traces --mutate "$m" fixtures/fuzz >/dev/null 2>&1 &&
+           $REDFAB check-traces --mutate "$m" fixtures/mechanics >/dev/null 2>&1; then
+            echo "mutation '$m' was NOT caught by the corpus or the mechanics fixtures"; return 1
         fi
         echo "mutation '$m' caught"
     done

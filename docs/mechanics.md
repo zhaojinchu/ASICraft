@@ -63,8 +63,37 @@ Units are game ticks (gt). "Tick t" follows `trace-format.md`: a stimulus at tic
 | The RCON server drops the connection if two requests arrive in one read | stage 0 | The client waits for a reply before sending its end marker. |
 | 26.3 gamerule names | probe | snake_case: `advance_time`, `random_tick_speed`, `spawn_mobs`, … (the camelCase names are rejected). |
 
+## Structure files (stage 2)
+
+| Fact | Check | Measured |
+|---|---|---|
+| Format in 26.3 | built-in `igloo/top.nbt` from the server jar | Palette entries are `{id, properties}` (lowercase), not the older `{Name, Properties}`. `DataVersion` 5023. |
+| Where `/place template ns:name` looks | `harness.place_template` | `<world>/generated/<ns>/structure/<name>.nbt`. The reply on success is `Loaded template "ns:name" at x, y, z`. |
+| Strict placement | 5 recorded states | Reproduces the state exactly, and it stays unchanged for 20 ticks. |
+| Normal placement (with updates) | same 5 states | Settles to the same state. |
+| Size | 70×2×70 structure | Loads in full. The 48-block limit belongs to structure blocks, not to `/place template`. |
+
+## Random circuits and races (stage 2)
+
+`python -m harness.fuzz` builds random small circuits (dust, blocks, lamps, torches, inverter chains, some fed back into themselves), switches redstone blocks, and sometimes edits the circuit mid-run. Each is recorded in both modes at two placements.
+
+Of the 200 circuits in the committed corpus (`fixtures/fuzz/`, seed 1):
+
+| | Experiments mode | Default mode |
+|---|---|---|
+| Same result at both placements | 197 | 197 |
+| Result depends on placement (dropped) | 3 | 3 |
+
+- **12 of 196 circuits (6%) behave differently in the two modes.** For those, only the experiments-mode recording is kept.
+- **The game itself is order-dependent on some circuits.** When several scheduled ticks fall due together, the order they run in can change the result; so can the order in which one wire update reaches several neighbours. In default mode that order follows block position; in experiments mode part of it is chosen at random. The saved world does not record it.
+- **The simulator matches all 381 corpus traces.** For 5 of them its default order of same-moment events gives a different result, and another order reproduces the game exactly; those circuits have a race. The check fails only when no order reproduces the game.
+- Each of nine deliberately wrong rules (dust losing 2 per block, torch delay 1, and so on) makes the corpus or the mechanics fixtures fail.
+
+Two game behaviours the editing stimuli exposed:
+
+- A wire reshaped by a neighbour's removal can point into a block for a moment while it still holds its old power. A lamp that hears an update in that moment lights, then goes out 4 ticks later. Whether it hears one depends on delivery order.
+- `setblock` of dust with no block underneath places it anyway, as a dot. redfab never emits unsupported dust or torches, and the simulator refuses them.
+
 ## Still unmeasured
 
-- `/place template` with a structure larger than 48³ (needs the `.nbt` writer, stage 2).
 - Setup, hold and clock-to-output of the flip-flop designs (stage 8).
-- Any circuit where the two redstone modes disagree. None of these fixtures did; update-order differences need multi-path dust networks, which stage 2's random fixtures will cover.

@@ -8,7 +8,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 |---|---|---|---|
 | 0 | Setup and synthesis check | **done** 2026-10-01 | All 11 checks pass. YoWASP Yosys reads SystemVerilog, with `--threads 1` |
 | 1 | Vanilla test harness | **done** 2026-10-04 | 25 mechanics fixtures recorded in both redstone modes; all expectations met except the wiki's burnout threshold (game burns out on the 8th turn-off, not the 9th) |
-| 2 | Simulator, part 1 | not started | |
+| 2 | Simulator, part 1 | **done** 2026-10-05 | Block-level simulator matches all 417 recorded traces (36 mechanics, 381 random); structure files load in the game |
 | 3 | First circuit: one NOR gate | not started | |
 | 4 | Simulator, part 2 | not started | |
 | 5 | Full combinational tile set | not started | |
@@ -66,6 +66,28 @@ Findings and surprises from each stage go here, newest last.
 **Harness performance:** 75 plots, 220 ticks, both modes: about 45 s per mode plus the 66 s idle-pause proof. Snapshot parsing was the bottleneck (0.5 s per tick) until the NBT reader became lazy and decoded only the plot boxes (0.05 s).
 
 **Still unmeasured:** `/place template` above 48³ (stage 2), flip-flop timing (stage 8).
+
+### Stage 2 (2026-10-05)
+
+**Built:** `redfab-core` now has typed blocks with the game's state strings, a world grid, a block-level simulator (`src/sim`: signal queries, wire shapes, the wire power evaluator, torches with burnout, lamps, scheduled ticks with priorities and de-duplication), trace replay with a side-by-side text report (`redfab replay`), and a structure-file writer. `harness/fuzz.py` generates random circuits and records them from the game; `harness/place_template.py` loads redfab's structure files in the game.
+
+**Results:**
+
+- The simulator reproduced the 36 in-scope mechanics traces on its first run, block states and pending ticks.
+- Across about 1,000 random circuits (seeds 11–23 and the corpus) the only real disagreements came from two causes, both understood: races (below) and a generator bug that placed dust in mid-air.
+- The committed corpus is 200 circuits, 381 traces, all matched.
+
+**Decisions and deviations from the plan:**
+
+1. **The simulator runs on blocks, not on a component graph.** The extractor moves to stage 3, where the layout-versus-netlist check needs it.
+2. **Wire power follows the Redstone Experiments rules.** 6% of random circuits behave differently in default mode. Tiles and designs must be mode-independent; the harness keeps checking both.
+3. **Races are a first-class result.** The replay tries other orders of same-moment events (scheduled ticks due together; one update delivered to several neighbours). A trace that some order reproduces is a race in the circuit; one that no order reproduces is a simulator bug. The same shuffling is what later stages use to reject racy designs.
+4. **Torch burnout was done here** instead of stage 4, since the stage 1 measurements made it simple.
+5. **Unsupported dust and torches are refused**, not modelled.
+
+**Measured along the way:** the 26.3 structure format uses `{id, properties}` palette entries; `/place template` reads `generated/<ns>/structure/`; a 70×2×70 structure loads, so there is no 48-block limit there.
+
+**Not done:** the SVG layer view (the text view in `redfab replay` has been enough so far).
 
 ---
 
