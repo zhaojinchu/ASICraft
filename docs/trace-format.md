@@ -57,6 +57,7 @@ What happened.
 - `initial`: every non-air block in the box at tick 0.
 - `ticks`: one entry per tick from 1 to the fixture's `ticks`, **only when something changed or something is pending**; a missing tick means "same as the previous tick, nothing pending". `changes` holds the full new state of every block that differs from the previous tick (`minecraft:air` when a block disappeared).
 - `pending`: scheduled block ticks inside the box after this tick, with `delay` in ticks remaining and the game's `priority`. Sources that cannot report pending ticks omit the field.
+- `pending0`: the same for tick 0. It is empty for fixtures that were left to settle. The random fixtures in `fixtures/fuzz/` are recorded from the moment of placement instead, so theirs usually is not; the order in which those ticks were scheduled is not known.
 - `source.kind` is `"vanilla"`, `"sim"` or `"live"`.
 
 Two traces of the same fixture are **equal** when `initial` and the per-tick block states are equal for every tick; `pending` is compared only when both sides provide it.
