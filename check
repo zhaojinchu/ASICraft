@@ -183,6 +183,57 @@ if [ $VANILLA = 1 ]; then
     run place-template    place_template
 fi
 
+# ---------------------------------------------------------------- stage 3
+
+DESIGNS="not1 nor2 nor3"
+
+# SystemVerilog to a baked block world: synthesis to the tile library's cells, a proof
+# that the mapped netlist equals the source, placement, and the layout-versus-netlist
+# check. Any of those failing fails the build.
+build_designs() {
+    for d in $DESIGNS; do
+        $REDFAB build designs/$d/top.sv --top top -o build/designs/$d || return 1
+    done
+}
+
+# Every input combination: Verilator on the source vs the block simulator on the layout.
+sim_vs_verilator() {
+    uv run --frozen python -m harness.design sim $DESIGNS
+}
+
+# Broken copies of the layout (a cut wire, two wires shorted, a missing torch) must
+# each be rejected by the layout-versus-netlist check.
+lvs_negative() {
+    uv run --frozen python -m harness.design lvs-negative nor2
+}
+
+# The WebAssembly build of the core must produce byte-identical output.
+wasm_identical() {
+    node tools/wasm_build_check.mjs $DESIGNS
+}
+
+# In the game, at three placements and in both redstone modes: outputs equal
+# Verilator's for every input combination, the recorded traces equal the simulator's,
+# a strictly placed build does not move, and a normally placed one settles the same.
+design_vanilla() {
+    uv run --frozen python -m harness.design vanilla $DESIGNS
+}
+
+# Broken copies must fail the function check in the game.
+design_negative_vanilla() {
+    uv run --frozen python -m harness.design vanilla-negative nor2
+}
+
+echo "stage 3: first circuit"
+run build-designs       build_designs
+run sim-vs-verilator    sim_vs_verilator
+run lvs-negative        lvs_negative
+run wasm-identical      wasm_identical
+if [ $VANILLA = 1 ]; then
+    run design-vanilla           design_vanilla
+    run design-negative-vanilla  design_negative_vanilla
+fi
+
 # ---------------------------------------------------------------- summary
 
 echo
