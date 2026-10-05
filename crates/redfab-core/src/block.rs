@@ -53,13 +53,7 @@ pub struct Wire {
 }
 
 impl Wire {
-    pub const DOT: Wire = Wire {
-        power: 0,
-        north: Side::None,
-        east: Side::None,
-        south: Side::None,
-        west: Side::None,
-    };
+    pub const DOT: Wire = Wire { power: 0, north: Side::None, east: Side::None, south: Side::None, west: Side::None };
 
     pub fn side(&self, dir: Dir) -> Side {
         match dir {
@@ -83,9 +77,7 @@ impl Wire {
     }
 
     pub fn is_dot(&self) -> bool {
-        Dir::HORIZONTAL
-            .iter()
-            .all(|&d| !self.side(d).is_connected())
+        Dir::HORIZONTAL.iter().all(|&d| !self.side(d).is_connected())
     }
 
     pub fn is_cross(&self) -> bool {
@@ -113,6 +105,14 @@ pub enum Block {
     },
     Lamp {
         lit: bool,
+    },
+    /// A repeater. `facing` points at its input; it outputs on the opposite side.
+    /// `delay` is 1 to 4 (each step is two game ticks).
+    Repeater {
+        facing: Dir,
+        delay: u8,
+        locked: bool,
+        powered: bool,
     },
     /// A lever. `face` says which kind of surface it is mounted on.
     Lever {
@@ -162,24 +162,16 @@ impl Block {
             Block::WallTorch { .. } => "minecraft:redstone_wall_torch",
             Block::Lamp { .. } => "minecraft:redstone_lamp",
             Block::Lever { .. } => "minecraft:lever",
+            Block::Repeater { .. } => "minecraft:repeater",
         }
     }
 
     /// For a lever: the direction from the lever to the block it is mounted on.
     pub fn lever_mount(&self) -> Option<Dir> {
         match self {
-            Block::Lever {
-                face: Face::Floor, ..
-            } => Some(Dir::Down),
-            Block::Lever {
-                face: Face::Ceiling,
-                ..
-            } => Some(Dir::Up),
-            Block::Lever {
-                face: Face::Wall,
-                facing,
-                ..
-            } => Some(facing.opposite()),
+            Block::Lever { face: Face::Floor, .. } => Some(Dir::Down),
+            Block::Lever { face: Face::Ceiling, .. } => Some(Dir::Up),
+            Block::Lever { face: Face::Wall, facing, .. } => Some(facing.opposite()),
             _ => None,
         }
     }
@@ -195,10 +187,7 @@ impl Block {
 
     /// Has a solid top face, so dust or a torch can sit on it.
     pub fn is_full_block(&self) -> bool {
-        matches!(
-            self,
-            Block::Stone | Block::Glass | Block::RedstoneBlock | Block::Lamp { .. }
-        )
+        matches!(self, Block::Stone | Block::Glass | Block::RedstoneBlock | Block::Lamp { .. })
     }
 
     /// The game's `isSignalSource`.
@@ -210,6 +199,7 @@ impl Block {
                 | Block::Torch { .. }
                 | Block::WallTorch { .. }
                 | Block::Lever { .. }
+                | Block::Repeater { .. }
         )
     }
 
@@ -244,16 +234,15 @@ impl Block {
                 vec![("lit", bool_name(*lit).to_string())]
             }
             Block::WallTorch { facing, lit } => {
-                vec![
-                    ("facing", facing.name().to_string()),
-                    ("lit", bool_name(*lit).to_string()),
-                ]
+                vec![("facing", facing.name().to_string()), ("lit", bool_name(*lit).to_string())]
             }
-            Block::Lever {
-                face,
-                facing,
-                powered,
-            } => vec![
+            Block::Repeater { facing, delay, locked, powered } => vec![
+                ("delay", delay.to_string()),
+                ("facing", facing.name().to_string()),
+                ("locked", bool_name(*locked).to_string()),
+                ("powered", bool_name(*powered).to_string()),
+            ],
+            Block::Lever { face, facing, powered } => vec![
                 ("face", face.name().to_string()),
                 ("facing", facing.name().to_string()),
                 ("powered", bool_name(*powered).to_string()),
@@ -290,20 +279,12 @@ impl FromStr for StateText {
             Some(i) => (&s[..i], Some(&s[i + 1..])),
             None => (s, None),
         };
-        let name = if name.contains(':') {
-            name.to_string()
-        } else {
-            format!("minecraft:{name}")
-        };
+        let name = if name.contains(':') { name.to_string() } else { format!("minecraft:{name}") };
         let mut props = BTreeMap::new();
         if let Some(rest) = rest {
-            let inner = rest
-                .strip_suffix(']')
-                .ok_or_else(|| format!("missing ']' in {s:?}"))?;
+            let inner = rest.strip_suffix(']').ok_or_else(|| format!("missing ']' in {s:?}"))?;
             for item in inner.split(',').filter(|i| !i.is_empty()) {
-                let (k, v) = item
-                    .split_once('=')
-                    .ok_or_else(|| format!("bad property {item:?} in {s:?}"))?;
+                let (k, v) = item.split_once('=').ok_or_else(|| format!("bad property {item:?} in {s:?}"))?;
                 props.insert(k.trim().to_string(), v.trim().to_string());
             }
         }
@@ -317,8 +298,7 @@ impl FromStr for Block {
     fn from_str(s: &str) -> Result<Block, String> {
         let text: StateText = s.parse()?;
         let mut props = text.props;
-        let mut take =
-            |key: &str, default: &str| props.remove(key).unwrap_or_else(|| default.to_string());
+        let mut take = |key: &str, default: &str| props.remove(key).unwrap_or_else(|| default.to_string());
         let parse_bool = |v: String| match v.as_str() {
             "true" => Ok(true),
             "false" => Ok(false),
@@ -330,12 +310,8 @@ impl FromStr for Block {
             "minecraft:glass" => Block::Glass,
             "minecraft:redstone_block" => Block::RedstoneBlock,
             "minecraft:redstone_wire" => {
-                let side = |v: String| {
-                    Side::from_name(&v).ok_or_else(|| format!("bad wire side {v:?} in {s:?}"))
-                };
-                let power: u8 = take("power", "0")
-                    .parse()
-                    .map_err(|_| format!("bad power in {s:?}"))?;
+                let side = |v: String| Side::from_name(&v).ok_or_else(|| format!("bad wire side {v:?} in {s:?}"));
+                let power: u8 = take("power", "0").parse().map_err(|_| format!("bad power in {s:?}"))?;
                 if power > 15 {
                     return Err(format!("power out of range in {s:?}"));
                 }
@@ -347,35 +323,35 @@ impl FromStr for Block {
                     west: side(take("west", "none"))?,
                 })
             }
-            "minecraft:redstone_torch" => Block::Torch {
-                lit: parse_bool(take("lit", "true"))?,
-            },
+            "minecraft:redstone_torch" => Block::Torch { lit: parse_bool(take("lit", "true"))? },
             "minecraft:redstone_wall_torch" => {
                 let facing = take("facing", "north");
                 let facing = Dir::from_name(&facing)
                     .filter(|d| d.is_horizontal())
                     .ok_or_else(|| format!("bad facing {facing:?} in {s:?}"))?;
-                Block::WallTorch {
-                    facing,
-                    lit: parse_bool(take("lit", "true"))?,
-                }
+                Block::WallTorch { facing, lit: parse_bool(take("lit", "true"))? }
             }
-            "minecraft:redstone_lamp" => Block::Lamp {
-                lit: parse_bool(take("lit", "false"))?,
-            },
-            "minecraft:lever" => {
-                let face = take("face", "wall");
-                let face =
-                    Face::from_name(&face).ok_or_else(|| format!("bad face {face:?} in {s:?}"))?;
+            "minecraft:redstone_lamp" => Block::Lamp { lit: parse_bool(take("lit", "false"))? },
+            "minecraft:repeater" => {
                 let facing = take("facing", "north");
                 let facing = Dir::from_name(&facing)
                     .filter(|d| d.is_horizontal())
                     .ok_or_else(|| format!("bad facing {facing:?} in {s:?}"))?;
-                Block::Lever {
-                    face,
-                    facing,
-                    powered: parse_bool(take("powered", "false"))?,
+                let delay: u8 = take("delay", "1").parse().map_err(|_| format!("bad delay in {s:?}"))?;
+                if !(1..=4).contains(&delay) {
+                    return Err(format!("repeater delay must be 1 to 4 in {s:?}"));
                 }
+                let locked = parse_bool(take("locked", "false"))?;
+                Block::Repeater { facing, delay, locked, powered: parse_bool(take("powered", "false"))? }
+            }
+            "minecraft:lever" => {
+                let face = take("face", "wall");
+                let face = Face::from_name(&face).ok_or_else(|| format!("bad face {face:?} in {s:?}"))?;
+                let facing = take("facing", "north");
+                let facing = Dir::from_name(&facing)
+                    .filter(|d| d.is_horizontal())
+                    .ok_or_else(|| format!("bad facing {facing:?} in {s:?}"))?;
+                Block::Lever { face, facing, powered: parse_bool(take("powered", "false"))? }
             }
             other => return Err(format!("unsupported block {other}")),
         };
@@ -402,6 +378,7 @@ mod tests {
             "minecraft:redstone_wall_torch[facing=west,lit=true]",
             "minecraft:redstone_lamp[lit=true]",
             "minecraft:lever[face=floor,facing=east,powered=false]",
+            "minecraft:repeater[delay=3,facing=west,locked=true,powered=false]",
         ] {
             let block: Block = s.parse().unwrap();
             assert_eq!(block.to_string(), s);
@@ -410,28 +387,16 @@ mod tests {
 
     #[test]
     fn missing_properties_take_the_games_defaults() {
-        assert_eq!(
-            "redstone_torch".parse::<Block>().unwrap(),
-            Block::Torch { lit: true }
-        );
-        assert_eq!(
-            "minecraft:redstone_lamp".parse::<Block>().unwrap(),
-            Block::Lamp { lit: false }
-        );
-        assert_eq!(
-            "minecraft:redstone_wire".parse::<Block>().unwrap(),
-            Block::Wire(Wire::DOT)
-        );
+        assert_eq!("redstone_torch".parse::<Block>().unwrap(), Block::Torch { lit: true });
+        assert_eq!("minecraft:redstone_lamp".parse::<Block>().unwrap(), Block::Lamp { lit: false });
+        assert_eq!("minecraft:redstone_wire".parse::<Block>().unwrap(), Block::Wire(Wire::DOT));
     }
 
     #[test]
     fn unknown_blocks_and_properties_are_errors() {
-        assert!("minecraft:repeater".parse::<Block>().is_err());
+        assert!("minecraft:comparator".parse::<Block>().is_err());
+        assert!("minecraft:repeater[delay=5]".parse::<Block>().is_err());
         assert!("minecraft:stone[foo=bar]".parse::<Block>().is_err());
-        assert!(
-            "minecraft:redstone_wire[power=16]"
-                .parse::<Block>()
-                .is_err()
-        );
+        assert!("minecraft:redstone_wire[power=16]".parse::<Block>().is_err());
     }
 }

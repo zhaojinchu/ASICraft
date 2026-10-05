@@ -8,6 +8,7 @@
 //! strengths before any neighbour hears about it. `docs/mechanics.md` lists the
 //! measurements these rules were checked against.
 
+mod repeater;
 mod signal;
 mod wire;
 
@@ -27,10 +28,15 @@ pub enum Mutation {
     TorchPowersBlockBelow,
     BurnoutOnNinthToggle,
     DotPowersSides,
+    RepeaterDelayPlusTwoTicks,
+    RepeaterIgnoresLock,
+    RepeaterNoPulseStretch,
+    RepeaterOnePriority,
+    RepeaterWeakFront,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 9] = [
+    pub const ALL: [Mutation; 14] = [
         Mutation::DustLosesTwoPerBlock,
         Mutation::TorchDelayOneTick,
         Mutation::LampOffDelayTwoTicks,
@@ -40,6 +46,11 @@ impl Mutation {
         Mutation::TorchPowersBlockBelow,
         Mutation::BurnoutOnNinthToggle,
         Mutation::DotPowersSides,
+        Mutation::RepeaterDelayPlusTwoTicks,
+        Mutation::RepeaterIgnoresLock,
+        Mutation::RepeaterNoPulseStretch,
+        Mutation::RepeaterOnePriority,
+        Mutation::RepeaterWeakFront,
     ];
 
     pub fn name(self) -> &'static str {
@@ -53,6 +64,11 @@ impl Mutation {
             Mutation::TorchPowersBlockBelow => "torch-powers-block-below",
             Mutation::BurnoutOnNinthToggle => "burnout-on-ninth-toggle",
             Mutation::DotPowersSides => "dot-powers-sides",
+            Mutation::RepeaterDelayPlusTwoTicks => "repeater-delay-plus-two-ticks",
+            Mutation::RepeaterIgnoresLock => "repeater-ignores-lock",
+            Mutation::RepeaterNoPulseStretch => "repeater-no-pulse-stretch",
+            Mutation::RepeaterOnePriority => "repeater-one-priority",
+            Mutation::RepeaterWeakFront => "repeater-weak-front",
         }
     }
 
@@ -88,14 +104,8 @@ struct Flags {
     shapes: bool,
 }
 
-const FLAGS_ALL: Flags = Flags {
-    neighbors: true,
-    shapes: true,
-};
-const FLAGS_NO_NEIGHBORS: Flags = Flags {
-    neighbors: false,
-    shapes: true,
-};
+const FLAGS_ALL: Flags = Flags { neighbors: true, shapes: true };
+const FLAGS_NO_NEIGHBORS: Flags = Flags { neighbors: false, shapes: true };
 
 const TORCH_DELAY: u64 = 2;
 const LAMP_OFF_DELAY: u64 = 4;
@@ -159,7 +169,7 @@ impl Sim {
     /// builds those, so the simulator refuses them instead of modelling the break.
     fn check_supported(&self, pos: Pos, block: Block) -> Result<(), String> {
         let support = match block {
-            Block::Wire(_) | Block::Torch { .. } => pos.down(),
+            Block::Wire(_) | Block::Torch { .. } | Block::Repeater { .. } => pos.down(),
             Block::WallTorch { facing, .. } => pos.offset(facing.opposite()),
             Block::Lever { .. } => pos.offset(block.lever_mount().expect("levers have a mount")),
             _ => return Ok(()),
@@ -167,10 +177,7 @@ impl Sim {
         if self.world.get(support).is_full_block() {
             Ok(())
         } else {
-            Err(format!(
-                "unsupported: {} at {pos} has no supporting block",
-                block.name()
-            ))
+            Err(format!("unsupported: {} at {pos} has no supporting block", block.name()))
         }
     }
 
@@ -183,11 +190,7 @@ impl Sim {
     /// Gives every wire the shape the game would give it from its surroundings
     /// (lines and corners; a wire with no connections becomes a cross).
     pub fn fix_wire_shapes(&mut self) {
-        let wires: Vec<(Pos, Block)> = self
-            .world
-            .iter()
-            .filter(|(_, b)| matches!(b, Block::Wire(_)))
-            .collect();
+        let wires: Vec<(Pos, Block)> = self.world.iter().filter(|(_, b)| matches!(b, Block::Wire(_))).collect();
         for (pos, block) in wires {
             let Block::Wire(w) = block else { continue };
             // Start from a cross so the "stays a dot" rule does not apply.
@@ -198,8 +201,7 @@ impl Sim {
                 south: crate::block::Side::Side,
                 west: crate::block::Side::Side,
             };
-            self.world
-                .set(pos, Block::Wire(self.wire_connection_state(pos, cross)));
+            self.world.set(pos, Block::Wire(self.wire_connection_state(pos, cross)));
         }
     }
 
@@ -230,9 +232,7 @@ impl Sim {
             }
             self.step();
         }
-        Err(format!(
-            "the circuit has not settled after {max_ticks} ticks; it oscillates or has burned out a torch"
-        ))
+        Err(format!("the circuit has not settled after {max_ticks} ticks; it oscillates or has burned out a torch"))
     }
 
     // ------------------------------------------------------------ queries
@@ -254,9 +254,7 @@ impl Sim {
 
     /// Checks that every wire and torch in the world is supported.
     pub fn check_all_supported(&self) -> Result<(), String> {
-        self.world
-            .iter()
-            .try_for_each(|(pos, block)| self.check_supported(pos, block))
+        self.world.iter().try_for_each(|(pos, block)| self.check_supported(pos, block))
     }
 
     pub fn with_mutation(mut self, mutation: Option<Mutation>) -> Sim {
@@ -314,16 +312,13 @@ impl Sim {
             // Removing or replacing a support would break what stands on it.
             let beside = pos.offset(dir);
             let rests_here = match self.world.get(beside) {
-                Block::Wire(_) | Block::Torch { .. } => dir == Dir::Up,
+                Block::Wire(_) | Block::Torch { .. } | Block::Repeater { .. } => dir == Dir::Up,
                 Block::WallTorch { facing, .. } => facing == dir,
                 lever @ Block::Lever { .. } => lever.lever_mount() == Some(dir.opposite()),
                 _ => false,
             };
             if rests_here && !block.is_full_block() {
-                return Err(format!(
-                    "unsupported: placing {} at {pos} removes the support of {beside}",
-                    block.name()
-                ));
+                return Err(format!("unsupported: placing {} at {pos} removes the support of {beside}", block.name()));
             }
         }
         let block = self.update_from_neighbour_shapes(block, pos);
@@ -350,20 +345,14 @@ impl Sim {
     /// due time and priority. Only the order inside a group is a free choice.
     pub fn due_groups(&self) -> Vec<usize> {
         let now = self.time + 1;
-        let mut keys: Vec<(u64, i8)> = self
-            .queue
-            .iter()
-            .filter(|s| s.trigger <= now)
-            .map(|s| (s.trigger, s.priority))
-            .collect();
+        let mut keys: Vec<(u64, i8)> =
+            self.queue.iter().filter(|s| s.trigger <= now).map(|s| (s.trigger, s.priority)).collect();
         keys.sort_unstable();
         let mut groups: Vec<usize> = Vec::new();
         let mut last = None;
         for key in keys {
             if last == Some(key) {
-                *groups
-                    .last_mut()
-                    .expect("a group exists once a key repeats") += 1;
+                *groups.last_mut().expect("a group exists once a key repeats") += 1;
             } else {
                 groups.push(1);
             }
@@ -395,11 +384,7 @@ impl Sim {
         }
         self.running = due.iter().map(|s| (s.pos, s.block)).collect();
         for tick in due {
-            if let Some(i) = self
-                .running
-                .iter()
-                .position(|r| *r == (tick.pos, tick.block))
-            {
+            if let Some(i) = self.running.iter().position(|r| *r == (tick.pos, tick.block)) {
                 self.running.remove(i);
             }
             let block = self.world.get(tick.pos);
@@ -407,10 +392,9 @@ impl Sim {
                 continue; // the block was replaced since the tick was scheduled
             }
             match block {
-                Block::Torch { lit } | Block::WallTorch { lit, .. } => {
-                    self.torch_tick(tick.pos, block, lit)
-                }
+                Block::Torch { lit } | Block::WallTorch { lit, .. } => self.torch_tick(tick.pos, block, lit),
                 Block::Lamp { lit } => self.lamp_tick(tick.pos, lit),
+                Block::Repeater { .. } => self.repeater_tick(tick.pos, block),
                 _ => {}
             }
         }
@@ -455,6 +439,8 @@ impl Sim {
                 self.update_neighbors_of_neighboring_wires(pos);
             }
             Block::Torch { .. } | Block::WallTorch { .. } => self.torch_notify_neighbors(pos),
+            // Any change of a repeater's state, not only its placement.
+            Block::Repeater { facing, .. } => self.repeater_update_front(pos, facing),
             _ => {}
         }
     }
@@ -469,6 +455,7 @@ impl Sim {
                 self.update_neighbors_of_neighboring_wires(pos);
             }
             Block::Torch { .. } | Block::WallTorch { .. } => self.torch_notify_neighbors(pos),
+            Block::Repeater { facing, .. } => self.repeater_update_front(pos, facing),
             _ => {}
         }
     }
@@ -484,24 +471,15 @@ impl Sim {
         match self.world.get(pos) {
             Block::Wire(_) => self.update_power(pos),
             block @ (Block::Torch { lit } | Block::WallTorch { lit, .. }) => {
-                if lit == self.torch_has_signal(pos, block)
-                    && !self.will_tick_this_tick(pos, block.name())
-                {
-                    let delay = if self.mutation == Some(Mutation::TorchDelayOneTick) {
-                        1
-                    } else {
-                        TORCH_DELAY
-                    };
+                if lit == self.torch_has_signal(pos, block) && !self.will_tick_this_tick(pos, block.name()) {
+                    let delay = if self.mutation == Some(Mutation::TorchDelayOneTick) { 1 } else { TORCH_DELAY };
                     self.schedule(pos, block.name(), delay);
                 }
             }
+            block @ Block::Repeater { .. } => self.repeater_neighbor_changed(pos, block),
             Block::Lamp { lit } if lit != self.has_neighbor_signal(pos) => {
                 if lit {
-                    let delay = if self.mutation == Some(Mutation::LampOffDelayTwoTicks) {
-                        2
-                    } else {
-                        LAMP_OFF_DELAY
-                    };
+                    let delay = if self.mutation == Some(Mutation::LampOffDelayTwoTicks) { 2 } else { LAMP_OFF_DELAY };
                     self.schedule(pos, "minecraft:redstone_lamp", delay);
                 } else {
                     self.change(pos, Block::Lamp { lit: true }, FLAGS_NO_NEIGHBORS);
@@ -514,13 +492,16 @@ impl Sim {
     /// Asks the block at `pos` to update its shape because its neighbour in
     /// direction `dir` changed.
     fn neighbor_shape_changed(&mut self, pos: Pos, dir: Dir) {
-        if let Block::Wire(w) = self.world.get(pos) {
-            let updated = self.wire_update_shape(pos, w, dir);
-            if updated != w {
-                // Shape-only changes are written without block updates; this is why a
-                // reshaped wire does not wake the components around it.
-                self.change(pos, Block::Wire(updated), FLAGS_NO_NEIGHBORS);
-            }
+        let block = self.world.get(pos);
+        let updated = match block {
+            Block::Wire(w) => Block::Wire(self.wire_update_shape(pos, w, dir)),
+            Block::Repeater { .. } => self.repeater_update_shape(pos, block, dir),
+            _ => return,
+        };
+        if updated != block {
+            // Shape-only changes are written without block updates; this is why a
+            // reshaped wire does not wake the components around it.
+            self.change(pos, updated, FLAGS_NO_NEIGHBORS);
         }
     }
 
@@ -531,6 +512,9 @@ impl Sim {
                     w = self.wire_update_shape(pos, w, dir);
                 }
                 Block::Wire(w)
+            }
+            Block::Repeater { .. } => {
+                Dir::SHAPE_ORDER.into_iter().fold(block, |b, dir| self.repeater_update_shape(pos, b, dir))
             }
             other => other,
         }
@@ -557,11 +541,7 @@ impl Sim {
 
     fn torch_tick(&mut self, pos: Pos, torch: Block, lit: bool) {
         let now = self.time;
-        while self
-            .toggles
-            .first()
-            .is_some_and(|&(_, when)| now - when > BURNOUT_WINDOW)
-        {
+        while self.toggles.first().is_some_and(|&(_, when)| now - when > BURNOUT_WINDOW) {
             self.toggles.remove(0);
         }
         let powered = self.torch_has_signal(pos, torch);
@@ -585,11 +565,8 @@ impl Sim {
         if log {
             self.toggles.push((pos, self.time));
         }
-        let limit = if self.mutation == Some(Mutation::BurnoutOnNinthToggle) {
-            BURNOUT_TOGGLES + 1
-        } else {
-            BURNOUT_TOGGLES
-        };
+        let limit =
+            if self.mutation == Some(Mutation::BurnoutOnNinthToggle) { BURNOUT_TOGGLES + 1 } else { BURNOUT_TOGGLES };
         self.toggles.iter().filter(|(p, _)| *p == pos).count() >= limit
     }
 
@@ -610,13 +587,7 @@ impl Sim {
         if self.queue.iter().any(|s| s.pos == pos && s.block == block) {
             return;
         }
-        self.queue.push(Scheduled {
-            trigger: self.time + delay,
-            priority,
-            seq: self.next_seq,
-            pos,
-            block,
-        });
+        self.queue.push(Scheduled { trigger: self.time + delay, priority, seq: self.next_seq, pos, block });
         self.next_seq += 1;
     }
 
@@ -640,11 +611,7 @@ mod tests {
     }
 
     fn power(sim: &Sim, x: i32, y: i32, z: i32) -> u8 {
-        sim.world()
-            .get(Pos::new(x, y, z))
-            .as_wire()
-            .expect("a wire")
-            .power
+        sim.world().get(Pos::new(x, y, z)).as_wire().expect("a wire").power
     }
 
     #[test]
@@ -655,14 +622,9 @@ mod tests {
             blocks.push((x, 1, 0, "redstone_wire[east=side,west=side]"));
         }
         let mut sim = Sim::new(world((17, 2, 1), &blocks));
-        sim.set_block(Pos::new(0, 1, 0), Block::RedstoneBlock, false)
-            .unwrap();
+        sim.set_block(Pos::new(0, 1, 0), Block::RedstoneBlock, false).unwrap();
         for x in 1..=16 {
-            assert_eq!(
-                power(&sim, x, 1, 0),
-                (16 - x) as u8,
-                "dust {x} blocks from the source"
-            );
+            assert_eq!(power(&sim, x, 1, 0), (16 - x) as u8, "dust {x} blocks from the source");
         }
     }
 
@@ -681,13 +643,8 @@ mod tests {
         ];
         let torch = Pos::new(3, 2, 0);
         let mut sim = Sim::new(world((4, 3, 1), &blocks));
-        sim.set_block(Pos::new(0, 1, 0), Block::RedstoneBlock, false)
-            .unwrap();
-        assert_eq!(
-            sim.pending().len(),
-            1,
-            "the torch schedules a tick as soon as its block is powered"
-        );
+        sim.set_block(Pos::new(0, 1, 0), Block::RedstoneBlock, false).unwrap();
+        assert_eq!(sim.pending().len(), 1, "the torch schedules a tick as soon as its block is powered");
         sim.step();
         assert_eq!(sim.world().get(torch), Block::Torch { lit: true });
         sim.step();
@@ -705,8 +662,7 @@ mod tests {
         ];
         let lamp = Pos::new(2, 1, 0);
         let mut sim = Sim::new(world((3, 2, 1), &blocks));
-        sim.set_block(Pos::new(0, 1, 0), Block::RedstoneBlock, false)
-            .unwrap();
+        sim.set_block(Pos::new(0, 1, 0), Block::RedstoneBlock, false).unwrap();
         assert_eq!(sim.world().get(lamp), Block::Lamp { lit: true });
         sim.set_block(Pos::new(0, 1, 0), Block::Air, false).unwrap();
         for _ in 0..3 {
@@ -728,52 +684,99 @@ mod tests {
             (3, 1, 0, "redstone_wire[east=side,west=side]"),
         ];
         let mut sim = Sim::new(world((4, 2, 1), &blocks));
-        sim.set_block(Pos::new(0, 1, 0), Block::RedstoneBlock, false)
-            .unwrap();
+        sim.set_block(Pos::new(0, 1, 0), Block::RedstoneBlock, false).unwrap();
         assert_eq!(power(&sim, 1, 1, 0), 15);
         assert_eq!(power(&sim, 3, 1, 0), 0);
     }
 
     #[test]
     fn command_placed_dust_takes_its_shape_from_its_neighbours() {
-        let mut sim = Sim::new(world(
-            (3, 2, 1),
-            &[
-                (0, 0, 0, "stone"),
-                (1, 0, 0, "stone"),
-                (0, 1, 0, "redstone_block"),
-            ],
-        ));
-        sim.set_block(Pos::new(1, 1, 0), Block::Wire(Wire::DOT), false)
-            .unwrap();
+        let mut sim =
+            Sim::new(world((3, 2, 1), &[(0, 0, 0, "stone"), (1, 0, 0, "stone"), (0, 1, 0, "redstone_block")]));
+        sim.set_block(Pos::new(1, 1, 0), Block::Wire(Wire::DOT), false).unwrap();
         let wire = sim.world().get(Pos::new(1, 1, 0)).as_wire().unwrap();
-        assert_eq!(
-            (wire.west, wire.east, wire.north, wire.south),
-            (Side::Side, Side::Side, Side::None, Side::None)
-        );
+        assert_eq!((wire.west, wire.east, wire.north, wire.south), (Side::Side, Side::Side, Side::None, Side::None));
         assert_eq!(wire.power, 15);
     }
 
     #[test]
     fn lone_command_placed_dust_stays_a_dot() {
         let mut sim = Sim::new(world((1, 2, 1), &[(0, 0, 0, "stone")]));
-        sim.set_block(Pos::new(0, 1, 0), Block::Wire(Wire::DOT), false)
-            .unwrap();
-        assert!(
-            sim.world()
-                .get(Pos::new(0, 1, 0))
-                .as_wire()
-                .unwrap()
-                .is_dot()
+        sim.set_block(Pos::new(0, 1, 0), Block::Wire(Wire::DOT), false).unwrap();
+        assert!(sim.world().get(Pos::new(0, 1, 0)).as_wire().unwrap().is_dot());
+    }
+
+    /// source slot at x=0, dust, a repeater facing west with the given delay, dust
+    fn repeater_line(delay: u8) -> Sim {
+        let repeater = format!("repeater[facing=west,delay={delay}]");
+        let blocks = [
+            (0, 0, 0, "glass"),
+            (1, 0, 0, "glass"),
+            (2, 0, 0, "glass"),
+            (3, 0, 0, "glass"),
+            (1, 1, 0, "redstone_wire[east=side,west=side]"),
+            (2, 1, 0, repeater.as_str()),
+            (3, 1, 0, "redstone_wire[east=side,west=side]"),
+        ];
+        Sim::new(world((4, 2, 3), &blocks))
+    }
+
+    #[test]
+    fn a_repeater_delays_by_twice_its_setting() {
+        for delay in 1..=4 {
+            let mut sim = repeater_line(delay);
+            sim.set_block(Pos::new(0, 1, 0), Block::RedstoneBlock, false).unwrap();
+            for _ in 0..(2 * delay - 1) {
+                sim.step();
+                assert_eq!(power(&sim, 3, 1, 0), 0, "delay {delay}: too early");
+            }
+            sim.step();
+            assert_eq!(power(&sim, 3, 1, 0), 15, "delay {delay}: output after {} ticks", 2 * delay);
+        }
+    }
+
+    #[test]
+    fn a_short_pulse_is_stretched_to_the_repeaters_delay() {
+        let mut sim = repeater_line(3);
+        let source = Pos::new(0, 1, 0);
+        sim.set_block(source, Block::RedstoneBlock, false).unwrap();
+        sim.step();
+        sim.step();
+        sim.set_block(source, Block::Air, false).unwrap(); // a 2-tick pulse
+        let mut on_ticks = 0;
+        for _ in 0..20 {
+            sim.step();
+            on_ticks += u32::from(power(&sim, 3, 1, 0) == 15);
+        }
+        assert_eq!(on_ticks, 6);
+    }
+
+    #[test]
+    fn a_locked_repeater_ignores_its_input() {
+        let mut sim = repeater_line(1);
+        // A powered repeater pointing north into the data repeater's south side.
+        sim.set_block(Pos::new(2, 0, 1), Block::Glass, true).unwrap();
+        sim.set_block(Pos::new(2, 1, 2), Block::RedstoneBlock, true).unwrap();
+        sim.set_block(Pos::new(2, 1, 1), "repeater[facing=south,delay=1]".parse().unwrap(), false).unwrap();
+        sim.wake(Pos::new(2, 1, 1));
+        sim.settle(10).unwrap();
+        assert_eq!(
+            sim.world().get(Pos::new(2, 1, 0)).to_string(),
+            "minecraft:repeater[delay=1,facing=west,locked=true,powered=false]"
         );
+        sim.set_block(Pos::new(0, 1, 0), Block::RedstoneBlock, false).unwrap();
+        sim.settle(10).unwrap();
+        assert_eq!(power(&sim, 3, 1, 0), 0, "a locked repeater must not pass its input on");
+        // Release the lock: the repeater follows its input after its delay.
+        sim.set_block(Pos::new(2, 1, 2), Block::Air, false).unwrap();
+        sim.settle(10).unwrap();
+        assert_eq!(power(&sim, 3, 1, 0), 15);
     }
 
     #[test]
     fn floating_dust_is_refused() {
         let mut sim = Sim::new(World::new((1, 2, 1)));
-        let err = sim
-            .set_block(Pos::new(0, 1, 0), Block::Wire(Wire::DOT), false)
-            .unwrap_err();
+        let err = sim.set_block(Pos::new(0, 1, 0), Block::Wire(Wire::DOT), false).unwrap_err();
         assert!(err.starts_with("unsupported"), "{err}");
     }
 }
