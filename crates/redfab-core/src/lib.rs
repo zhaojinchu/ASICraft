@@ -22,6 +22,7 @@ pub mod sim;
 pub mod structure;
 pub mod tile;
 pub mod tiletest;
+pub mod timing;
 pub mod trace;
 pub mod view;
 pub mod world;
