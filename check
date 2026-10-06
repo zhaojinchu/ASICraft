@@ -186,7 +186,7 @@ fi
 
 # ---------------------------------------------------------------- stage 3
 
-DESIGNS="not1 nor2 nor3"
+DESIGNS="not1 nor2 nor3 consts fa1 adder4"
 
 # SystemVerilog to a baked block world: synthesis to the tile library's cells, a proof
 # that the mapped netlist equals the source, placement, and the layout-versus-netlist
@@ -206,7 +206,8 @@ equiv_negative() {
     ! node synth/yosys.mjs build/designs/_tampered equiv.ys
 }
 
-# Every input combination: Verilator on the source vs the block simulator on the layout.
+# Every input combination: Verilator on the source vs the block simulator on the layout
+# (512 combinations for the 4-bit adder).
 sim_vs_verilator() {
     uv run --frozen python -m harness.design sim $DESIGNS
 }
@@ -223,8 +224,9 @@ wasm_identical() {
 }
 
 # In the game, at three placements and in both redstone modes: outputs equal
-# Verilator's for every input combination, the recorded traces equal the simulator's,
-# a strictly placed build does not move, and a normally placed one settles the same.
+# Verilator's (every input combination up to 32, a sample beyond that), the recorded
+# traces equal the simulator's, a strictly placed build does not move, and a normally
+# placed one settles the same.
 design_vanilla() {
     uv run --frozen python -m harness.design vanilla $DESIGNS
 }
@@ -297,6 +299,26 @@ run tile-adjacency      tile_adjacency
 run tile-fixtures       tile_fixtures
 if [ $VANILLA = 1 ]; then
     run tiles-vanilla       tiles_vanilla
+fi
+
+# ---------------------------------------------------------------- stage 6
+
+# Random combinational netlists (NOT/NOR2/NOR3 with constants and fan-out) must
+# always place, route and pass the layout-versus-netlist and signal-strength checks.
+pnr_random() {
+    $REDFAB pnr-random --count 60 --seed 1
+}
+
+# The 4-bit adder on every one of its 512 input combinations in the game, in both
+# redstone modes (outputs only, sampled after each combination settles).
+design_exhaustive_vanilla() {
+    uv run --frozen python -m harness.design exhaustive adder4
+}
+
+echo "stage 6: placement and routing"
+run pnr-random          pnr_random
+if [ $VANILLA = 1 ]; then
+    run adder4-exhaustive   design_exhaustive_vanilla
 fi
 
 # ---------------------------------------------------------------- summary
