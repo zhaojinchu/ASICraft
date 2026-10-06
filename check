@@ -407,20 +407,23 @@ hold_negative() {
     uv run --frozen python -m harness.design hold-negative shift2
 }
 
-# ... and a copy of the counter with one input of a gate delayed, so that its torch
-# glitches every cycle, must be flagged for exceeding the burnout budget.
+# ... and the burnout budget: every design reports the fewest ticks between input
+# changes at which no torch turns off more than six times within sixty ticks (the
+# game burns one out on the eighth). Driving the inverter twice as fast as its report
+# allows must be flagged by the tool, and must burn its torch out in the simulator.
 burnout_negative() {
-    uv run --frozen python -m harness.design burnout-negative counter4
+    uv run --frozen python -m harness.design burnout-negative not1
 }
 
 # In the game, at three placements and in both modes: 64 cycles of the counter and
-# the state machine equal Verilator; the two broken copies fail.
+# the state machine equal Verilator; the hold-broken shift register fails; the
+# inverter driven faster than its budget burns out.
 cycles_vanilla() {
     uv run --frozen python -m harness.design cycles-vanilla counter4 fsm
 }
 negatives_vanilla() {
     uv run --frozen python -m harness.design hold-negative-vanilla shift2 &&
-    uv run --frozen python -m harness.design burnout-negative-vanilla counter4
+    uv run --frozen python -m harness.design burnout-negative-vanilla not1
 }
 
 echo "stage 9: counter and state machine"
@@ -432,6 +435,30 @@ if [ $VANILLA = 1 ]; then
     run cycles-vanilla      cycles_vanilla
     run negatives-vanilla   negatives_vanilla
 fi
+
+# ---------------------------------------------------------------- stage 10
+
+# The playground's compile pipeline under Node, without a browser: the same YoWASP
+# Yosys and the same WebAssembly core the page uses turn each design's source into
+# the same design file the native build wrote; the in-browser simulator's trace of a
+# stimulus equals the native simulator's; and the limits hold: a source too large, a
+# design too large, and one that never finishes synthesizing are all refused within
+# the time limit, with a message, and the worker is usable afterwards.
+playground_pipeline() {
+    node --test tools/playground_test.mjs
+}
+
+# The page itself, in a headless Chromium (Brave): it types each design's source into
+# the editor, compiles, toggles the input levers by clicking them in the 3D view and
+# through the panel, reads the lamps, and they match the native simulator. It saves
+# a screenshot to build/playground/ to look at.
+playground_headless() {
+    node tools/playground_check.mjs
+}
+
+echo "stage 10: browser playground"
+run playground-pipeline playground_pipeline
+run playground-headless playground_headless
 
 # ---------------------------------------------------------------- summary
 
