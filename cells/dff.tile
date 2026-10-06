@@ -1,0 +1,54 @@
+# The flip-flop: a master/slave pair of locked repeaters, acting on the falling
+# clock edge. The clock enters at N and weakly powers a stone; torch T1 on it
+# gives NOT clock to lock K1, so the master M1 is open while the clock is high
+# and holds while it is low; torch T2 on a second stone gives the clock back,
+# four ticks late, to lock K2, so the slave M2 is open while the clock is low.
+# At the falling edge the master closes and, two ticks later, the slave opens
+# and Q takes the master's value. The lock and the master's last change can land
+# on the same tick, which is safe either way round: a locked repeater ignores a
+# pending tick. The `timing` figures were measured in stage 8 (see PLAN.md):
+# data must be stable from 1 tick before the falling edge to 5 after it; Q
+# follows 8 ticks after the edge; the clock must stay high and low 4 ticks each
+# and have a period of at least 12.
+tile dff
+size 10 4 5
+port W in 0 1 2
+port N in 2 1 0
+port E out 9 1 2
+function dff
+delay 8
+edge falling
+timing setup 1 hold 5 clk_to_q 8 min_high 4 min_low 4 min_period 12
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  - minecraft:redstone_wire
+  > minecraft:redstone_wall_torch[facing=east]
+  K minecraft:repeater[facing=north,delay=1]
+  M minecraft:repeater[facing=west,delay=1]
+
+layer 0
+  ..G.......
+  ..GGGGGG..
+  GG..G..GGG
+  .GGGGGGGG.
+  ..........
+layer 1
+  ..-.......
+  ..#>--#>..
+  --..K..K--
+  .---M--M-.
+  ..........
+layer 2
+  ..........
+  ..........
+  ..........
+  ..........
+  ..........
+layer 3
+  ..........
+  ..........
+  ..........
+  ..........
+  ..........

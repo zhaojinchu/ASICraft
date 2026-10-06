@@ -13,36 +13,36 @@ use crate::tile::{Edge, HEIGHT, Kind, Library, PITCH, PortKind, Variant, Variant
 use crate::world::World;
 
 /// A fixture under construction, in the trace format's fixture layout.
-struct Fixture {
-    name: String,
-    doc: String,
-    size: [i32; 3],
-    blocks: BTreeMap<String, String>,
-    events: BTreeMap<u32, BTreeMap<String, String>>,
-    expect: Vec<Value>,
-    ticks: u32,
+pub(crate) struct Fixture {
+    pub(crate) name: String,
+    pub(crate) doc: String,
+    pub(crate) size: [i32; 3],
+    pub(crate) blocks: BTreeMap<String, String>,
+    pub(crate) events: BTreeMap<u32, BTreeMap<String, String>>,
+    pub(crate) expect: Vec<Value>,
+    pub(crate) ticks: u32,
 }
 
 impl Fixture {
-    fn new(name: String, doc: String, size: [i32; 3]) -> Fixture {
+    pub(crate) fn new(name: String, doc: String, size: [i32; 3]) -> Fixture {
         Fixture { name, doc, size, blocks: BTreeMap::new(), events: BTreeMap::new(), expect: Vec::new(), ticks: 0 }
     }
 
-    fn put(&mut self, pos: Pos, block: Block) {
+    pub(crate) fn put(&mut self, pos: Pos, block: Block) {
         self.blocks.insert(pos.to_string(), block.to_string());
     }
 
-    fn at(&mut self, tick: u32, pos: Pos, block: Block) {
+    pub(crate) fn at(&mut self, tick: u32, pos: Pos, block: Block) {
         self.events.entry(tick).or_default().insert(pos.to_string(), block.to_string());
         self.ticks = self.ticks.max(tick);
     }
 
-    fn powered(&mut self, tick: u32, pos: Pos, powered: bool) {
+    pub(crate) fn powered(&mut self, tick: u32, pos: Pos, powered: bool) {
         self.expect.push(json!({"tick": tick, "pos": pos.to_string(), "powered": powered}));
         self.ticks = self.ticks.max(tick);
     }
 
-    fn finish(mut self, quiet_after: u32) -> Value {
+    pub(crate) fn finish(mut self, quiet_after: u32) -> Value {
         self.ticks += quiet_after;
         let last_event = self.events.keys().max().copied().unwrap_or(0);
         self.expect.push(json!({"from": last_event + quiet_after, "stable": true}));
@@ -61,18 +61,22 @@ impl Fixture {
 }
 
 /// Where a variant sits in its fixture, with room for a reader and a driver on every side.
-const ORIGIN: Pos = Pos::new(6, 0, 6);
-const BOX: [i32; 3] = [17, HEIGHT, 17];
+pub(crate) const ORIGIN: Pos = Pos::new(6, 0, 6);
+
+/// The fixture box around a variant: six blocks of room on every side.
+pub(crate) fn box_for(variant: &Variant, library: &Library) -> [i32; 3] {
+    [variant.cells(library) * PITCH + 12, HEIGHT, 17]
+}
 
 /// A port of the placed variant with its reader cell (just outside the tile) and
 /// driver cell (one further out).
-struct Hookup {
-    port: VariantPort,
-    reader: Pos,
-    driver: Pos,
+pub(crate) struct Hookup {
+    pub(crate) port: VariantPort,
+    pub(crate) reader: Pos,
+    pub(crate) driver: Pos,
 }
 
-fn hookups(variant: &Variant, library: &Library) -> Vec<Hookup> {
+pub(crate) fn hookups(variant: &Variant, library: &Library) -> Vec<Hookup> {
     variant
         .ports(library)
         .into_iter()
@@ -85,7 +89,7 @@ fn hookups(variant: &Variant, library: &Library) -> Vec<Hookup> {
 }
 
 /// Stamps the variant and a reader dust outside each of its ports.
-fn stamp(fixture: &mut Fixture, variant: &Variant, library: &Library) -> Vec<Hookup> {
+pub(crate) fn stamp(fixture: &mut Fixture, variant: &Variant, library: &Library) -> Vec<Hookup> {
     for (pos, block) in variant.blocks(library) {
         fixture.put(Pos::new(ORIGIN.x + pos.x, ORIGIN.y + pos.y, ORIGIN.z + pos.z), block);
     }
@@ -114,8 +118,9 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
         Kind::TieLow => "Constant 0: the output is never powered.",
         Kind::Input => "Input: the output is powered while the probe block is a redstone block.",
         Kind::Output => "Output: the lamp lights at once and goes out 4 game ticks after the input drops.",
+        Kind::Dff | Kind::DffAlt => unreachable!("flip-flops have sweep fixtures, see dfftest"),
     };
-    let mut fx = Fixture::new(name, doc.to_string(), BOX);
+    let mut fx = Fixture::new(name, doc.to_string(), box_for(variant, library));
     let hooks = stamp(&mut fx, variant, library);
     let on = Block::RedstoneBlock;
     let off = Block::Air;
@@ -198,6 +203,7 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
             fx.powered(0, output.reader, variant.kind == Kind::TieHigh);
             fx.powered(6, output.reader, variant.kind == Kind::TieHigh);
         }
+        Kind::Dff | Kind::DffAlt => unreachable!(),
         Kind::Input => {
             let probe = variant.tile(library).probe.expect("input tile has a probe");
             let probe = Pos::new(ORIGIN.x + probe.x, ORIGIN.y + probe.y, ORIGIN.z + probe.z);
@@ -223,7 +229,15 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
 
 /// Fixtures for every variant, by name.
 pub fn all_variant_fixtures(library: &Library) -> Vec<(String, Value)> {
-    Variant::all().iter().map(|v| (v.name(), variant_fixture(v, library))).collect()
+    let mut out = Vec::new();
+    for v in Variant::all() {
+        if matches!(v.kind, Kind::Dff | Kind::DffAlt) {
+            out.extend(crate::dfftest::fixtures(&v, library).into_iter().map(|f| (f.name.clone(), f.json)));
+        } else {
+            out.push((v.name(), variant_fixture(&v, library)));
+        }
+    }
+    out
 }
 
 /// A small deterministic random source (xorshift), so fixtures are reproducible.
@@ -254,32 +268,36 @@ pub fn group_fixture(name: &str, cols: i32, rows: i32, rng: &mut Rng, library: &
     let variants = Variant::all();
     let grid: Vec<Vec<Variant>> =
         (0..rows).map(|_| (0..cols).map(|_| variants[rng.below(variants.len())].clone()).collect()).collect();
+    let placed = lay_out(&grid, library);
+    let width = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
     let margin = 2;
-    let size = [cols * PITCH + 2 * margin, HEIGHT, rows * PITCH + 2 * margin];
+    let size = [width * PITCH + 2 * margin, HEIGHT, rows * PITCH + 2 * margin];
     let mut fx = Fixture::new(name.to_string(), format!("{cols}x{rows} random tiles"), size);
     let mut drivers = Vec::new();
-    for (r, row) in grid.iter().enumerate() {
-        for (c, variant) in row.iter().enumerate() {
-            let origin = Pos::new(margin + c as i32 * PITCH, 0, margin + r as i32 * PITCH);
-            for (pos, block) in variant.blocks(library) {
-                fx.put(Pos::new(origin.x + pos.x, pos.y, origin.z + pos.z), block);
+    let covered = |cell: (i32, i32)| {
+        placed.iter().any(|(v, (c, r))| *r == cell.1 && (*c..c + v.cells(library)).contains(&cell.0))
+    };
+    for (variant, (c, r)) in &placed {
+        let origin = Pos::new(margin + c * PITCH, 0, margin + r * PITCH);
+        for (pos, block) in variant.blocks(library) {
+            fx.put(Pos::new(origin.x + pos.x, pos.y, origin.z + pos.z), block);
+        }
+        for port in variant.ports(library) {
+            let (dc, dr) = port.edge.step();
+            // The cell beyond the port: on a wide tile the east port is on its last cell.
+            let port_cell = (c + port.pos.x / PITCH, *r);
+            if covered((port_cell.0 + dc, port_cell.1 + dr)) {
+                continue; // whatever is there is part of the test
             }
-            for port in variant.ports(library) {
-                let (dc, dr) = port.edge.step();
-                let faces_tile = (0..cols).contains(&(c as i32 + dc)) && (0..rows).contains(&(r as i32 + dr));
-                if faces_tile {
-                    continue; // whatever is there is part of the test
-                }
-                let cell = Pos::new(origin.x + port.pos.x, 1, origin.z + port.pos.z).offset(port.edge.dir());
-                fx.put(cell.down(), Block::Glass);
-                fx.put(cell, Block::Wire(crate::block::Wire::DOT));
-                if port.kind != PortKind::Out {
-                    drivers.push(cell.offset(port.edge.dir()));
-                }
+            let cell = Pos::new(origin.x + port.pos.x, 1, origin.z + port.pos.z).offset(port.edge.dir());
+            fx.put(cell.down(), Block::Glass);
+            fx.put(cell, Block::Wire(crate::block::Wire::DOT));
+            if port.kind != PortKind::Out {
+                drivers.push(cell.offset(port.edge.dir()));
             }
-            if let Some(probe) = variant.tile(library).probe {
-                drivers.push(Pos::new(origin.x + probe.x, probe.y, origin.z + probe.z));
-            }
+        }
+        if let Some(probe) = variant.tile(library).probe {
+            drivers.push(Pos::new(origin.x + probe.x, probe.y, origin.z + probe.z));
         }
     }
     let mut t = 2;
@@ -306,36 +324,59 @@ pub fn group_fixture(name: &str, cols: i32, rows: i32, rng: &mut Rng, library: &
     fx.finish(12 + stretch)
 }
 
+/// Each variant of a grid with the cell it starts at: a row's tiles follow one
+/// another, each as wide as it is.
+pub fn lay_out(grid: &[Vec<Variant>], library: &Library) -> Vec<(Variant, (i32, i32))> {
+    let mut placed = Vec::new();
+    for (r, row) in grid.iter().enumerate() {
+        let mut c = 0;
+        for variant in row {
+            placed.push((variant.clone(), (c, r as i32)));
+            c += variant.cells(library);
+        }
+    }
+    placed
+}
+
 /// Problems with a grid of placed variants: any way two tiles affect each other
 /// other than through matched ports on a shared edge.
 pub fn adjacency_problems(grid: &[Vec<Variant>], library: &Library) -> Vec<String> {
+    let placed = lay_out(grid, library);
     let rows = grid.len() as i32;
-    let cols = grid.first().map_or(0, Vec::len) as i32;
+    let cols = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
     let mut world = World::new((cols * PITCH, HEIGHT, rows * PITCH));
     let mut probes = Vec::new();
-    for (r, row) in grid.iter().enumerate() {
-        for (c, variant) in row.iter().enumerate() {
-            let origin = Pos::new(c as i32 * PITCH, 0, r as i32 * PITCH);
-            for (pos, block) in variant.blocks(library) {
-                world.set(Pos::new(origin.x + pos.x, pos.y, origin.z + pos.z), block);
-            }
-            if let Some(probe) = variant.tile(library).probe {
-                probes.push(Pos::new(origin.x + probe.x, probe.y, origin.z + probe.z));
-            }
+    for (variant, (c, r)) in &placed {
+        let origin = Pos::new(c * PITCH, 0, r * PITCH);
+        for (pos, block) in variant.blocks(library) {
+            world.set(Pos::new(origin.x + pos.x, pos.y, origin.z + pos.z), block);
+        }
+        if let Some(probe) = variant.tile(library).probe {
+            probes.push(Pos::new(origin.x + probe.x, probe.y, origin.z + probe.z));
         }
     }
-    problems_in(&world, grid, &probes, library)
+    problems_in(&world, &placed, &probes, library)
 }
 
 /// The check behind [`adjacency_problems`], on a world that may have been tampered with.
-pub fn problems_in(world: &World, grid: &[Vec<Variant>], probes: &[Pos], library: &Library) -> Vec<String> {
+pub fn problems_in(world: &World, placed: &[(Variant, (i32, i32))], probes: &[Pos], library: &Library) -> Vec<String> {
     let circuit = extract(world, probes);
-    let tile_of = |pos: Pos| (pos.x.div_euclid(PITCH), pos.z.div_euclid(PITCH));
-    let name_of = |(c, r): (i32, i32)| format!("{} at column {c}, row {r}", grid[r as usize][c as usize].name());
-    // The port cell of the tile at (c, r) on its `edge`, if the tile uses that edge.
-    let port_cell = |(c, r): (i32, i32), edge: Edge| -> Option<Pos> {
-        grid[r as usize][c as usize]
-            .ports(library)
+    // Which placed tile a position belongs to, by index.
+    let tile_of = |pos: Pos| -> usize {
+        let (c, r) = (pos.x.div_euclid(PITCH), pos.z.div_euclid(PITCH));
+        placed
+            .iter()
+            .position(|(v, (vc, vr))| *vr == r && (*vc..vc + v.cells(library)).contains(&c))
+            .unwrap_or(usize::MAX)
+    };
+    let name_of = |i: usize| match placed.get(i) {
+        Some((v, (c, r))) => format!("{} at column {c}, row {r}", v.name()),
+        None => "no tile".to_string(),
+    };
+    // The port cell of tile `i` on `edge`, if it uses that edge.
+    let port_cell = |i: usize, edge: Edge| -> Option<Pos> {
+        let (v, (c, r)) = &placed[i];
+        v.ports(library)
             .into_iter()
             .find(|p| p.edge == edge)
             .map(|p| Pos::new(c * PITCH + p.pos.x, 1, r * PITCH + p.pos.z))
@@ -343,7 +384,7 @@ pub fn problems_in(world: &World, grid: &[Vec<Variant>], probes: &[Pos], library
     let mut problems = Vec::new();
 
     for net in &circuit.nets {
-        let mut touched: BTreeSet<(i32, i32)> = net.iter().map(|&p| tile_of(p)).collect();
+        let mut touched: BTreeSet<usize> = net.iter().map(|&p| tile_of(p)).collect();
         let net_id = circuit.net_of(net[0]).expect("a net contains its own wires");
         for component in circuit.torches.iter().chain(&circuit.lamps).chain(&circuit.sources) {
             if component.reads.contains(&net_id) || component.drives.contains(&net_id) {
@@ -353,15 +394,21 @@ pub fn problems_in(world: &World, grid: &[Vec<Variant>], probes: &[Pos], library
         if touched.len() < 2 {
             continue;
         }
-        // Tiles sharing this net must form one group joined only through matched ports.
-        let tiles: Vec<(i32, i32)> = touched.iter().copied().collect();
-        let joined = |a: (i32, i32), b: (i32, i32)| -> bool {
-            Edge::ALL.iter().any(|&edge| {
-                let (dc, dr) = edge.step();
-                (a.0 + dc, a.1 + dr) == b
-                    && port_cell(a, edge).is_some_and(|p| net.contains(&p))
-                    && port_cell(b, edge.opposite()).is_some_and(|p| net.contains(&p))
-            })
+        // Tiles sharing this net must form one group joined only through matched
+        // ports: a's port cell and b's opposite port cell are neighbours across the border.
+        let tiles: Vec<usize> = touched.iter().copied().collect();
+        let joined = |a: usize, b: usize| -> bool {
+            a != usize::MAX
+                && b != usize::MAX
+                && Edge::ALL.iter().any(|&edge| {
+                    let (dx, dz) = edge.step();
+                    match (port_cell(a, edge), port_cell(b, edge.opposite())) {
+                        (Some(pa), Some(pb)) => {
+                            pb == Pos::new(pa.x + dx, pa.y, pa.z + dz) && net.contains(&pa) && net.contains(&pb)
+                        }
+                        _ => false,
+                    }
+                })
         };
         let mut reached = vec![tiles[0]];
         let mut frontier = vec![tiles[0]];
@@ -456,15 +503,28 @@ mod tests {
             world.set(Pos::new(x, 0, 1), Block::Glass);
             world.set(Pos::new(x, 1, 1), Block::Wire(Wire::DOT));
         }
-        let problems = problems_in(&world, &grid, &[], &library);
+        let problems = problems_in(&world, &lay_out(&grid, &library), &[], &library);
         assert!(!problems.is_empty());
+    }
+
+    #[test]
+    fn a_flip_flop_beside_a_wire_is_two_cells_wide() {
+        let library = Library::builtin().unwrap();
+        let dff = Variant::new(Kind::Dff, &[Edge::West, Edge::North, Edge::East]);
+        let wire = Variant::new(Kind::Wire, &[Edge::West, Edge::East]);
+        let placed = lay_out(&[vec![dff.clone(), wire.clone()]], &library);
+        assert_eq!(placed[1].1, (2, 0));
+        assert!(adjacency_problems(&[vec![dff, wire]], &library).is_empty());
     }
 
     #[test]
     fn every_variant_gets_a_fixture_with_expectations() {
         let library = Library::builtin().unwrap();
         for (name, fixture) in all_variant_fixtures(&library) {
-            assert!(fixture["expect"].as_array().unwrap().len() >= 2, "{name}");
+            // Flip-flop sweeps carry no expectations beyond ending quiet: the game is
+            // compared with the simulator, and `characterize` reads the result.
+            let least = if name.starts_with("dff") { 1 } else { 2 };
+            assert!(fixture["expect"].as_array().unwrap().len() >= least, "{name}");
         }
     }
 }

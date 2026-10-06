@@ -262,7 +262,7 @@ fn permutations(items: &[usize], limit: usize) -> Vec<Vec<usize>> {
 }
 
 /// What `{"powered": true}` in an expectation means for each block.
-fn is_powered(block: Block) -> bool {
+pub fn is_powered(block: Block) -> bool {
     match block {
         Block::Wire(w) => w.power > 0,
         Block::Lamp { lit } | Block::Torch { lit } | Block::WallTorch { lit, .. } => lit,

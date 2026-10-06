@@ -22,6 +22,7 @@ Rules every tile follows, so that neighbouring tiles cannot interfere:
 - A signal enters or leaves only at the middle of an edge, at y = 1, as redstone dust.
 - No other block touches the tile's border.
 - A tile is written for one orientation; the build may place it rotated by quarter turns. Gates always take inputs on W, N or S and drive E, so they are never rotated.
+- A tile is one cell deep and a whole number of cells wide (`size 10 4 5` for two). Its north and south ports sit on its first cell. A side-locked repeater needs its lock's input one cell in from the border, so a flip-flop takes two cells.
 - Dust and torches stand on glass, never on stone. Powered dust weakly powers the block under it, and stone would pass that on to torches and lamps next to it; glass does not conduct.
 
 Dust is written without shape or power. The build computes both, with every input off, and writes the finished state.
@@ -34,3 +35,5 @@ Dust is written without shape or power. The build computes both, with every inpu
 | `cross` | io W E N S | West to east and north to south, not touching. The flat west-east arm may carry a repeater like a wire; the build turns the tile when the other signal is the one that needs it. |
 | `nor` | in W N S, out E | NOR of the used inputs; NOT with one. |
 | `tie_high`, `tie_low` | out E | Constant 1 and constant 0. |
+| `dff` | in W (D), in N (clock), out E (Q) | The flip-flop: two cells wide. A master/slave pair of locked repeaters acting on the **falling** clock edge. Measured in stage 8: data stable from 1 tick before the edge to 5 after, Q 8 ticks after the edge, clock high and low at least 4 ticks each, period at least 12 (`timing` line in the file). |
+| `dff_alt` | the same | The other candidate, a pulse latch on the rising edge: works, but samples late (hold 11) and needs a period of 16. Kept for the record. |

@@ -24,6 +24,7 @@ fn main() -> ExitCode {
         Some("lvs") => lvs_command(&args[1..]),
         Some("extract") => extract_command(&args[1..]),
         Some("timing") => timing_command(&args[1..]),
+        Some("characterize") => characterize_command(&args[1..]),
         Some("timing-measure") => timing_measure_command(&args[1..]),
         Some("simulate") => simulate_command(&args[1..]),
         Some("replay") => replay_report_command(&args[1..]),
@@ -490,6 +491,80 @@ fn run_yosys(dir: &Path, script: &str) -> Result<(), String> {
             dir.join(format!("{script}.log")).display()
         ))
     }
+}
+
+/// `redfab characterize [DIR] [--shuffles N] [--margin M] [--chosen NAME] [--tables]`
+///
+/// Characterizes every flip-flop tile: replays its sweep fixtures in the
+/// simulator, and N more times (20 unless told otherwise) under shuffled
+/// same-tick orders so that a trial decided by ordering counts as neither
+/// captured nor missed; derives setup, hold,
+/// clock-to-output and the minimum clock high and low times, and compares them
+/// with the tile's `timing` line. With DIR, the fixtures there must be the ones
+/// generated here (so the game ran the same sweeps). With `--chosen`, that tile
+/// must also pass the margin rule.
+fn characterize_command(args: &[String]) -> Result<bool, String> {
+    let mut dir: Option<PathBuf> = None;
+    let mut shuffles = 20u32;
+    let mut margin = 2i32;
+    let mut chosen: Option<String> = None;
+    let mut tables = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--shuffles" => shuffles = it.next().and_then(|n| n.parse().ok()).ok_or("--shuffles needs a number")?,
+            "--margin" => margin = it.next().and_then(|n| n.parse().ok()).ok_or("--margin needs a number")?,
+            "--chosen" => chosen = Some(it.next().ok_or("--chosen needs a tile name")?.clone()),
+            "--tables" => tables = true,
+            other => dir = Some(PathBuf::from(other)),
+        }
+    }
+    let library = redfab_core::tile::Library::builtin()?;
+    let mut ok = true;
+    for variant in redfab_core::tile::Variant::all() {
+        if !matches!(variant.kind, redfab_core::tile::Kind::Dff | redfab_core::tile::Kind::DffAlt) {
+            continue;
+        }
+        if let Some(dir) = &dir {
+            for fixture in redfab_core::dfftest::fixtures(&variant, &library) {
+                let path = dir.join(format!("{}.fixture.json", fixture.name));
+                let on_disk: serde_json::Value =
+                    serde_json::from_str(&read(&path)?).map_err(|e| format!("{}: {e}", path.display()))?;
+                if on_disk != fixture.json {
+                    println!("  FAIL  {}: the fixture in {} is not the one generated now", fixture.name, dir.display());
+                    ok = false;
+                }
+            }
+        }
+        let c = redfab_core::dfftest::characterize(&variant, &library, shuffles)?;
+        let is_chosen = chosen.as_deref() == Some(variant.kind.name());
+        let problems = redfab_core::dfftest::check(&c, &variant, &library, is_chosen, margin);
+        println!("{} ({} edge):", c.name, if c.falling { "falling" } else { "rising" });
+        if tables {
+            for table in &c.tables {
+                println!("{table}");
+            }
+        }
+        let timing: Vec<String> = c.timing().iter().map(|(k, v)| format!("{k} {v}")).collect();
+        println!(
+            "  measured: {}; capture boundary between offsets {:?} and {:?}; ordering-dependent offsets {:?}",
+            timing.join(", "),
+            c.captured_until,
+            c.ignored_from,
+            c.ordering_zone
+        );
+        for f in &c.findings {
+            println!("  note  {f}");
+        }
+        for d in &c.defects {
+            println!("  defect  {d}");
+        }
+        for p in &problems {
+            println!("  FAIL  {p}");
+        }
+        ok &= problems.is_empty();
+    }
+    Ok(ok)
 }
 
 /// `redfab timing DESIGN.json`

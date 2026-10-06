@@ -100,6 +100,8 @@ struct LegendEntry {
 #[derive(Clone, Debug)]
 pub struct Tile {
     pub name: String,
+    /// Width in blocks: a whole number of cells of `PITCH`. Depth is one cell.
+    pub width: i32,
     pub ports: Vec<Port>,
     /// `Some("nor")` for a gate, `None` for wiring and I/O.
     pub function: Option<String>,
@@ -109,6 +111,10 @@ pub struct Tile {
     pub probe: Option<Pos>,
     /// Output tiles: the lamp to read.
     pub lamp: Option<Pos>,
+    /// Flip-flops: the figures measured in stage 8, as `timing` lines in the file,
+    /// and which clock edge they act on (`edge rising` or `edge falling`).
+    pub timing: BTreeMap<String, i32>,
+    pub clock_edge: Option<String>,
     legend: BTreeMap<char, LegendEntry>,
     /// `layers[y][z][x]`
     layers: Vec<Vec<Vec<char>>>,
@@ -117,6 +123,11 @@ pub struct Tile {
 impl Tile {
     pub fn port(&self, edge: Edge) -> Option<&Port> {
         self.ports.iter().find(|p| p.edge == edge)
+    }
+
+    /// How many cells wide the tile is.
+    pub fn cells(&self) -> i32 {
+        self.width / PITCH
     }
 
     pub fn inputs(&self) -> impl Iterator<Item = &Port> {
@@ -135,7 +146,7 @@ impl Tile {
                     if entry.when.is_some_and(|edge| !used.contains(&edge)) || entry.block.is_air() {
                         continue;
                     }
-                    let pos = rotate_pos(Pos::new(x as i32, y as i32, z as i32), rotation);
+                    let pos = rotate_pos_in(Pos::new(x as i32, y as i32, z as i32), rotation, self.width);
                     out.push((pos, entry.block.rotated(rotation)));
                 }
             }
@@ -152,7 +163,10 @@ impl Tile {
         let mut delay = 0;
         let mut probe = None;
         let mut lamp = None;
+        let mut timing = BTreeMap::new();
+        let mut clock_edge = None;
         let mut legend = BTreeMap::new();
+        let mut width = PITCH;
         let mut layers: Vec<Vec<Vec<char>>> = vec![vec![vec!['.'; PITCH as usize]; PITCH as usize]; HEIGHT as usize];
         let mut section = Section::Header;
 
@@ -179,10 +193,26 @@ impl Tile {
                 ("tile", _) => name = Some(words.get(1).ok_or_else(|| at("tile needs a name".into()))?.to_string()),
                 ("size", _) => {
                     let size = pos_at(1)?;
-                    if (size.x, size.y, size.z) != (PITCH, HEIGHT, PITCH) {
-                        return Err(at(format!("tiles must be {PITCH} {HEIGHT} {PITCH}")));
+                    if size.x % PITCH != 0 || size.x < PITCH || (size.y, size.z) != (HEIGHT, PITCH) {
+                        return Err(at(format!(
+                            "tiles are a whole number of cells wide: W {HEIGHT} {PITCH} with W a multiple of {PITCH}"
+                        )));
+                    }
+                    width = size.x;
+                    layers = vec![vec![vec!['.'; width as usize]; PITCH as usize]; HEIGHT as usize];
+                }
+                ("timing", _) => {
+                    // timing setup 1 hold 0 clk_to_q 8 min_pulse 4
+                    for pair in words[1..].chunks(2) {
+                        let [key, value] = pair else { return Err(at("timing needs name value pairs".into())) };
+                        let value: i32 = value.parse().map_err(|_| at(format!("timing {key}: not a number")))?;
+                        timing.insert(key.to_string(), value);
                     }
                 }
+                ("edge", _) => match words.get(1) {
+                    Some(&"rising") | Some(&"falling") => clock_edge = Some(words[1].to_string()),
+                    _ => return Err(at("edge needs rising or falling".into())),
+                },
                 ("port", _) => {
                     let edge = words
                         .get(1)
@@ -233,8 +263,8 @@ impl Tile {
                 (_, Section::Layer { y, row }) => {
                     let (y, row) = (*y, *row);
                     let cells: Vec<char> = first.chars().collect();
-                    if cells.len() != PITCH as usize || words.len() != 1 || row >= PITCH as usize {
-                        return Err(at(format!("each layer is {PITCH} rows of {PITCH} characters")));
+                    if cells.len() != width as usize || words.len() != 1 || row >= PITCH as usize {
+                        return Err(at(format!("each layer is {PITCH} rows of {width} characters")));
                     }
                     layers[y][row] = cells;
                     section = Section::Layer { y, row: row + 1 };
@@ -243,8 +273,19 @@ impl Tile {
             }
         }
 
-        let tile =
-            Tile { name: name.ok_or("missing 'tile <name>'")?, ports, function, delay, probe, lamp, legend, layers };
+        let tile = Tile {
+            name: name.ok_or("missing 'tile <name>'")?,
+            width,
+            ports,
+            function,
+            delay,
+            probe,
+            lamp,
+            timing,
+            clock_edge,
+            legend,
+            layers,
+        };
         tile.validate()?;
         Ok(tile)
     }
@@ -254,9 +295,10 @@ impl Tile {
         let last = PITCH - 1;
         let mid = PITCH / 2;
         for port in &self.ports {
+            // North and south ports sit on the first cell of a wide tile.
             let expected = match port.edge {
                 Edge::West => Pos::new(0, 1, mid),
-                Edge::East => Pos::new(last, 1, mid),
+                Edge::East => Pos::new(self.width - 1, 1, mid),
                 Edge::North => Pos::new(mid, 1, 0),
                 Edge::South => Pos::new(mid, 1, last),
             };
@@ -274,7 +316,7 @@ impl Tile {
             }
         }
         for (pos, block) in self.blocks(&all, 0) {
-            let on_border = pos.x == 0 || pos.x == last || pos.z == 0 || pos.z == last;
+            let on_border = pos.x == 0 || pos.x == self.width - 1 || pos.z == 0 || pos.z == last;
             if !on_border || pos.y == 0 {
                 continue; // the floor may reach the border; it is glass
             }
@@ -292,9 +334,21 @@ impl Tile {
     }
 }
 
-/// A position inside a tile, after the tile is turned clockwise about its centre.
+/// A position inside a one-cell tile, after the tile is turned clockwise about its centre.
 pub fn rotate_pos(pos: Pos, quarter_turns: u8) -> Pos {
-    (0..quarter_turns % 4).fold(pos, |p, _| Pos::new(PITCH - 1 - p.z, p.y, p.x))
+    rotate_pos_in(pos, quarter_turns, PITCH)
+}
+
+/// The same for a tile `width` blocks wide and one cell deep: each quarter turn
+/// swaps the footprint's sides, so after one the tile is a cell wide and `width` deep.
+pub fn rotate_pos_in(pos: Pos, quarter_turns: u8, width: i32) -> Pos {
+    let mut depth = PITCH;
+    let mut width = width;
+    (0..quarter_turns % 4).fold(pos, |p, _| {
+        let turned = Pos::new(depth - 1 - p.z, p.y, p.x);
+        std::mem::swap(&mut width, &mut depth);
+        turned
+    })
 }
 
 enum Section {
@@ -312,6 +366,9 @@ pub struct Library {
     pub cross: Tile,
     pub tie_high: Tile,
     pub tie_low: Tile,
+    /// The flip-flop, and the other candidate characterized in stage 8.
+    pub dff: Tile,
+    pub dff_alt: Tile,
 }
 
 impl Library {
@@ -327,6 +384,8 @@ impl Library {
             cross: parse("cross", include_str!("../../../cells/cross.tile"))?,
             tie_high: parse("tie_high", include_str!("../../../cells/tie_high.tile"))?,
             tie_low: parse("tie_low", include_str!("../../../cells/tie_low.tile"))?,
+            dff: parse("dff", include_str!("../../../cells/dff.tile"))?,
+            dff_alt: parse("dff_alt", include_str!("../../../cells/dff_alt.tile"))?,
         })
     }
 
@@ -381,11 +440,24 @@ pub enum Kind {
     Cross,
     TieHigh,
     TieLow,
+    /// The flip-flop: D on the west, the clock on the north, Q on the east.
+    Dff,
+    /// The other flip-flop candidate, kept for its characterization.
+    DffAlt,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 7] =
-        [Kind::Input, Kind::Output, Kind::Wire, Kind::Nor, Kind::Cross, Kind::TieHigh, Kind::TieLow];
+    pub const ALL: [Kind; 9] = [
+        Kind::Input,
+        Kind::Output,
+        Kind::Wire,
+        Kind::Nor,
+        Kind::Cross,
+        Kind::TieHigh,
+        Kind::TieLow,
+        Kind::Dff,
+        Kind::DffAlt,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -396,6 +468,8 @@ impl Kind {
             Kind::Cross => "cross",
             Kind::TieHigh => "tie_high",
             Kind::TieLow => "tie_low",
+            Kind::Dff => "dff",
+            Kind::DffAlt => "dff_alt",
         }
     }
 }
@@ -445,7 +519,14 @@ impl Variant {
             Kind::Cross => &library.cross,
             Kind::TieHigh => &library.tie_high,
             Kind::TieLow => &library.tie_low,
+            Kind::Dff => &library.dff,
+            Kind::DffAlt => &library.dff_alt,
         }
+    }
+
+    /// Width in cells: one, or two for a flip-flop.
+    pub fn cells(&self, library: &Library) -> i32 {
+        self.tile(library).cells()
     }
 
     /// A short name, e.g. `wire_WS`, `nor_WN`, `wire_WE_repW_d3`.
@@ -470,7 +551,7 @@ impl Variant {
         if let Some(entry) = self.repeater_entry {
             // The cell next to the entry port, one step towards the centre.
             let port = self.tile(library).port(entry).expect("the repeater's entry is a port of the tile");
-            let inner = rotate_pos(port.pos.offset(entry.dir().opposite()), self.rotation);
+            let inner = rotate_pos_in(port.pos.offset(entry.dir().opposite()), self.rotation, self.tile(library).width);
             let facing = entry.rotated(self.rotation).dir();
             for (pos, block) in &mut blocks {
                 if *pos == inner {
@@ -498,6 +579,12 @@ impl Variant {
                     },
                     // West-east and north-south never meet.
                     Kind::Cross => u8::from(matches!(p.edge, Edge::North | Edge::South)),
+                    // D, the clock and Q are three nets.
+                    Kind::Dff | Kind::DffAlt => match p.edge {
+                        Edge::West => 0,
+                        Edge::North | Edge::South => 1,
+                        Edge::East => 2,
+                    },
                     _ => 0,
                 };
                 let kind = match (self.repeater_entry, p.kind) {
@@ -521,7 +608,12 @@ impl Variant {
                     }
                     (_, kind) => kind,
                 };
-                VariantPort { edge: p.edge.rotated(self.rotation), kind, pos: rotate_pos(p.pos, self.rotation), net }
+                VariantPort {
+                    edge: p.edge.rotated(self.rotation),
+                    kind,
+                    pos: rotate_pos_in(p.pos, self.rotation, tile.width),
+                    net,
+                }
             })
             .collect()
     }
@@ -569,6 +661,8 @@ impl Variant {
                 delay: 1,
             });
         }
+        out.push(Variant::new(Kind::Dff, &[Edge::West, Edge::North, Edge::East]));
+        out.push(Variant::new(Kind::DffAlt, &[Edge::West, Edge::North, Edge::East]));
         out.push(Variant::new(Kind::TieHigh, &[Edge::East]));
         out.push(Variant::new(Kind::TieLow, &[Edge::East]));
         out
@@ -615,7 +709,7 @@ mod tests {
         assert_eq!(repeater.0, Pos::new(2, 1, 1));
         assert_eq!(turn.blocks(&lib).iter().filter(|(_, b)| matches!(b, Block::Wire(_))).count(), 4);
         // 2 io tiles, 11 wires + 28 repeater placements + 3 more delays, 7 NORs, 3 crossings, 2 ties
-        assert_eq!(Variant::all().len(), 2 + 11 + 28 + 3 + 7 + 3 + 2);
+        assert_eq!(Variant::all().len(), 2 + 11 + 28 + 3 + 7 + 3 + 2 + 2);
     }
 
     #[test]
