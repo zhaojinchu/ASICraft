@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@yowasp/yosys": "0.68.1207"
+    "@yowasp/yosys": "0.68.1207",
+    "puppeteer-core": "25.12.0",
+    "three": "0.186.1"
   }
 }
