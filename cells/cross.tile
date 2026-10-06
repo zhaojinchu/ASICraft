@@ -1,0 +1,45 @@
+# Two signals crossing: west-east stays at y=1, north-south climbs over it.
+# The stone block above the crossing point is what keeps the two apart: a block
+# that conducts above a wire stops that wire from connecting diagonally upward,
+# and the dust on top of the stone only powers it weakly, which the wire below
+# cannot read. The two steps stand on stone, not glass: a signal only steps
+# down onto a block that conducts. Those stones are beside the west-east wire,
+# which is safe because the wire reads neither weakly powered blocks nor, with a
+# conducting block above it, anything diagonal.
+tile cross
+size 5 4 5
+port W io 0 1 2
+port E io 4 1 2
+port N io 2 1 0
+port S io 2 1 4
+function cross
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  - minecraft:redstone_wire
+
+layer 0
+  ..G..
+  .....
+  GGGGG
+  .....
+  ..G..
+layer 1
+  ..-..
+  ..#..
+  -----
+  ..#..
+  ..-..
+layer 2
+  .....
+  ..-..
+  ..#..
+  ..-..
+  .....
+layer 3
+  .....
+  .....
+  ..-..
+  .....
+  .....

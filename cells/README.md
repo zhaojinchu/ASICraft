@@ -1,6 +1,6 @@
 # Tile library
 
-Every circuit redfab builds is assembled from the tiles in this directory. A tile is a 5×5 block footprint, up to 4 blocks tall, written as text: one grid per height level, north at the top, west on the left.
+Every circuit redfab builds is assembled from the tiles in this directory. A tile is a 5×5 block footprint, 4 blocks tall, written as text: one grid per height level, north at the top, west on the left. Five is the smallest footprint in which one wire can bridge over another (see `cross.tile`), which is what fixed the size.
 
 ```
 tile nor                 name
@@ -21,6 +21,17 @@ Rules every tile follows, so that neighbouring tiles cannot interfere:
 
 - A signal enters or leaves only at the middle of an edge, at y = 1, as redstone dust.
 - No other block touches the tile's border.
+- A tile is written for one orientation; the build may place it rotated by quarter turns. Gates always take inputs on W, N or S and drive E, so they are never rotated.
 - Dust and torches stand on glass, never on stone. Powered dust weakly powers the block under it, and stone would pass that on to torches and lamps next to it; glass does not conduct.
 
 Dust is written without shape or power. The build computes both, with every input off, and writes the finished state.
+
+| Tile | Ports | Does |
+|---|---|---|
+| `input` | out E | A lever on a stone block. Tests swap the block for a redstone block. |
+| `output` | in W | Dust into a lamp. |
+| `wire` | io W E N S | Joins whichever of its edges are used: a straight, a turn, or a fan-out. |
+| `cross` | io W E N S | West to east and north to south, not touching. |
+| `repeater` | in W, out E | Full strength again, 2 to 8 game ticks later. |
+| `nor` | in W N S, out E | NOR of the used inputs; NOT with one. |
+| `tie_high`, `tie_low` | out E | Constant 1 and constant 0. |

@@ -23,7 +23,7 @@ from .blockstate import BlockState, format_pos, parse_pos
 from .mechanics import MODES, source_for
 from .place_template import place, read_box
 from .runner import Runner, layout
-from .server import ROOT, VanillaServer
+from .server import ROOT, VanillaServer, cargo
 from .session import Session
 from .trace import Expectation, Fixture, first_trace_difference
 
@@ -35,7 +35,7 @@ DUST_NS = "minecraft:redstone_wire[east=none,north=side,power=0,south=side,west=
 
 
 def redfab(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run(["cargo", "run", "-q", "-p", "redfab-cli", "--", *args], cwd=ROOT, check=check,
+    return subprocess.run([cargo(), "run", "-q", "-p", "redfab-cli", "--", *args], cwd=ROOT, check=check,
                           capture_output=True, text=True)
 
 
