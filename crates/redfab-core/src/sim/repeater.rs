@@ -28,6 +28,14 @@ impl Sim {
         self.signal(behind, facing, true).max(dust)
     }
 
+    /// Is the block behind the repeater at `pos` giving it any signal?
+    pub fn repeater_input_is_powered(&self, pos: Pos) -> bool {
+        match self.world.get(pos) {
+            Block::Repeater { facing, .. } => self.repeater_input(pos, facing) > 0,
+            _ => false,
+        }
+    }
+
     /// `isLocked`: a powered repeater points into one of this repeater's sides.
     pub(super) fn repeater_is_locked(&self, pos: Pos, facing: Dir) -> bool {
         if self.mutation == Some(Mutation::RepeaterIgnoresLock) {

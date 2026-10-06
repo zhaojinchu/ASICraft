@@ -9,3 +9,7 @@ publish = false
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# The router and the simulator are too slow unoptimised; 1 keeps builds quick.
+[profile.dev]
+opt-level = 1

@@ -2,7 +2,8 @@
 # playground) drive it by swapping the lever's stone block for a redstone block,
 # because changing a lever's state with a command does not power anything.
 # The block stays off the tile's border: as a redstone block it would power any
-# dust in the neighbouring tile.
+# dust in the neighbouring tile. An input that nothing reads keeps its lever and
+# loses its dust.
 tile input
 size 5 4 5
 port E out 4 1 2
@@ -12,7 +13,7 @@ legend
   G minecraft:glass
   # minecraft:stone
   / minecraft:lever[face=floor,facing=east,powered=false]
-  - minecraft:redstone_wire
+  - minecraft:redstone_wire if E
 
 layer 0
   .....

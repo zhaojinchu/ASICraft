@@ -16,6 +16,8 @@ pub mod lvs;
 pub mod nbt;
 pub mod netlist;
 pub mod place;
+pub mod pnrtest;
+pub mod route;
 pub mod sim;
 pub mod structure;
 pub mod tile;

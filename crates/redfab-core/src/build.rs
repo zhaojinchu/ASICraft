@@ -8,9 +8,11 @@ use crate::bake::bake;
 use crate::block::Block;
 use crate::extract::{extract, weak_signals};
 use crate::geom::Pos;
+use crate::layout::Placed;
 use crate::lvs::lvs;
-use crate::netlist::Netlist;
-use crate::place::place_single_gate;
+use crate::netlist::{Driver, Netlist};
+use crate::place::place;
+use crate::route::route;
 use crate::sim::Sim;
 use crate::structure::structure_file;
 use crate::tile::Library;
@@ -19,6 +21,8 @@ use crate::world::World;
 pub const DESIGN_FORMAT: &str = "redfab-design/1";
 /// A lamp goes out this many game ticks after it loses power.
 const LAMP_OFF_DELAY: u32 = 4;
+/// The most routing columns tried between gate columns before giving up.
+const MAX_ROUTING_COLS: i32 = 6;
 
 /// A built design: its blocks in their settled all-inputs-off state, and how to
 /// drive and read it.
@@ -29,6 +33,9 @@ pub struct Design {
     pub size: [i32; 3],
     pub inputs: Vec<InputPin>,
     pub outputs: Vec<OutputPin>,
+    /// Constant nets: the block that anchors each (a torch for 1, a dust for 0).
+    #[serde(default)]
+    pub constants: Vec<ConstantPin>,
     /// Game ticks after an input change by which every output is final.
     pub settle_ticks: u32,
     /// Position (`x,y,z`) to full block state.
@@ -48,6 +55,13 @@ pub struct InputPin {
 pub struct OutputPin {
     pub name: String,
     pub lamp: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ConstantPin {
+    pub net: usize,
+    pub value: bool,
+    pub anchor: String,
 }
 
 pub struct Built {
@@ -87,21 +101,45 @@ impl Design {
     pub fn lamps(&self) -> Result<Vec<Pos>, String> {
         self.outputs.iter().map(|o| o.lamp.parse()).collect()
     }
+
+    pub fn ties(&self) -> Result<Vec<(usize, bool, Pos)>, String> {
+        self.constants.iter().map(|c| Ok((c.net, c.value, c.anchor.parse()?))).collect()
+    }
 }
 
-/// Places, bakes and checks the design in a Yosys JSON netlist that has been
-/// mapped to the tile library. Fails if the layout does not implement the netlist.
+/// Places, routes, bakes and checks the design in a Yosys JSON netlist that has
+/// been mapped to the tile library. Fails if the layout does not implement the netlist.
 pub fn build(mapped_json: &str, top: &str, name: &str) -> Result<Built, String> {
     let library = Library::builtin()?;
     let netlist = Netlist::from_yosys_json(mapped_json, top, &library)?;
-    let layout = place_single_gate(&netlist)?;
-    let realized = layout.realize(&library, &netlist)?;
-    let world = bake(realized.world)?;
+    build_netlist(&netlist, name)
+}
 
-    let problems = check_world(&world, &netlist, &realized.probes, &realized.lamps);
+/// [`build`] from a netlist that is already in memory.
+pub fn build_netlist(netlist: &Netlist, name: &str) -> Result<Built, String> {
+    let (built, problems) = build_unchecked(netlist, name)?;
     if !problems.is_empty() {
         return Err(format!("the layout does not implement the netlist:\n  - {}", problems.join("\n  - ")));
     }
+    Ok(built)
+}
+
+/// [`build_netlist`], but a layout that fails the checks is returned along with
+/// the problems instead of being an error, so it can be looked at.
+pub fn build_unchecked(netlist: &Netlist, name: &str) -> Result<(Built, Vec<String>), String> {
+    let library = Library::builtin()?;
+    let (routed, routing_cols) = place_and_route(netlist)?;
+    let layout = routed.layout;
+    let realized = layout.realize(&library, netlist)?;
+    let world = bake(realized.world)?;
+
+    let problems = check_world(&world, netlist, &realized.probes, &realized.lamps, &realized.ties);
+    let settle_ticks = settle_ticks(netlist, &routed.repeaters, library.nor.delay);
+    let repeater_count = layout
+        .tiles
+        .values()
+        .filter(|p| matches!(p, Placed::Repeater { .. } | Placed::Cross { repeater_entry: Some(_), .. }))
+        .count();
 
     let (sx, sy, sz) = world.size();
     let design = Design {
@@ -125,24 +163,99 @@ pub fn build(mapped_json: &str, top: &str, name: &str) -> Result<Built, String> 
             .zip(&realized.lamps)
             .map(|(port, lamp)| OutputPin { name: port.name.clone(), lamp: lamp.to_string() })
             .collect(),
-        settle_ticks: library.nor.delay + LAMP_OFF_DELAY,
+        constants: realized
+            .ties
+            .iter()
+            .map(|&(net, value, pos)| ConstantPin { net, value, anchor: pos.to_string() })
+            .collect(),
+        settle_ticks,
         blocks: world.iter().map(|(pos, block)| (pos.to_string(), block.to_string())).collect(),
     };
     let (cols, rows) = layout.size();
     let report = format!(
-        "design {name}\n  cells: {}\n  tiles: {} ({cols} columns x {rows} rows)\n  blocks: {} in {sx} x {sy} x {sz}\n  settles within {} game ticks of an input change\n  layout matches the netlist\n",
+        "design {name}\n  cells: {}\n  tiles: {} ({cols} columns x {rows} rows, {} routing columns between gate columns)\n  repeaters: {repeater_count}\n  blocks: {} in {sx} x {sy} x {sz}\n  settles within {} game ticks of an input change\n{}",
         netlist.cells.len(),
         layout.tiles.len(),
+        routing_cols,
         design.blocks.len(),
         design.settle_ticks,
+        if problems.is_empty() { "  layout matches the netlist\n" } else { "" },
     );
-    Ok(Built { structure: structure_file(&world), design, report })
+    Ok((Built { structure: structure_file(&world), design, report }, problems))
+}
+
+/// Places and routes with more routing room each time routing fails. Returns the
+/// routed layout and the number of routing columns it took.
+pub fn place_and_route(netlist: &Netlist) -> Result<(crate::route::Routed, i32), String> {
+    let mut last = String::from("no routing attempt made");
+    for routing_cols in 1..=MAX_ROUTING_COLS {
+        let placement = place(netlist, routing_cols)?;
+        match route(netlist, &placement) {
+            Ok(routed) => return Ok((routed, routing_cols)),
+            Err(e) => last = e,
+        }
+    }
+    Err(format!("routing failed even with {MAX_ROUTING_COLS} routing columns: {last}"))
+}
+
+/// Game ticks after which every output is final: the longest path through
+/// gates (each `gate_delay`) and repeaters (2 each) to an output, plus the lamp's
+/// 4-tick turn-off. Stage 7 replaces this with a proper timing analysis.
+fn settle_ticks(netlist: &Netlist, repeaters: &BTreeMap<usize, Vec<u32>>, gate_delay: u32) -> u32 {
+    let drivers = netlist.drivers().unwrap_or_default();
+    // Repeaters between a net's driver and the sink at index `i` of `sinks_of(net)`.
+    let hops = |net: usize, sink: (usize, usize)| -> u32 {
+        repeaters
+            .get(&net)
+            .and_then(|counts| {
+                netlist.sinks_of(net).iter().position(|s| *s == sink).and_then(|i| counts.get(i).copied())
+            })
+            .unwrap_or(0)
+    };
+    let mut memo: Vec<Option<u32>> = vec![None; netlist.cells.len()];
+    fn ready(
+        c: usize,
+        netlist: &Netlist,
+        drivers: &[Driver],
+        hops: &dyn Fn(usize, (usize, usize)) -> u32,
+        gate_delay: u32,
+        memo: &mut Vec<Option<u32>>,
+    ) -> u32 {
+        if let Some(a) = memo[c] {
+            return a;
+        }
+        let mut latest = 0;
+        for (pin, &net) in netlist.cells[c].inputs.iter().enumerate() {
+            let at_source = match drivers[net] {
+                Driver::Cell(d) => ready(d, netlist, drivers, hops, gate_delay, memo),
+                _ => 0,
+            };
+            latest = latest.max(at_source + 2 * hops(net, (c, pin)));
+        }
+        memo[c] = Some(latest + gate_delay);
+        latest + gate_delay
+    }
+    let mut worst = 0;
+    for (o, port) in netlist.outputs.iter().enumerate() {
+        let at_source = match drivers[port.net] {
+            Driver::Cell(d) => ready(d, netlist, &drivers, &hops, gate_delay, &mut memo),
+            _ => 0,
+        };
+        worst = worst.max(at_source + 2 * hops(port.net, (usize::MAX, o)) + LAMP_OFF_DELAY);
+    }
+    worst.max(LAMP_OFF_DELAY)
 }
 
 /// The layout-versus-netlist check and the signal-strength check on a block world.
-pub fn check_world(world: &World, netlist: &Netlist, probes: &[Pos], lamps: &[Pos]) -> Vec<String> {
+pub fn check_world(
+    world: &World,
+    netlist: &Netlist,
+    probes: &[Pos],
+    lamps: &[Pos],
+    ties: &[(usize, bool, Pos)],
+) -> Vec<String> {
     let circuit = extract(world, probes);
-    let mut problems = lvs(netlist, &circuit, probes, lamps);
+    let mut problems = lvs(netlist, &circuit, probes, lamps, ties);
     problems.extend(weak_signals(world, probes, &circuit));
     problems
 }
@@ -151,7 +264,8 @@ pub fn check_world(world: &World, netlist: &Netlist, probes: &[Pos], lamps: &[Po
 pub fn check_design(design_json: &str, mapped_json: &str, top: &str) -> Result<Vec<String>, String> {
     let design = Design::from_json(design_json)?;
     let netlist = Netlist::from_yosys_json(mapped_json, top, &Library::builtin()?)?;
-    Ok(check_world(&design.world()?, &netlist, &design.probes()?, &design.lamps()?))
+    let ties = design.ties()?;
+    Ok(check_world(&design.world()?, &netlist, &design.probes()?, &design.lamps()?, &ties))
 }
 
 /// Applies input vectors to a design in the simulator, one after another, and
@@ -244,11 +358,23 @@ mod tests {
     }
 
     #[test]
-    fn designs_needing_routing_are_refused_for_now() {
+    fn a_two_cell_design_builds_through_placement_and_routing() {
         let two_cells = NOR2
             .replace(r#""cells":{"#, r#""cells":{"h":{"type":"NOT","connections":{"A":[4],"Y":[5]}},"#)
             .replace(r#""y":{"direction":"output","bits":[4]}"#, r#""y":{"direction":"output","bits":[5]}"#);
-        let err = build(&two_cells, "top", "x").err().unwrap();
-        assert!(err.contains("placement and routing"), "{err}");
+        let built = build(&two_cells, "top", "x").unwrap();
+        let vectors = r#"[{"a":0,"b":0},{"a":0,"b":1},{"a":1,"b":0},{"a":1,"b":1}]"#;
+        assert_eq!(outputs(&built.design, vectors), r#"[{"y":0},{"y":1},{"y":1},{"y":1}]"#);
+    }
+
+    #[test]
+    fn constants_build_as_tie_tiles() {
+        // y = NOR(a, 0) = NOT a; z = constant 1
+        let json = r#"{"modules":{"top":{
+            "ports":{"a":{"direction":"input","bits":[2]},"y":{"direction":"output","bits":[4]},"z":{"direction":"output","bits":["1"]}},
+            "cells":{"g":{"type":"NOR2","connections":{"A":[2],"B":["0"],"Y":[4]}}}}}}"#;
+        let built = build(json, "top", "c").unwrap();
+        assert_eq!(built.design.constants.len(), 2);
+        assert_eq!(outputs(&built.design, r#"[{"a":0},{"a":1}]"#), r#"[{"y":1,"z":1},{"y":0,"z":1}]"#);
     }
 }

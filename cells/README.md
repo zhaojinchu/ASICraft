@@ -28,10 +28,9 @@ Dust is written without shape or power. The build computes both, with every inpu
 
 | Tile | Ports | Does |
 |---|---|---|
-| `input` | out E | A lever on a stone block. Tests swap the block for a redstone block. |
+| `input` | out E | A lever on a stone block. Tests swap the block for a redstone block. An input that nothing reads keeps the lever and has no dust. |
 | `output` | in W | Dust into a lamp. |
-| `wire` | io W E N S | Joins whichever of its edges are used: a straight, a turn, or a fan-out. |
-| `cross` | io W E N S | West to east and north to south, not touching. |
-| `repeater` | in W, out E | Full strength again, 2 to 8 game ticks later. |
+| `wire` | io W E N S | Joins whichever of its edges are used: a straight, a turn, or a fan-out. The build may put a repeater in the arm the signal enters by (the cell next to the port, facing the port): full strength again, 2 to 8 game ticks later. |
+| `cross` | io W E N S | West to east and north to south, not touching. The flat west-east arm may carry a repeater like a wire; the build turns the tile when the other signal is the one that needs it. |
 | `nor` | in W N S, out E | NOR of the used inputs; NOT with one. |
 | `tie_high`, `tie_low` | out E | Constant 1 and constant 0. |

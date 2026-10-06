@@ -12,7 +12,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | 3 | First circuit: one NOR gate | **done** 2026-10-05 | `not1`, `nor2`, `nor3` go from SystemVerilog to working circuits in the game; every check from the plan passes |
 | 4 | Simulator, part 2 | **done** 2026-10-05 | Repeaters, locking and tick priorities; all 60 mechanics traces and both random corpora (764 traces) match |
 | 5 | Full combinational tile set | **done** 2026-10-05 | Eight tiles, 39 variants; all hold in the game and match the simulator; the tile contract holds for all 3,442 pairs and groups checked |
-| 6 | Placement and routing | not started | |
+| 6 | Placement and routing | **done** 2026-10-06 | Any combinational netlist places and routes; the 4-bit adder (49 cells, 1,273 tiles) is correct on all 512 input combinations in the simulator and in the game; 180 random netlists build and compute correctly |
 | 7 | Timing analysis | not started | |
 | 8 | Flip-flop characterization | not started | |
 | 9 | Counter and state machine | not started | |
@@ -146,6 +146,27 @@ Findings and surprises from each stage go here, newest last.
 2. The simulator flagged the **crossing**: the north-south wire climbed onto its bridge but could not come down, because a signal only steps down onto a block that conducts and the steps stood on glass. The steps are stone now; the west-east wire beside them is unaffected because a wire reads neither weakly powered blocks nor, with a conducting block above it, anything diagonal.
 
 **Not in this stage:** reading repeaters and constants back out of a layout for the netlist check, and using the new tiles in a build. Both come with placement and routing in stage 6.
+
+### Stage 6 (2026-10-06)
+
+**Built:** placement (`place.rs`): gates in columns by logic depth, four rows per gate (north feed, gate, south feed, a free row), rows ordered by barycenter sweeps, inputs and constants on the west edge, outputs on the east, pin sides chosen per gate to shorten feeds. Routing (`route.rs`): PathFinder negotiated congestion over tile tracks (each tile has an X and a Z track; a crossing gives one to each of two nets), then exact signal-strength tracking along each net with repeaters inserted at the last tile that can take one, and a re-route with penalties when a signal dies inside a run of crossings. Routing room grows (one to six routing columns between gate columns) until a netlist routes. The netlist check (`lvs.rs`) now follows nets through repeaters, anchors constants at their tie tiles, and matches cells with identical inputs as a group. New commands: `redfab layout` (a text picture of a routed layout), `redfab pnr-random` (random netlists must build and compute correctly), `redfab extract` (what the checker reads back from a design), and `redfab build MAPPED.json` (build from a netlist without synthesis). New designs: `fa1`, `adder4`, `consts`. In the game: `harness.design exhaustive` steps every input combination and reads the lamps; the traced run samples 32 vectors of large designs.
+
+**Results:**
+
+- `adder4`: 49 cells, 1,273 tiles (73 × 50), 455 repeaters, settles in 144 game ticks; all 512 input combinations correct in the simulator and in the game in both redstone modes.
+- 180 random netlists (three seeds of 60, up to 40 gates, with constants, fan-out, inputs wired to outputs and gates reading one net twice) place, route, pass the layout-versus-netlist and strength checks, and compute what the netlist says on up to 16 vectors each.
+- The crossing can now carry a repeater in its flat arm (three crossing variants, 54 variants in all); all hold in the game.
+
+**Four defects the random netlists found, all fixed:**
+
+1. A signal running through consecutive crossings had nowhere for a repeater (crossings could not hold one) and died. Now the flat arm of a crossing takes a repeater like a wire; the tile is turned when the climbing signal is the one that needs it.
+2. In a column of 3-input gates every row held a gate or a feed, so nets heading further east had no way through, and routing never converged. The placer now sizes rows by the nets that must cross each gate column.
+3. An input that nothing reads left an open port. Its tile now has a lever and no dust.
+4. The netlist check matched `NOT(a)` to the torch of `NOR2(a, a)` and failed everything downstream. Cells with the same inputs are now matched as a group.
+
+**A harness defect found by the first large design:** `save-all flush` replies before the game has finished writing the region files, and while it moves chunk records around inside a file, a header entry can point at nothing or at another record for a moment. A snapshot read in that moment saw a chunk empty, or one block out of place, for a single tick (three times in about 3,500 chunk-ticks of the adder). Every chunk the harness reads is force-loaded and was changed that tick, so the reader now insists that each chunk has a record, that the record decodes and names that chunk, and that its `LastUpdate` is the current game time; otherwise it reads again (`harness/anvil.py`, `harness/session.py`). Fixtures big enough to show this also needed plot cells sized per fixture instead of the fixed 32 blocks, force-loading in strips (the game takes at most 256 chunks per command), and a limit on the ticks a traced run records (the adder's 32-vector trace would have taken hours; it records two vectors, and `exhaustive` covers the rest without traces).
+
+**Known costs, left for later stages:** the adder is 365 × 250 blocks, about 3× the hand-layout density the review predicted, and 144 ticks of settle time come mostly from 455 repeaters on long feeds. Stage 7's timing analysis replaces the settle estimate; density is a later compaction pass.
 
 ---
 

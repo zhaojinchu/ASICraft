@@ -101,10 +101,15 @@ fn stamp(fixture: &mut Fixture, variant: &Variant, library: &Library) -> Vec<Hoo
 pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
     let name = variant.name();
     let doc = match variant.kind {
+        Kind::Wire if variant.repeater_entry.is_some() => {
+            "Wire with a repeater: every other port follows the entry after 2 game ticks per setting, and not before."
+        }
         Kind::Wire => "Wiring: driving any used port must power every other used port, at once.",
         Kind::Nor => "NOR: the output is powered exactly when no input is, 2 game ticks after the inputs change.",
+        Kind::Cross if variant.repeater_entry.is_some() => {
+            "Crossing with a repeater: the flat axis follows its entry after the delay; the other axis passes at once."
+        }
         Kind::Cross => "Crossing: west drives east only, north drives south only, at once.",
-        Kind::Repeater => "Repeater: the output follows the input after 2 game ticks per setting, and not before.",
         Kind::TieHigh => "Constant 1: the output is always powered.",
         Kind::TieLow => "Constant 0: the output is never powered.",
         Kind::Input => "Input: the output is powered while the probe block is a redstone block.",
@@ -117,6 +122,18 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
     let delay = variant.delay_ticks(library);
     let mut t = 2;
     match variant.kind {
+        Kind::Wire if variant.repeater_entry.is_some() => {
+            let input = hooks.iter().find(|h| h.port.kind == PortKind::In).expect("repeater input");
+            let outputs: Vec<&Hookup> = hooks.iter().filter(|h| h.port.kind == PortKind::Out).collect();
+            for level in [true, false] {
+                fx.at(t, input.driver, if level { on } else { off });
+                for output in &outputs {
+                    fx.powered(t + delay - 1, output.reader, !level);
+                    fx.powered(t + delay, output.reader, level);
+                }
+                t += delay + 3;
+            }
+        }
         Kind::Wire => {
             for driven in &hooks {
                 fx.at(t, driven.driver, on);
@@ -128,6 +145,19 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
                     fx.powered(t + 3, hook.reader, false);
                 }
                 t += 6;
+            }
+        }
+        Kind::Cross if variant.repeater_entry.is_some() => {
+            let input = hooks.iter().find(|h| h.port.kind == PortKind::In).expect("entry");
+            let output = hooks.iter().find(|h| h.port.kind == PortKind::Out).expect("exit");
+            let others: Vec<&Hookup> = hooks.iter().filter(|h| h.port.kind == PortKind::Io).collect();
+            for level in [true, false] {
+                fx.at(t, input.driver, if level { on } else { off });
+                fx.at(t, others[0].driver, if level { on } else { off });
+                fx.powered(t + delay - 1, output.reader, !level);
+                fx.powered(t + delay, output.reader, level);
+                fx.powered(t, others[1].reader, level);
+                t += delay + 3;
             }
         }
         Kind::Cross => {
@@ -160,16 +190,6 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
                 fx.powered(t + delay - 1, output.reader, was_on);
                 fx.powered(t + delay, output.reader, now_on);
                 was_on = now_on;
-                t += delay + 3;
-            }
-        }
-        Kind::Repeater => {
-            let input = hooks.iter().find(|h| h.port.kind == PortKind::In).expect("repeater input");
-            let output = hooks.iter().find(|h| h.port.kind == PortKind::Out).expect("repeater output");
-            for level in [true, false] {
-                fx.at(t, input.driver, if level { on } else { off });
-                fx.powered(t + delay - 1, output.reader, !level);
-                fx.powered(t + delay, output.reader, level);
                 t += delay + 3;
             }
         }
@@ -280,7 +300,10 @@ pub fn group_fixture(name: &str, cols: i32, rows: i32, rng: &mut Rng, library: &
         fx.at(t, driver, block);
         t += 1 + rng.below(6) as u32;
     }
-    fx.finish(12)
+    // A short pulse into a repeater comes out stretched to its delay, so a chain of
+    // them can take the sum of twice each delay to settle.
+    let stretch: u32 = grid.iter().flatten().map(|v| 2 * v.delay_ticks(library)).sum();
+    fx.finish(12 + stretch)
 }
 
 /// Problems with a grid of placed variants: any way two tiles affect each other

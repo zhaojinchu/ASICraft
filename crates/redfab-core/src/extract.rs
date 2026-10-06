@@ -30,6 +30,8 @@ pub struct Circuit {
     pub nets: Vec<Vec<Pos>>,
     pub torches: Vec<Component>,
     pub lamps: Vec<Component>,
+    /// Repeaters: `reads` is the net at the input, `drives` the net at the output.
+    pub repeaters: Vec<Component>,
     /// Input sources: the probe blocks, plus any redstone block found in the world.
     pub sources: Vec<Component>,
     /// Pairs of wires where power can pass one way only.
@@ -97,12 +99,14 @@ pub fn extract(world: &World, probes: &[Pos]) -> Circuit {
         |pred: fn(&Block) -> bool| -> Vec<Pos> { base.iter().filter(|(_, b)| pred(b)).map(|(p, _)| p).collect() };
     let torch_positions = positions(|b| b.is_torch());
     let lamp_positions = positions(|b| matches!(b, Block::Lamp { .. }));
+    let repeater_positions = positions(|b| matches!(b, Block::Repeater { .. }));
     let mut source_positions: Vec<Pos> = probes.to_vec();
     source_positions
         .extend(world.iter().filter(|(p, b)| *b == Block::RedstoneBlock && !probes.contains(p)).map(|(p, _)| p));
     let component = |pos: Pos| Component { pos, reads: Vec::new(), drives: Vec::new(), direct: Vec::new() };
     let mut torches: Vec<Component> = torch_positions.iter().map(|&p| component(p)).collect();
     let mut lamps: Vec<Component> = lamp_positions.iter().map(|&p| component(p)).collect();
+    let mut repeaters: Vec<Component> = repeater_positions.iter().map(|&p| component(p)).collect();
     let mut sources: Vec<Component> = source_positions.iter().map(|&p| component(p)).collect();
 
     // What does each net power? Raise that net alone and look at every component.
@@ -122,6 +126,11 @@ pub fn extract(world: &World, probes: &[Pos]) -> Circuit {
         for lamp in &mut lamps {
             if sim.is_powered(lamp.pos) {
                 lamp.reads.push(id);
+            }
+        }
+        for repeater in &mut repeaters {
+            if sim.repeater_input_is_powered(repeater.pos) {
+                repeater.reads.push(id);
             }
         }
     }
@@ -147,6 +156,10 @@ pub fn extract(world: &World, probes: &[Pos]) -> Circuit {
         }
     };
     let all_sinks: Vec<Pos> = torch_positions.iter().chain(&lamp_positions).copied().collect();
+    for repeater in &mut repeaters {
+        let Block::Repeater { facing, delay, locked, .. } = base.get(repeater.pos) else { continue };
+        drive(repeater, Block::Repeater { facing, delay, locked, powered: true }, &all_sinks);
+    }
     for torch in &mut torches {
         let lit = match base.get(torch.pos) {
             Block::WallTorch { facing, .. } => Block::WallTorch { facing, lit: true },
@@ -158,7 +171,7 @@ pub fn extract(world: &World, probes: &[Pos]) -> Circuit {
         drive(source, Block::RedstoneBlock, &all_sinks);
     }
 
-    Circuit { nets, torches, lamps, sources, one_way }
+    Circuit { nets, torches, lamps, repeaters, sources, one_way }
 }
 
 /// With each driver switched on alone, every wire of the nets it drives must
@@ -166,12 +179,13 @@ pub fn extract(world: &World, probes: &[Pos]) -> Circuit {
 pub fn weak_signals(world: &World, probes: &[Pos], circuit: &Circuit) -> Vec<String> {
     let base = quiet(world, probes);
     let mut problems = Vec::new();
-    let drivers = circuit.torches.iter().map(|t| (t, true)).chain(circuit.sources.iter().map(|s| (s, false)));
-    for (driver, is_torch) in drivers {
-        let on = match (is_torch, base.get(driver.pos)) {
-            (true, Block::WallTorch { facing, .. }) => Block::WallTorch { facing, lit: true },
-            (true, _) => Block::Torch { lit: true },
-            (false, _) => Block::RedstoneBlock,
+    let drivers = circuit.torches.iter().chain(&circuit.repeaters).chain(&circuit.sources);
+    for driver in drivers {
+        let on = match base.get(driver.pos) {
+            Block::WallTorch { facing, .. } => Block::WallTorch { facing, lit: true },
+            Block::Torch { .. } => Block::Torch { lit: true },
+            Block::Repeater { facing, delay, locked, .. } => Block::Repeater { facing, delay, locked, powered: true },
+            _ => Block::RedstoneBlock,
         };
         let mut sim = Sim::new(base.clone());
         if sim.set_block(driver.pos, on, true).is_err() {

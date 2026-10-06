@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 
-from .anvil import Box, PendingTick, SnapshotReader
+from .anvil import Box, PendingTick, SnapshotReader, StaleSnapshot
 from .blockstate import BlockState, Pos
 from .server import VanillaServer
 
@@ -34,6 +34,7 @@ GAMERULES = {
 
 # Fastest rate the game allows; stepping then takes ~0.1 ms per tick instead of 50 ms.
 TICK_RATE = 10000
+SNAPSHOT_TIMEOUT = 30.0  # seconds to wait for a save to reach the disk
 
 
 class SessionError(Exception):
@@ -46,6 +47,7 @@ class Session:
         self.region_dir = server.run_dir / "world" / "dimensions" / "minecraft" / "overworld" / "region"
         self.reader = SnapshotReader(self.region_dir)
         self.commands_sent = 0
+        self.stale_snapshots = 0  # reads that caught the save still in progress
 
     # --- basics
 
@@ -90,10 +92,18 @@ class Session:
     # --- world
 
     def forceload(self, box: Box) -> None:
+        """Keep the chunks under the box loaded. One command covers at most 256
+        chunks, so a large box is loaded in strips."""
         (x0, _, z0), (x1, _, z1) = box
-        reply = self.command(f"forceload add {x0} {z0} {x1} {z1}")
-        if "force loaded" not in reply:
-            raise SessionError(f"forceload: {reply!r}")
+        chunks_x = x1 // 16 - x0 // 16 + 1
+        rows_per_strip = max(1, 256 // chunks_x)
+        z = z0
+        while z <= z1:
+            z_end = min(z1, (z // 16 + rows_per_strip) * 16 - 1)
+            reply = self.command(f"forceload add {x0} {z} {x1} {z_end}")
+            if "force loaded" not in reply and not reply.startswith("No chunks were marked"):  # all loaded already
+                raise SessionError(f"forceload: {reply!r}")
+            z = z_end + 1
 
     def setblock(self, pos: Pos, state: BlockState, strict: bool) -> bool:
         """Place one block. Returns False if the block was already in that state."""
@@ -121,9 +131,40 @@ class Session:
             return False
         raise SessionError(f"probe {pos} {state}: {reply!r}")
 
-    def snapshot(self, boxes: list[Box]) -> tuple[dict[Pos, BlockState], list[PendingTick]]:
-        """Save the world and read back every block and pending tick inside the boxes."""
+    def snapshot(self, boxes: list[Box], fresh: bool = False) -> tuple[dict[Pos, BlockState], list[PendingTick]]:
+        """Save the world and read back every block and pending tick inside the boxes.
+
+        The save goes on in the background after the command replies, so a read
+        can catch a chunk from before it, or half written. With `fresh`, every
+        chunk inside the boxes must have been saved at the current game time
+        (the caller has made sure each of them changed this tick), and the read
+        is repeated until that holds."""
         reply = self.command("save-all flush")
         if "Saved the game" not in reply:
             raise SessionError(f"save-all: {reply!r}")
-        return self.reader.read(boxes)
+        if not fresh:
+            # Chunks that did not change are not written again, so there is no stamp
+            # to wait for; wait for the region files to stop changing instead.
+            deadline = time.monotonic() + SNAPSHOT_TIMEOUT
+            stamps = None
+            while True:
+                time.sleep(0.1)
+                now = {f: f.stat().st_mtime_ns for f in self.region_dir.glob("r.*.mca")}
+                if now == stamps:
+                    try:
+                        return self.reader.read(boxes)
+                    except StaleSnapshot:
+                        self.stale_snapshots += 1
+                if time.monotonic() > deadline:
+                    raise SessionError(f"the save did not complete within {SNAPSHOT_TIMEOUT}s")
+                stamps = now
+        saved_at = self.gametime()
+        deadline = time.monotonic() + SNAPSHOT_TIMEOUT
+        while True:
+            try:
+                return self.reader.read(boxes, saved_at=saved_at)
+            except StaleSnapshot as e:
+                self.stale_snapshots += 1
+                if time.monotonic() > deadline:
+                    raise SessionError(f"the save did not complete within {SNAPSHOT_TIMEOUT}s: {e}") from e
+                time.sleep(0.02)

@@ -1,4 +1,7 @@
 # Two signals crossing: west-east stays at y=1, north-south climbs over it.
+# The build may put a repeater in the flat (west-east) arm the signal enters by,
+# as in the wire tile; the climbing arm has no room for one. The tile is placed
+# turned a quarter when the north-south signal is the one that needs a repeater.
 # The stone block above the crossing point is what keeps the two apart: a block
 # that conducts above a wire stops that wire from connecting diagonally upward,
 # and the dust on top of the stone only powers it weakly, which the wire below
