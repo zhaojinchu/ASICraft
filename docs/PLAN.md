@@ -14,7 +14,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | 5 | Full combinational tile set | **done** 2026-10-05 | Eight tiles, 39 variants; all hold in the game and match the simulator; the tile contract holds for all 3,442 pairs and groups checked |
 | 6 | Placement and routing | **done** 2026-10-06 | Any combinational netlist places and routes; the 4-bit adder (49 cells, 1,273 tiles) is correct on all 512 input combinations in the simulator and in the game; 180 random netlists build and compute correctly |
 | 7 | Timing analysis | **done** 2026-10-06 | Best and worst case per output: a bound by path and exact figures over every pair of input combinations from a timed model of the parts; the model agrees with the block simulator on every lamp change of 10k input changes of the adder, and the game stays within the report |
-| 8 | Flip-flop characterization | not started | |
+| 8 | Flip-flop characterization | **done** 2026-10-06 | Two candidates built and swept tick by tick; the master/slave pair of locked repeaters chosen (setup 1, hold 5, clock-to-output 8, period ≥ 12); the sweep tables are reproduced by the simulator and the game |
 | 9 | Counter and state machine | not started | |
 | 10 | Browser playground, no server | not started | |
 | 11 | Server mod and live stream | not started | |
@@ -185,6 +185,26 @@ Findings and surprises from each stage go here, newest last.
 - Building the adder twice gives identical files.
 
 **Surprise:** the plan's check, "the reported worst case equals the slowest settle time observed", does not hold for a plain longest-path analysis on the adder (the false path). The check now demands equality of the *exact* figures with what the simulator shows, and containment for the bound; the timed model is what makes the exact figures affordable.
+
+### Stage 8 (2026-10-06)
+
+**Built:** two flip-flop tiles, each two cells wide (10 × 5 × 4) because a side-locked repeater needs its lock's input one cell in from the border, which a one-cell tile cannot give (`cells/README.md`). `dff` is a master/slave pair of locked repeaters: the clock weakly powers a stone, a torch on it gives NOT clock to the master's lock, a second torch gives the clock back four ticks late to the slave's lock; it acts on the falling clock edge. `dff_alt` is a pulse latch: a single locked repeater opened for a few ticks after each rising edge by `NOT(clock delayed 2) OR (clock delayed 8)`. Sweep fixtures (`dfftest.rs`) join the tile fixtures: the data edge moved a tick at a time from 6 ticks before to 12 after the active clock edge, in both directions, at clock periods 16, 12 and 8; and pulse fixtures with the clock high or low for 2, 4, 6 and 8 ticks. The game runs them with the other tile fixtures and their traces must equal the simulator's. `redfab characterize` replays them, reads off when Q changed in every trial, derives setup, hold, clock-to-output, the minimum high and low times and the minimum period, compares them with the tile's `timing` line, and replays everything again under shuffled same-tick orders (ignoring the game's priorities) to find every trial whose outcome depends on ordering.
+
+**Results (game ticks after the active edge):**
+
+| | `dff` (master/slave) | `dff_alt` (pulse latch) |
+|---|---|---|
+| captures data changes up to | +1 | +7 |
+| ignores them from | +3 | +9 |
+| setup / hold (with 2 ticks of margin) | 1 / 5 | −5 / 11 |
+| clock to Q | 8 | 8 |
+| minimum high / low | 4 / 4 | 4 / 2 |
+| minimum period | 12 | 16 |
+| ordering-dependent trials | offset +2 only | offset +8 only |
+
+Both are flip-flops. The master/slave is better on every figure, so it is `dff`. The review expected it to be a zero-margin design: the slave's lock and the master's last change can indeed land on the same tick at the inactive edge. Measured, that is harmless either way round, because a locked repeater ignores a pending tick, so the lock wins even when it is processed second; under 20 shuffled orders the only trial that changes is the capture boundary itself, which every flip-flop has.
+
+**Caught on the way:** the first version of the master/slave tile had its second torch on dust instead of stone (a typo in the layer), and the quick replay used for characterization did not check block support; it measured a torch floating in the air as "transparent for three ticks". The replay now checks support like the fixture runner does. A clock of period 8 burns the torches out (eight turn-offs in sixty ticks), which is why those sweeps end with a long quiet time.
 
 ---
 

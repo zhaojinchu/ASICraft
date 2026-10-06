@@ -1,0 +1,57 @@
+# The other flip-flop candidate: a pulse latch. The data repeater M is locked
+# by K except for a few ticks after each rising clock edge, when K's input L
+# goes low:
+#   L = NOT(clock delayed 2) OR (clock delayed 8)
+# The clock enters at N, passes repeater A into stone S1 (strongly powered, so
+# the torch T on it goes out two ticks after the edge) and on through the
+# setting-3 repeater R into stone S2, which powers the L dust beside it eight
+# ticks after the edge. Between those two moments L is low, K unlocks, and M
+# samples D. The stones over the data row stop the L dust at y=2 from touching
+# it diagonally. Measured in stage 8 (see PLAN.md): it works, but samples the
+# data late (up to 7 ticks after the edge), so its hold time is 11 against the
+# master/slave's 5, and it needs a clock period of 16 against 12. Kept for the
+# record; `dff` is the one the builds use.
+tile dff_alt
+size 10 4 5
+port W in 0 1 2
+port N in 2 1 0
+port E out 9 1 2
+function dff
+delay 8
+edge rising
+timing setup -5 hold 11 clk_to_q 8 min_high 4 min_low 2 min_period 16
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  - minecraft:redstone_wire
+  A minecraft:repeater[facing=west,delay=1]
+  R minecraft:repeater[facing=west,delay=3]
+  K minecraft:repeater[facing=north,delay=1]
+  M minecraft:repeater[facing=west,delay=1]
+  T minecraft:redstone_torch
+
+layer 0
+  ..G.......
+  ..GGGGGG..
+  GG..GGGGGG
+  .GGGGGGGG.
+  ..........
+layer 1
+  ..-.......
+  ..-A#R#-..
+  --..###K--
+  .------M-.
+  ..........
+layer 2
+  ..........
+  ....T.-...
+  ....---...
+  ....###...
+  ..........
+layer 3
+  ..........
+  ..........
+  ..........
+  ..........
+  ..........

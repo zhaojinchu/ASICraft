@@ -9,6 +9,7 @@
 pub mod bake;
 pub mod block;
 pub mod build;
+pub mod dfftest;
 pub mod extract;
 pub mod geom;
 pub mod layout;
