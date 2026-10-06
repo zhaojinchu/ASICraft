@@ -13,7 +13,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | 4 | Simulator, part 2 | **done** 2026-10-05 | Repeaters, locking and tick priorities; all 60 mechanics traces and both random corpora (764 traces) match |
 | 5 | Full combinational tile set | **done** 2026-10-05 | Eight tiles, 39 variants; all hold in the game and match the simulator; the tile contract holds for all 3,442 pairs and groups checked |
 | 6 | Placement and routing | **done** 2026-10-06 | Any combinational netlist places and routes; the 4-bit adder (49 cells, 1,273 tiles) is correct on all 512 input combinations in the simulator and in the game; 180 random netlists build and compute correctly |
-| 7 | Timing analysis | not started | |
+| 7 | Timing analysis | **done** 2026-10-06 | Best and worst case per output: a bound by path and exact figures over every pair of input combinations from a timed model of the parts; the model agrees with the block simulator on every lamp change of 10k input changes of the adder, and the game stays within the report |
 | 8 | Flip-flop characterization | not started | |
 | 9 | Counter and state machine | not started | |
 | 10 | Browser playground, no server | not started | |
@@ -167,6 +167,24 @@ Findings and surprises from each stage go here, newest last.
 **A harness defect found by the first large design:** `save-all flush` replies before the game has finished writing the region files, and while it moves chunk records around inside a file, a header entry can point at nothing or at another record for a moment. A snapshot read in that moment saw a chunk empty, or one block out of place, for a single tick (three times in about 3,500 chunk-ticks of the adder). Every chunk the harness reads is force-loaded and was changed that tick, so the reader now insists that each chunk has a record, that the record decodes and names that chunk, and that its `LastUpdate` is the current game time; otherwise it reads again (`harness/anvil.py`, `harness/session.py`). Fixtures big enough to show this also needed plot cells sized per fixture instead of the fixed 32 blocks, force-loading in strips (the game takes at most 256 chunks per command), and a limit on the ticks a traced run records (the adder's 32-vector trace would have taken hours; it records two vectors, and `exhaustive` covers the rest without traces).
 
 **Known costs, left for later stages:** the adder is 365 × 250 blocks, about 3× the hand-layout density the review predicted, and 144 ticks of settle time come mostly from 455 repeaters on long feeds. Stage 7's timing analysis replaces the settle estimate; density is a later compaction pass.
+
+### Stage 7 (2026-10-06)
+
+**Built:** `timing.rs`, on the circuit read back from the blocks (so it sees the real repeaters, not the netlist). Two answers per output, in game ticks after an input change:
+
+- **By path:** earliest and latest arrival over the part graph, rising and falling edges followed separately (a torch answers a rising input with a falling output 2 ticks later and the other way round, a repeater passes either edge after twice its setting, a lamp lights at once and goes dark 4 ticks late). Quick and safe; the worst case becomes the design's `settle_ticks`. The report names the parts on the worst-case path.
+- **Exact:** a timed model of the same parts with the block simulator's rules for torches, repeaters and lamps on the net graph, run over every ordered pair of input combinations (4ⁿ pairs; done up to ten inputs). For the 4-bit adder that is 261,632 pairs in about ten seconds.
+
+`redfab timing DESIGN.json [--paths]` prints the report; `redfab timing-measure` is the check: the timed model must agree with the block simulator on every lamp change of a walk through every single-bit input change from every input combination plus random multi-bit changes, the exact figures must be what that walk shows, and the bound must contain everything. In the game, `harness.design timing-traces` reads the traces `design vanilla` recorded: no lamp changes outside its report, and the full adder reaches its worst case. `build-deterministic` builds the adder twice and compares the files.
+
+**Results:**
+
+- The timed model agrees with the block simulator on all 10,000 input changes of the adder's walk (every lamp change, to the tick), and on every other design.
+- The game agrees too: the full adder's lamps change 18 to 34 ticks (`cout`) and 14 to 36 ticks (`sum`) after an input change, in both redstone modes, exactly the exact figures.
+- The adder: `sum[0]` 48–78, `sum[1]` 64–106, `sum[2]` 60–124, `sum[3]` 70–138, `cout` 76–140 ticks (exact). By path, `cout` is 144: a **false path**. Over all 261,632 ordered pairs of input vectors, in the timed model and in a 63-minute run of the block simulator, `cout` never changes later than 140. This is the textbook ripple-carry case, where the longest path cannot be driven by any input change, and the reason the report keeps both figures: `settle_ticks` stays the safe bound (144), the exact figures say what will happen.
+- Building the adder twice gives identical files.
+
+**Surprise:** the plan's check, "the reported worst case equals the slowest settle time observed", does not hold for a plain longest-path analysis on the adder (the false path). The check now demands equality of the *exact* figures with what the simulator shows, and containment for the bound; the timed model is what makes the exact figures affordable.
 
 ---
 
