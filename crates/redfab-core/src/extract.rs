@@ -42,6 +42,36 @@ impl Circuit {
     pub fn net_of(&self, pos: Pos) -> Option<usize> {
         self.nets.iter().position(|net| net.contains(&pos))
     }
+
+    /// The circuit with everything inside the given footprints left out: parts
+    /// in them, and nets that never leave them. Nets are renumbered; the result
+    /// maps new net numbers to old ones.
+    pub fn outside(&self, inside: &dyn Fn(Pos) -> bool) -> (Circuit, Vec<usize>) {
+        let keep: Vec<usize> = (0..self.nets.len()).filter(|&n| self.nets[n].iter().any(|&p| !inside(p))).collect();
+        let renumber: std::collections::BTreeMap<usize, usize> =
+            keep.iter().enumerate().map(|(new, &old)| (old, new)).collect();
+        let map = |nets: &[usize]| -> Vec<usize> { nets.iter().filter_map(|n| renumber.get(n).copied()).collect() };
+        let parts = |list: &[Component]| -> Vec<Component> {
+            list.iter()
+                .filter(|c| !inside(c.pos))
+                .map(|c| Component {
+                    pos: c.pos,
+                    reads: map(&c.reads),
+                    drives: map(&c.drives),
+                    direct: c.direct.clone(),
+                })
+                .collect()
+        };
+        let circuit = Circuit {
+            nets: keep.iter().map(|&n| self.nets[n].clone()).collect(),
+            torches: parts(&self.torches),
+            lamps: parts(&self.lamps),
+            repeaters: parts(&self.repeaters),
+            sources: parts(&self.sources),
+            one_way: self.one_way.iter().filter(|(a, b)| !inside(*a) && !inside(*b)).copied().collect(),
+        };
+        (circuit, keep)
+    }
 }
 
 /// The same world with every signal off: wires at power 0, torches and lamps

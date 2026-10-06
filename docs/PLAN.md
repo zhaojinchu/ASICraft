@@ -15,7 +15,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | 6 | Placement and routing | **done** 2026-10-06 | Any combinational netlist places and routes; the 4-bit adder (49 cells, 1,273 tiles) is correct on all 512 input combinations in the simulator and in the game; 180 random netlists build and compute correctly |
 | 7 | Timing analysis | **done** 2026-10-06 | Best and worst case per output: a bound by path and exact figures over every pair of input combinations from a timed model of the parts; the model agrees with the block simulator on every lamp change of 10k input changes of the adder, and the game stays within the report |
 | 8 | Flip-flop characterization | **done** 2026-10-06 | Two candidates built and swept tick by tick; the master/slave pair of locked repeaters chosen (setup 1, hold 5, clock-to-output 8, period ≥ 12); the sweep tables are reproduced by the simulator and the game |
-| 9 | Counter and state machine | not started | |
+| 9 | Counter and state machine | **done** 2026-10-06 | Flip-flops synthesized, placed and routed; sequential timing with hold fixes and a burnout budget; the 4-bit counter and a state machine match Verilator for 64 cycles in the game at three placements in both modes; a hold-broken copy and an over-driven inverter fail as predicted |
 | 10 | Browser playground, no server | not started | |
 | 11 | Server mod and live stream | not started | |
 | 12 | Live playground, local | not started | |
@@ -205,6 +205,27 @@ Findings and surprises from each stage go here, newest last.
 Both are flip-flops. The master/slave is better on every figure, so it is `dff`. The review expected it to be a zero-margin design: the slave's lock and the master's last change can indeed land on the same tick at the inactive edge. Measured, that is harmless either way round, because a locked repeater ignores a pending tick, so the lock wins even when it is processed second; under 20 shuffled orders the only trial that changes is the capture boundary itself, which every flip-flop has.
 
 **Caught on the way:** the first version of the master/slave tile had its second torch on dust instead of stone (a typo in the layer), and the quick replay used for characterization did not check block support; it measured a torch floating in the air as "transparent for three ticks". The replay now checks support like the fixture runner does. A clock of period 8 burns the torches out (eight turn-offs in sixty ticks), which is why those sweeps end with a long quiet time.
+
+### Stage 9 (2026-10-06)
+
+**Built:**
+
+- *Synthesis.* A `DFF` cell in the Liberty library (`clocked_on: "!CLK"`, since the tile acts on the falling edge); `dfflegalize` turns a design's rising-edge flip-flops into it with an inverter on the clock, and the sequential equivalence proof (`equiv_induct`) covers the result. Initial values come from Yosys's `init` attributes. The clock must be one input that reaches every flip-flop straight (through the inverter) and feeds nothing else.
+- *Layout.* Flip-flops form a column of their own, two cells wide, before the first gates; their D inputs are fed back from wherever the logic ends, and those feedback nets count when the placer sizes the pass-through rows. The router knows the flip-flop's ports and strengths. A flip-flop's stored value is baked in by setting its state repeaters' `powered` (`state` lines in the tile), with the lock and the second torch stamped in their rest state (`rest` lines), so the baked world is a fixed point without any settling race.
+- *Checks.* The netlist check treats each flip-flop as one part: its blocks must be the tile's, its three ports must carry the right nets, and its insides stay out of the torch matching. Timing (`analyze_sequential`): the lever edge that makes every flip-flop's clock port fall is the active edge; clock arrival per flip-flop; D arrivals from the other flip-flops (launched at clock arrival + 8) and from the inputs; hold and setup slack with the tile's figures (setup 1, hold 5); the shortest period, the window in which inputs may change, and when outputs are read. A hold violation is fixed by lengthening that flip-flop's D path: a repeater's setting goes up, or a wire tile on its own branch becomes a repeater, and the analysis runs again. `redfab build --break hold` builds the opposite in on purpose. The burnout budget: every design reports the fewest ticks between input changes at which no torch turns off more than six times within sixty (`input_spacing`); clocked designs are checked at their period.
+- *Driving.* `redfab simulate` on a clocked design treats each vector as one cycle, driven as the report says; `--shuffle` runs the ticks that fall due together in a random order within each priority. `harness.design cycles` compares 64 cycles with a clocked Verilator testbench, and with shuffled orders; `cycles-vanilla` does the same in the game by stepping and probing, at three placements in both modes.
+
+**Results:**
+
+- `counter4` (4 flip-flops, 22 gates, 806 tiles): period 132 ticks, clock arriving 18 to 34 ticks after the edge, hold slack ≥ 49. `fsm` (2 flip-flops): period 74. `shift2`: period 40. All three agree with Verilator on all 64 cycles in the simulator, unchanged under shuffled same-tick orders; the counter and the state machine agree in the game at every placement in both modes.
+- The hold-broken shift register (its second flip-flop's clock slowed by 24 ticks) is flagged by the build and gets 40 of 64 cycles wrong, the same 40 in the simulator and in the game. The inverter driven every 4 ticks instead of its reported 8 is flagged by `redfab stress` (8 turn-offs within sixty ticks) and burns its torch out in the simulator and in the game (its lamp stays dark when it should be lit).
+
+**Two things I'd planned differently:**
+
+1. The plan's "deliberately glitchy circuit that burns out" cannot be made from a design at a legal input rate: in NOR logic with repeaters on every path, a single delayed input makes a torch pulse at most once per input change, which is not enough to reach eight turn-offs in sixty ticks. Burnout here is a matter of how fast the inputs are driven, so the budget is reported as a minimum input spacing, and the negative is a design driven faster than its report.
+2. The first hold negative the tool flagged did not misbehave: by the tile's conservative figures the data arrived two ticks after the clock, which is the ordering-dependent boundary tick, and the simulator happened to capture the old value. The negative now slows the clock past the hold margin, so the new value is captured beyond doubt.
+
+**Known costs, left for later stages:** the counter's period of 132 ticks (6.6 s) comes from its long feedback paths; the clock skew of up to 16 ticks across four flip-flops comes from the repeaters the clock net needs. Both are density problems for the later compaction pass; the analysis makes them safe, not small.
 
 ---
 

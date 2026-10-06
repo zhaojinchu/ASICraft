@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::block::Block;
 use crate::geom::Pos;
 use crate::netlist::Netlist;
 use crate::tile::{Edge, HEIGHT, Kind, Library, PITCH, Variant};
@@ -29,6 +30,9 @@ pub enum Placed {
     TieHigh { net: usize },
     /// Constant 0 for `net`; drives east.
     TieLow { net: usize },
+    /// The flip-flop for netlist cell `cell`, two cells wide: D from the west,
+    /// the clock from the north, Q to the east of its second cell.
+    Dff { cell: usize, init: bool },
 }
 
 impl Placed {
@@ -47,6 +51,15 @@ impl Placed {
             Placed::Cross { .. } => Edge::ALL.to_vec(),
             Placed::Repeater { edges, .. } => edges.clone(),
             Placed::TieHigh { .. } | Placed::TieLow { .. } => vec![Edge::East],
+            Placed::Dff { .. } => vec![Edge::West, Edge::North, Edge::East],
+        }
+    }
+
+    /// How many grid cells wide the tile is.
+    pub fn width(&self) -> i32 {
+        match self {
+            Placed::Dff { .. } => 2,
+            _ => 1,
         }
     }
 
@@ -67,6 +80,7 @@ impl Placed {
             Placed::Repeater { edges, entry, delay } => Variant::repeater(edges, *entry, *delay),
             Placed::TieHigh { .. } => Variant::new(Kind::TieHigh, &[Edge::East]),
             Placed::TieLow { .. } => Variant::new(Kind::TieLow, &[Edge::East]),
+            Placed::Dff { .. } => Variant::new(Kind::Dff, &[Edge::West, Edge::North, Edge::East]),
         }
     }
 }
@@ -87,13 +101,41 @@ pub struct Realized {
     /// For each constant net: a block of its tile that belongs to the net (the
     /// torch for a 1, a dust for a 0).
     pub ties: Vec<(usize, bool, Pos)>,
+    /// Every flip-flop, for the checks that treat it as one part.
+    pub macros: Vec<Macro>,
+}
+
+/// A placed flip-flop: where it is, its port cells, and the blocks it is made of.
+#[derive(Clone, Debug)]
+pub struct Macro {
+    pub cell: usize,
+    pub origin: Pos,
+    pub width: i32,
+    pub d: Pos,
+    pub clk: Pos,
+    pub q: Pos,
+    pub blocks: Vec<(Pos, Block)>,
+}
+
+impl Macro {
+    pub fn contains(&self, pos: Pos) -> bool {
+        pos.x >= self.origin.x
+            && pos.x < self.origin.x + self.width * PITCH
+            && pos.z >= self.origin.z
+            && pos.z < self.origin.z + PITCH
+    }
 }
 
 impl Layout {
     pub fn size(&self) -> (i32, i32) {
-        let cols = self.tiles.keys().map(|k| k.0).max().map_or(0, |m| m + 1);
+        let cols = self.tiles.iter().map(|(k, p)| k.0 + p.width()).max().unwrap_or(0);
         let rows = self.tiles.keys().map(|k| k.1).max().map_or(0, |m| m + 1);
         (cols, rows)
+    }
+
+    /// The tile at `cell`, counting a wide tile's further cells.
+    pub fn at(&self, cell: (i32, i32)) -> Option<&Placed> {
+        self.tiles.get(&cell).or_else(|| self.tiles.get(&(cell.0 - 1, cell.1)).filter(|p| p.width() > 1))
     }
 
     /// Every used edge must face a tile that uses the opposite edge; a signal
@@ -102,8 +144,10 @@ impl Layout {
         for (&(col, row), placed) in &self.tiles {
             for edge in placed.edges() {
                 let (dc, dr) = edge.step();
+                // The east port of a wide tile is on its last cell.
+                let from = if edge == Edge::East { col + placed.width() - 1 } else { col };
                 let faces =
-                    self.tiles.get(&(col + dc, row + dr)).is_some_and(|other| other.edges().contains(&edge.opposite()));
+                    self.at((from + dc, row + dr)).is_some_and(|other| other.edges().contains(&edge.opposite()));
                 if !faces {
                     return Err(format!(
                         "tile at column {col}, row {row} has an open port on its {} edge",
@@ -127,25 +171,53 @@ impl Layout {
         let mut probes = vec![None; netlist.inputs.len()];
         let mut lamps = vec![None; netlist.outputs.len()];
         let mut ties = Vec::new();
+        let mut macros = Vec::new();
         for (&(col, row), placed) in &self.tiles {
             let origin = Pos::new(col * PITCH, 0, row * PITCH);
             let at = |p: Pos| Pos::new(origin.x + p.x, origin.y + p.y, origin.z + p.z);
             let variant = placed.variant();
             let tile = variant.tile(library);
-            for (pos, block) in variant.blocks(library) {
-                world.set(at(pos), block);
+            let mut blocks = variant.blocks(library);
+            if let Placed::Dff { init, .. } = placed {
+                // The stored value lives in the state repeaters' `powered`.
+                for (pos, block) in &mut blocks {
+                    if tile.state.contains(pos)
+                        && let Block::Repeater { facing, delay, locked, .. } = *block
+                    {
+                        *block = Block::Repeater { facing, delay, locked, powered: *init };
+                    }
+                }
+            }
+            for (pos, block) in &blocks {
+                world.set(at(*pos), *block);
             }
             match placed {
                 Placed::Input { port, .. } => probes[*port] = tile.probe.map(at),
                 Placed::Output { port } => lamps[*port] = tile.lamp.map(at),
                 Placed::TieHigh { net } => ties.push((*net, true, at(Pos::new(2, 1, 2)))),
                 Placed::TieLow { net } => ties.push((*net, false, at(Pos::new(3, 1, 2)))),
+                Placed::Dff { cell, .. } => {
+                    let port = |edge: Edge| {
+                        tile.port(edge)
+                            .map(|p| at(p.pos))
+                            .ok_or_else(|| format!("the flip-flop has no {} port", edge.letter()))
+                    };
+                    macros.push(Macro {
+                        cell: *cell,
+                        origin,
+                        width: tile.cells(),
+                        d: port(Edge::West)?,
+                        clk: port(Edge::North)?,
+                        q: port(Edge::East)?,
+                        blocks: blocks.iter().map(|(p, b)| (at(*p), *b)).collect(),
+                    });
+                }
                 _ => {}
             }
         }
         let all = |found: Vec<Option<Pos>>, what: &str| -> Result<Vec<Pos>, String> {
             found.into_iter().enumerate().map(|(i, p)| p.ok_or_else(|| format!("{what} {i} was not placed"))).collect()
         };
-        Ok(Realized { world, probes: all(probes, "input")?, lamps: all(lamps, "output")?, ties })
+        Ok(Realized { world, probes: all(probes, "input")?, lamps: all(lamps, "output")?, ties, macros })
     }
 }

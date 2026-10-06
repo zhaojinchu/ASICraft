@@ -19,11 +19,19 @@ pub struct PortBit {
 #[derive(Clone, Debug)]
 pub struct Cell {
     pub name: String,
-    /// Library cell name: `NOT`, `NOR2`, `NOR3`.
+    /// Library cell name: `NOT`, `NOR2`, `NOR3`, `DFF`.
     pub kind: String,
-    /// Input nets, in the library's pin order.
+    /// Input nets, in the library's pin order (`D`, `CLK` for a flip-flop).
     pub inputs: Vec<NetId>,
     pub output: NetId,
+    /// A flip-flop's value before the first clock edge.
+    pub init: bool,
+}
+
+impl Cell {
+    pub fn is_dff(&self) -> bool {
+        self.kind == "DFF"
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -86,7 +94,8 @@ impl Netlist {
                 .get(kind)
                 .ok_or_else(|| format!("cell {name} has type {kind}, which is not in the tile library"))?;
             let inputs = pins.iter().map(|p| pin(p)).collect::<Result<Vec<_>, _>>()?;
-            raw_cells.push((name.clone(), kind.to_string(), inputs, pin("Y")?));
+            let output = pin(if kind == "DFF" { "Q" } else { "Y" })?;
+            raw_cells.push((name.clone(), kind.to_string(), inputs, output));
         }
         let resolve = |mut id: u64| {
             while let Some(&next) = alias.get(&id) {
@@ -118,6 +127,21 @@ impl Netlist {
                 }
             }
         }
+        // A flip-flop's initial value is an `init` attribute on a net name of its output.
+        let mut inits: BTreeMap<u64, bool> = BTreeMap::new();
+        for (_, entry) in module["netnames"].as_object().unwrap_or(&empty) {
+            let init = entry["attributes"]["init"].as_str().unwrap_or_default();
+            let bits = entry["bits"].as_array().cloned().unwrap_or_default();
+            // Init strings are written most significant bit first.
+            for (i, value) in bits.iter().enumerate() {
+                if let Some(raw) = value.as_u64()
+                    && let Some(c) = init.chars().rev().nth(i)
+                    && (c == '0' || c == '1')
+                {
+                    inits.insert(raw, c == '1');
+                }
+            }
+        }
         let cells: Vec<Cell> = raw_cells
             .into_iter()
             .map(|(name, kind, ins, out)| Cell {
@@ -125,6 +149,7 @@ impl Netlist {
                 kind,
                 inputs: ins.into_iter().map(&mut net).collect(),
                 output: net(out),
+                init: inits.get(&out).copied().unwrap_or(false),
             })
             .collect();
 
