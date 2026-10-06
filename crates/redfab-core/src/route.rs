@@ -56,6 +56,12 @@ const HOP: u8 = 5;
 /// What the pins need at their own port cell: a gate's dust must still reach its
 /// block with one level, a lamp needs its dust to point into it with one.
 const GATE_IN_NEEDS: u8 = 2;
+/// A flip-flop's D runs four dust from its port to the master repeater; the
+/// clock port's dust powers the stone beside it directly.
+const DFF_D_NEEDS: u8 = 5;
+const DFF_CLK_NEEDS: u8 = 1;
+/// A flip-flop's Q leaves its slave repeater two dust before the port.
+const DFF_OUT: u8 = 12;
 const LAMP_NEEDS: u8 = 3;
 const REPEATER_NEEDS: u8 = 1;
 
@@ -64,10 +70,14 @@ const MAX_ITERATIONS: usize = 80;
 const MAX_STRENGTH_RETRIES: usize = 30;
 
 /// The routed design.
+#[derive(Clone)]
 pub struct Routed {
     pub layout: Layout,
     /// Per net, per sink (in `Netlist::sinks_of` order): repeaters on the path from the driver.
     pub repeaters: BTreeMap<NetId, Vec<u32>>,
+    /// Per net, per sink: the tiles from the driver to the sink, each with the
+    /// edge the signal enters it by. The timing fixes lengthen a path here.
+    pub branches: BTreeMap<NetId, Vec<Vec<(Cell, Edge)>>>,
 }
 
 /// Routes every net of the placement. Fails if some net cannot be routed, or
@@ -83,7 +93,12 @@ pub fn route(netlist: &Netlist, placement: &Placement) -> Result<Routed, String>
         let source = match driver {
             Driver::Cell(c) => {
                 let (col, row) = placement.gates[c];
-                Source { node: ((col + 1, row), Track::X), entry: Edge::West, strength: GATE_OUT }
+                let dff = netlist.cells[c].is_dff();
+                Source {
+                    node: ((col + placement.widths[c], row), Track::X),
+                    entry: Edge::West,
+                    strength: if dff { DFF_OUT } else { GATE_OUT },
+                }
             }
             Driver::Input(i) => {
                 let (col, row) = placement.inputs[i];
@@ -106,13 +121,18 @@ pub fn route(netlist: &Netlist, placement: &Placement) -> Result<Routed, String>
                     Sink { node: ((col - 1, row), Track::X), exit: Edge::East, needed_after: LAMP_NEEDS }
                 } else {
                     let (col, row) = placement.gates[c];
+                    let dff = netlist.cells[c].is_dff();
                     match placement.pin_edges[c][pin] {
-                        Edge::West => {
-                            Sink { node: ((col - 1, row), Track::X), exit: Edge::East, needed_after: GATE_IN_NEEDS }
-                        }
-                        Edge::North => {
-                            Sink { node: ((col, row - 1), Track::Z), exit: Edge::South, needed_after: GATE_IN_NEEDS }
-                        }
+                        Edge::West => Sink {
+                            node: ((col - 1, row), Track::X),
+                            exit: Edge::East,
+                            needed_after: if dff { DFF_D_NEEDS } else { GATE_IN_NEEDS },
+                        },
+                        Edge::North => Sink {
+                            node: ((col, row - 1), Track::Z),
+                            exit: Edge::South,
+                            needed_after: if dff { DFF_CLK_NEEDS } else { GATE_IN_NEEDS },
+                        },
                         Edge::South => {
                             Sink { node: ((col, row + 1), Track::Z), exit: Edge::North, needed_after: GATE_IN_NEEDS }
                         }
@@ -215,8 +235,12 @@ fn realize_trees(
 
     let mut layout = Layout::default();
     for (c, cell) in netlist.cells.iter().enumerate() {
-        let _ = cell;
-        layout.tiles.insert(placement.gates[c], Placed::Gate { cell: c, pin_edges: placement.pin_edges[c].clone() });
+        let placed = if cell.is_dff() {
+            Placed::Dff { cell: c, init: cell.init }
+        } else {
+            Placed::Gate { cell: c, pin_edges: placement.pin_edges[c].clone() }
+        };
+        layout.tiles.insert(placement.gates[c], placed);
     }
     for (i, &cell) in placement.inputs.iter().enumerate() {
         let read = !netlist.sinks_of(netlist.inputs[i].net).is_empty();
@@ -248,6 +272,7 @@ fn realize_trees(
 
     // Repeaters: walk each net from its source with exact strengths.
     let mut repeater_counts: BTreeMap<NetId, Vec<u32>> = BTreeMap::new();
+    let mut branches: BTreeMap<NetId, Vec<Vec<(Cell, Edge)>>> = BTreeMap::new();
     for (net_index, ((net, source, sinks), tree)) in nets.iter().zip(trees).enumerate() {
         // A constant 0 carries no signal, so nothing can die on the way.
         let counts = if source.strength == 0 {
@@ -266,8 +291,27 @@ fn realize_trees(
             }
         };
         repeater_counts.insert(*net, counts);
+        // The branch to each sink: from the sink's tile back to the source's.
+        let entry_of =
+            |cell: Cell| -> Option<Edge> { tiles[&cell].iter().find(|(n, _, _)| n == net).and_then(|(_, _, e)| *e) };
+        let parent_cell = |cell: Cell| -> Option<Cell> {
+            let node = tree.parent.keys().find(|n| n.0 == cell && tree.parent[n].is_none_or(|p| p.0 != cell))?;
+            tree.parent[node].map(|p| p.0)
+        };
+        let mut per_sink = Vec::new();
+        for sink in sinks {
+            let mut path = Vec::new();
+            let mut cell = Some(sink.node.0);
+            while let Some(c) = cell {
+                path.push((c, entry_of(c).unwrap_or(source.entry)));
+                cell = parent_cell(c);
+            }
+            path.reverse();
+            per_sink.push(path);
+        }
+        branches.insert(*net, per_sink);
     }
-    Ok(Routed { layout, repeaters: repeater_counts })
+    Ok(Routed { layout, repeaters: repeater_counts, branches })
 }
 
 /// A signal that could not be kept alive: the tiles from the source to where it died.
@@ -286,6 +330,7 @@ pub fn render(layout: &Layout) -> String {
                 Some(Placed::Input { .. }) => 'I',
                 Some(Placed::Output { .. }) => 'O',
                 Some(Placed::Gate { .. }) => 'G',
+                Some(Placed::Dff { .. }) => 'D',
                 Some(Placed::TieHigh { .. }) => '1',
                 Some(Placed::TieLow { .. }) => '0',
                 Some(Placed::Cross { repeater_entry: None, .. }) => '╬',

@@ -25,6 +25,7 @@ fn main() -> ExitCode {
         Some("extract") => extract_command(&args[1..]),
         Some("timing") => timing_command(&args[1..]),
         Some("characterize") => characterize_command(&args[1..]),
+        Some("stress") => stress_command(&args[1..]),
         Some("timing-measure") => timing_measure_command(&args[1..]),
         Some("simulate") => simulate_command(&args[1..]),
         Some("replay") => replay_report_command(&args[1..]),
@@ -380,6 +381,8 @@ proc
 opt
 techmap
 opt
+dfflegalize -cell $_DFF_N_ 01
+dfflibmap -liberty cells.lib
 abc -liberty cells.lib
 opt_clean
 write_json mapped.json
@@ -419,16 +422,24 @@ fn build_command(args: &[String]) -> Result<bool, String> {
     let mut source = None;
     let mut top = "top".to_string();
     let mut out = None;
+    let mut fault = redfab_core::build::Break::None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--top" => top = it.next().ok_or("--top needs a module name")?.clone(),
             "-o" => out = Some(PathBuf::from(it.next().ok_or("-o needs a directory")?)),
+            // A fault built in on purpose: the design is written out and the build fails.
+            "--break" => {
+                fault = match it.next().map(String::as_str) {
+                    Some("hold") => redfab_core::build::Break::Hold,
+                    _ => return Err("--break needs hold".into()),
+                }
+            }
             other => source = Some(PathBuf::from(other)),
         }
     }
     let (Some(source), Some(out)) = (source, out) else {
-        return Err("usage: redfab build SOURCE.sv|MAPPED.json [--top NAME] -o DIR".into());
+        return Err("usage: redfab build SOURCE.sv|MAPPED.json [--top NAME] [--break hold] -o DIR".into());
     };
     let name = out.file_name().and_then(|n| n.to_str()).unwrap_or("design").to_string();
 
@@ -440,13 +451,26 @@ fn build_command(args: &[String]) -> Result<bool, String> {
     for stale in ["mapped.json", "mapped.v", "design.json", "world.nbt", "report.txt"] {
         let _ = fs::remove_file(out.join(stale));
     }
-    // A mapped netlist (as `pnr-random --dump` writes) skips synthesis and the proof;
-    // its layout is written even when it fails the checks, so it can be examined.
-    if source.extension().is_some_and(|e| e == "json") {
-        let mapped = read(&source)?;
-        write("mapped.json", mapped.as_bytes())?;
+    // A mapped netlist (as `pnr-random --dump` writes) skips synthesis and the proof.
+    // With one, or with a fault built in, the layout is written even when it fails
+    // the checks, so it can be examined or run.
+    let from_json = source.extension().is_some_and(|e| e == "json");
+    if from_json {
+        write("mapped.json", read(&source)?.as_bytes())?;
+    } else {
+        write("top.sv", read(&source)?.as_bytes())?;
+        write("cells.lib", library.liberty().as_bytes())?;
+        write("cells.v", library.verilog_models().as_bytes())?;
+        write("map.ys", MAP_SCRIPT.replace("{top}", &top).as_bytes())?;
+        write("equiv.ys", EQUIV_SCRIPT.replace("{top}", &top).as_bytes())?;
+        run_yosys(&out, "map.ys").map_err(|e| format!("synthesis failed: {e}"))?;
+        run_yosys(&out, "equiv.ys")
+            .map_err(|e| format!("the mapped netlist is NOT proven equal to the source: {e}"))?;
+    }
+    if from_json || fault != redfab_core::build::Break::None {
+        let mapped = read(&out.join("mapped.json"))?;
         let netlist = redfab_core::netlist::Netlist::from_yosys_json(&mapped, &top, &library)?;
-        let (built, problems) = redfab_core::build::build_unchecked(&netlist, &name)?;
+        let (built, problems) = redfab_core::build::build_unchecked(&netlist, &name, fault)?;
         write("design.json", built.design.to_json().as_bytes())?;
         write("world.nbt", &built.structure)?;
         print!("{}", built.report);
@@ -455,14 +479,6 @@ fn build_command(args: &[String]) -> Result<bool, String> {
         }
         return Ok(problems.is_empty());
     }
-    write("top.sv", read(&source)?.as_bytes())?;
-    write("cells.lib", library.liberty().as_bytes())?;
-    write("cells.v", library.verilog_models().as_bytes())?;
-    write("map.ys", MAP_SCRIPT.replace("{top}", &top).as_bytes())?;
-    write("equiv.ys", EQUIV_SCRIPT.replace("{top}", &top).as_bytes())?;
-
-    run_yosys(&out, "map.ys").map_err(|e| format!("synthesis failed: {e}"))?;
-    run_yosys(&out, "equiv.ys").map_err(|e| format!("the mapped netlist is NOT proven equal to the source: {e}"))?;
 
     let built = redfab_core::build::build(&read(&out.join("mapped.json"))?, &top, &name)?;
     write("design.json", built.design.to_json().as_bytes())?;
@@ -567,6 +583,33 @@ fn characterize_command(args: &[String]) -> Result<bool, String> {
     Ok(ok)
 }
 
+/// `redfab stress DESIGN.json [--spacing N]`
+///
+/// Toggles each input of a combinational design on its own, sixteen times with N
+/// ticks between changes, and reports the torch that turned off most often
+/// within sixty ticks. The game burns a torch out on its eighth.
+fn stress_command(args: &[String]) -> Result<bool, String> {
+    let mut design = None;
+    let mut spacing = 8u32;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--spacing" => spacing = it.next().and_then(|n| n.parse().ok()).ok_or("--spacing needs a number")?,
+            other => design = Some(PathBuf::from(other)),
+        }
+    }
+    let path = design.ok_or("usage: redfab stress DESIGN.json [--spacing N]")?;
+    let design = redfab_core::build::Design::from_json(&read(&path)?)?;
+    let (worst, pos, walk) = redfab_core::timing::worst_stress(&design, spacing)?;
+    println!(
+        "{}: with changes every {spacing} ticks, the torch at {} turns off {worst} times within sixty ticks ({walk}); the game burns out at 8, the budget is {}",
+        design.name,
+        pos.map_or("-".to_string(), |p| p.to_string()),
+        redfab_core::timing::BURNOUT_BUDGET
+    );
+    Ok(worst <= redfab_core::timing::BURNOUT_BUDGET)
+}
+
 /// `redfab timing DESIGN.json`
 ///
 /// Prints the timing report of a built design: for each output, the earliest
@@ -587,6 +630,33 @@ fn timing_command(args: &[String]) -> Result<bool, String> {
 
 fn timing_report(design: &redfab_core::build::Design) -> String {
     let timing = &design.timing;
+    if let Some(seq) = &timing.sequential {
+        let mut out = format!(
+            "design {}: clock {} ({} edge), period {} game ticks, high {}; inputs change {} ticks after the edge (allowed {} to {}); outputs read at {}\n",
+            design.name, seq.clock, seq.active, seq.period, seq.high, seq.input_change_at, seq.input_change_from, seq.input_change_by, seq.sample_at
+        );
+        out += "  flip-flop                         clock at   D from flip-flops   D from inputs   hold slack   setup slack\n";
+        for f in &seq.flip_flops {
+            let opt = |v: Option<i32>| v.map_or("-".to_string(), |v| v.to_string());
+            let range = |r: Option<(u32, u32)>| r.map_or("-".to_string(), |(a, b)| format!("{a} to {b}"));
+            out += &format!(
+                "  {:<32} {:>8}   {:>17}   {:>13}   {:>10}   {:>11}\n",
+                f.cell.chars().rev().take(30).collect::<String>().chars().rev().collect::<String>(),
+                f.clock_arrival,
+                range(f.d_from_flip_flops),
+                range(f.d_from_inputs),
+                opt(f.hold_slack),
+                opt(f.setup_slack)
+            );
+        }
+        for (name, t) in &timing.outputs {
+            out += &format!("  output {name:<12} {:>4} to {:>4} gt after the edge\n", t.min, t.max);
+        }
+        if !seq.hold_violations.is_empty() {
+            out += &format!("  HOLD VIOLATED at {}\n", seq.hold_violations.join(", "));
+        }
+        return out;
+    }
     let mut out = format!(
         "design {}: outputs settle within {} game ticks of an input change (bound by path{})\n",
         design.name,
@@ -703,11 +773,20 @@ fn lvs_command(args: &[String]) -> Result<bool, String> {
 
 /// `redfab simulate DESIGN.json VECTORS.json`: applies input vectors in the
 /// simulator and prints the outputs as JSON.
+/// `redfab simulate DESIGN.json VECTORS.json [--shuffle SEED]`
+///
+/// Applies the vectors in the simulator and prints the outputs after each. For a
+/// clocked design each vector is one clock cycle; `--shuffle` runs the ticks that
+/// fall due together in a random order within each priority.
 fn simulate_command(args: &[String]) -> Result<bool, String> {
-    let [design, vectors] = args else {
-        return Err("usage: redfab simulate DESIGN.json VECTORS.json".into());
+    let (design, vectors, shuffle) = match args {
+        [design, vectors] => (design, vectors, None),
+        [design, vectors, flag, seed] if flag == "--shuffle" => {
+            (design, vectors, Some(seed.parse::<u64>().map_err(|_| "--shuffle needs a number")?))
+        }
+        _ => return Err("usage: redfab simulate DESIGN.json VECTORS.json [--shuffle SEED]".into()),
     };
-    println!("{}", redfab_core::build::simulate(&read(Path::new(design))?, &read(Path::new(vectors))?)?);
+    println!("{}", redfab_core::build::simulate_with(&read(Path::new(design))?, &read(Path::new(vectors))?, shuffle)?);
     Ok(true)
 }
 

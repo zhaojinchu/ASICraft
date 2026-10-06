@@ -41,7 +41,7 @@ pub fn random_netlist(rng: &mut Rng, gates: usize) -> Netlist {
         };
         let inputs: Vec<NetId> = (0..arity).map(|_| pick(rng, &available)).collect();
         let output = next();
-        cells.push(Cell { name: format!("g{g}"), kind: kind.to_string(), inputs, output });
+        cells.push(Cell { name: format!("g{g}"), kind: kind.to_string(), inputs, output, init: false });
         available.push(output);
     }
 
@@ -203,10 +203,10 @@ mod tests {
             inputs: vec![PortBit { name: "a".into(), net: 0 }],
             outputs: vec![PortBit { name: "y".into(), net: 3 }, PortBit { name: "z".into(), net: 4 }],
             cells: vec![
-                Cell { name: "n1".into(), kind: "NOT".into(), inputs: vec![0], output: 1 },
-                Cell { name: "n2".into(), kind: "NOR2".into(), inputs: vec![0, 0], output: 2 },
-                Cell { name: "y".into(), kind: "NOR2".into(), inputs: vec![1, 0], output: 3 },
-                Cell { name: "z".into(), kind: "NOR3".into(), inputs: vec![2, 1, 0], output: 4 },
+                Cell { name: "n1".into(), kind: "NOT".into(), inputs: vec![0], output: 1, init: false },
+                Cell { name: "n2".into(), kind: "NOR2".into(), inputs: vec![0, 0], output: 2, init: false },
+                Cell { name: "y".into(), kind: "NOR2".into(), inputs: vec![1, 0], output: 3, init: false },
+                Cell { name: "z".into(), kind: "NOR3".into(), inputs: vec![2, 1, 0], output: 4, init: false },
             ],
             net_count: 5,
             constants: vec![],
