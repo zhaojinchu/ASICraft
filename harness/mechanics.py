@@ -287,17 +287,22 @@ def source_for(server: VanillaServer) -> dict:
             "redstone_experiments": server.redstone_experiments}
 
 
-def run_mode(mode: str, fxs: list[Fixture], log=print, idle_check: bool = True) -> tuple[dict[tuple[str, str], Trace], list[str]]:
+def run_mode(mode: str, fxs: list[Fixture], log=print, idle_check: bool = True,
+             modded: bool = False) -> tuple[dict[tuple[str, str], Trace], list[str]]:
     """Run every fixture in one server of the given mode. Returns traces by (fixture, variant)
-    and a list of harness-level problems (not expectation failures)."""
+    and a list of harness-level problems (not expectation failures). With `modded`,
+    the server runs under Fabric with the observer mod, and the mod's stream must
+    agree with the snapshots tick for tick."""
     problems: list[str] = []
-    server = VanillaServer(f"mechanics-{mode}", redstone_experiments=MODES[mode])
+    server = VanillaServer(f"mechanics-{mode}{'-modded' if modded else ''}", redstone_experiments=MODES[mode], modded=modded)
     with server:
         log(f"[{mode}] server ready in {server.startup_seconds:.1f}s")
         session = Session(server)
         session.prepare()
         started = time.monotonic()
-        traces = Runner(session, source_for(server)).run(layout(fxs), log=lambda m: log(f"[{mode}] {m}"))
+        runner = Runner(session, source_for(server))
+        traces = runner.run(layout(fxs), log=lambda m: log(f"[{mode}] {m}"))
+        problems.extend(f"[{mode}] {p}" for p in runner.stream_problems)
         # The server must not pause while idle (no players ever join). Make sure the
         # run outlasted the default 60 s pause delay, then confirm ticking still works.
         remaining = 66 - (time.monotonic() - started)
@@ -325,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mode", choices=[*MODES, "both"], default="both")
     ap.add_argument("--break-expectation", action="store_true",
                     help="negative control: corrupt one expectation; verify must then fail")
+    ap.add_argument("--modded", action="store_true",
+                    help="run on the Fabric server with the observer mod; the traces must still match")
     args = ap.parse_args(argv)
 
     fxs = fixtures()
@@ -350,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
     modes = list(MODES) if args.mode == "both" else [args.mode]
     failures: list[str] = []
     for mode in modes:
-        traces, problems = run_mode(mode, fxs, idle_check=not args.only)
+        traces, problems = run_mode(mode, fxs, idle_check=not args.only, modded=args.modded)
         failures.extend(problems)
         for fx in fxs:
             variants = {v: t for (n, v), t in traces.items() if n == fx.name}
