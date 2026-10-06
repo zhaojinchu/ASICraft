@@ -85,10 +85,58 @@ pub struct OutputTiming {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct Timing {
     /// By output name. An output that never changes (a constant) has 0 and 0.
+    /// For a clocked design: ticks after the clock edge, with the inputs
+    /// changing when `sequential` says.
     pub outputs: BTreeMap<String, OutputTiming>,
     /// Whether `exact` was computed over every pair of input combinations.
     #[serde(default)]
     pub exhaustive: bool,
+    /// For a clocked design: the clock and the flip-flops.
+    #[serde(default)]
+    pub sequential: Option<Sequential>,
+    /// The fewest ticks between input changes at which no torch turns off more
+    /// than the budget allows within sixty ticks (combinational designs; a
+    /// clocked design's period already respects it).
+    #[serde(default)]
+    pub input_spacing: u32,
+}
+
+/// The timing of a clocked design, in game ticks after the active edge of the
+/// clock input (the edge the harness treats as the start of a cycle).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct Sequential {
+    /// The design input that is the clock, and which of its edges starts a cycle.
+    pub clock: String,
+    pub active: String,
+    /// The shortest clock period the design works at, and the half the clock is high.
+    pub period: u32,
+    pub high: u32,
+    /// Inputs may change from this many ticks after the edge ...
+    pub input_change_from: u32,
+    /// ... and must be settled by this many (both measured from the edge).
+    pub input_change_by: u32,
+    /// When the harness changes inputs, and when it reads outputs.
+    pub input_change_at: u32,
+    pub sample_at: u32,
+    pub flip_flops: Vec<FlipFlopTiming>,
+    /// Hold violations left after the fixes, if any (cell names).
+    #[serde(default)]
+    pub hold_violations: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct FlipFlopTiming {
+    pub cell: String,
+    /// When its clock port falls after the active edge.
+    pub clock_arrival: u32,
+    /// Earliest and latest change of its D from other flip-flops (absolute) and
+    /// from the inputs (ticks after the inputs change); `None` if nothing reaches it.
+    pub d_from_flip_flops: Option<(u32, u32)>,
+    pub d_from_inputs: Option<(u32, u32)>,
+    /// Hold and setup slack in ticks (negative is a violation); none when no
+    /// flip-flop feeds this one.
+    pub hold_slack: Option<i32>,
+    pub setup_slack: Option<i32>,
 }
 
 impl Timing {
@@ -102,6 +150,203 @@ impl Timing {
 /// Inputs up to which the exact figures are computed over every ordered pair
 /// of input combinations (4^n pairs).
 pub const EXACT_MAX_INPUTS: usize = 10;
+
+/// The most times a torch may turn off within sixty ticks: the game burns one
+/// out on the eighth, so this leaves one to spare.
+pub const BURNOUT_BUDGET: usize = 6;
+
+/// What a sequential analysis needs to know about each flip-flop.
+pub struct FlipFlop {
+    pub cell: String,
+    /// Nets at its ports, in the circuit the analysis runs on.
+    pub d: Pos,
+    pub clk: Pos,
+    pub q: Pos,
+}
+
+/// The flip-flop tile's figures (stage 8).
+#[derive(Clone, Copy, Debug)]
+pub struct FlipFlopSpec {
+    pub setup: i32,
+    pub hold: i32,
+    pub clk_to_q: i32,
+    pub min_high: i32,
+    pub min_low: i32,
+    pub min_period: i32,
+}
+
+/// Timing of a clocked design: the circuit must be the one *outside* the
+/// flip-flops (see [`Circuit::outside`]), `clock` the probe of the clock input.
+/// Returns the report and, per flip-flop, the hold slack, so that short paths
+/// can be lengthened and the analysis run again.
+pub fn analyze_sequential(
+    world: &World,
+    circuit: &Circuit,
+    probes: &[Pos],
+    clock: (String, Pos),
+    lamps: &[(String, Pos)],
+    flip_flops: &[FlipFlop],
+    spec: FlipFlopSpec,
+) -> Result<Timing, String> {
+    let paths = Paths::new(world, circuit)?;
+    let net_at = |pos: Pos, what: &str| circuit.net_of(pos).ok_or_else(|| format!("{what}: no wire at {pos}"));
+    let both = |t: u32| Edges { rise: Some((t, t)), fall: Some((t, t)) };
+
+    // The clock: which edge of the lever makes every flip-flop's port fall, and when.
+    let clock_nets: Vec<usize> = probe_nets(circuit, &[clock.1]);
+    if clock_nets.is_empty() {
+        return Err(format!("the clock input {} drives no wire", clock.0));
+    }
+    let mut active = None;
+    let mut arrivals = Vec::new();
+    for (edge, name) in
+        [(Edges { rise: Some((0, 0)), fall: None }, "rising"), (Edges { rise: None, fall: Some((0, 0)) }, "falling")]
+    {
+        let starts: Vec<(usize, Edges)> = clock_nets.iter().map(|&n| (n, edge)).collect();
+        let edges = paths.arrivals(circuit, &starts)?;
+        let falls: Vec<Option<(u32, u32)>> =
+            flip_flops.iter().map(|f| circuit.net_of(f.clk).and_then(|n| edges[n]).and_then(|e| e.fall)).collect();
+        if falls.iter().all(|f| f.is_some()) {
+            active = Some(name);
+            arrivals = falls.into_iter().map(|f| f.expect("some")).collect();
+            break;
+        }
+    }
+    let active = active.ok_or("no edge of the clock input reaches every flip-flop's clock port as a falling edge")?;
+    let mut flip_flop_timing: Vec<FlipFlopTiming> = Vec::new();
+    for (f, (lo, hi)) in flip_flops.iter().zip(&arrivals) {
+        if lo != hi {
+            return Err(format!(
+                "flip-flop {}: its clock arrives by paths of different lengths ({lo} to {hi} ticks)",
+                f.cell
+            ));
+        }
+        flip_flop_timing.push(FlipFlopTiming { cell: f.cell.clone(), clock_arrival: *lo, ..Default::default() });
+    }
+
+    // Data from the flip-flops: each Q changes clk_to_q after its clock port falls.
+    let launches: Vec<(usize, Edges)> = flip_flops
+        .iter()
+        .zip(&flip_flop_timing)
+        .map(|(f, t)| {
+            net_at(f.q, &format!("flip-flop {} Q", f.cell)).map(|n| (n, both(t.clock_arrival + spec.clk_to_q as u32)))
+        })
+        .collect::<Result<_, _>>()?;
+    let from_flip_flops = paths.arrivals(circuit, &launches)?;
+    // Data from the inputs other than the clock, as if they changed at tick 0.
+    let data_probes: Vec<Pos> = probes.iter().copied().filter(|&p| p != clock.1).collect();
+    let input_starts: Vec<(usize, Edges)> =
+        probe_nets(circuit, &data_probes).into_iter().map(|n| (n, both(0))).collect();
+    let from_inputs = paths.arrivals(circuit, &input_starts)?;
+    let range = |e: Option<Edges>| -> Option<(u32, u32)> {
+        let e = e?;
+        match (e.rise, e.fall) {
+            (Some((a, b)), Some((c, d))) => Some((a.min(c), b.max(d))),
+            (Some(r), None) | (None, Some(r)) => Some(r),
+            (None, None) => None,
+        }
+    };
+
+    // Constraints. T is the period; inputs change at tau after the edge.
+    //   flip-flop to flip-flop: hold  clk_i + C + min >= clk_j + H   (fixed by lengthening paths)
+    //                           setup clk_i + C + max + S <= clk_j + T
+    //   inputs:                 hold  tau + min >= clk_j + H
+    //                           setup tau + max + S <= clk_j + T
+    let mut period = spec.min_period.max(2 * spec.min_high).max(2 * spec.min_low);
+    let mut tau_from: i32 = 0;
+    let mut tau_by_minus_period: i32 = i32::MAX; // tau <= T + this
+    let mut violations = Vec::new();
+    for (f, t) in flip_flops.iter().zip(&mut flip_flop_timing) {
+        let d = net_at(f.d, &format!("flip-flop {} D", f.cell))?;
+        let clk = t.clock_arrival as i32;
+        t.d_from_flip_flops = range(from_flip_flops[d]);
+        t.d_from_inputs = range(from_inputs[d]);
+        if let Some((lo, hi)) = t.d_from_flip_flops {
+            let slack = lo as i32 - clk - spec.hold;
+            t.hold_slack = Some(slack);
+            if slack < 0 {
+                violations.push(f.cell.clone());
+            }
+            period = period.max(hi as i32 + spec.setup - clk);
+        }
+        if let Some((lo, hi)) = t.d_from_inputs {
+            tau_from = tau_from.max(clk + spec.hold - lo as i32);
+            tau_by_minus_period = tau_by_minus_period.min(clk - spec.setup - hi as i32);
+        }
+    }
+    // Outputs must settle within the cycle too: from the flip-flops, and from the inputs.
+    let mut outputs = BTreeMap::new();
+    let mut settle_from_edge: i32 = 0;
+    let mut settle_after_inputs: i32 = 0;
+    for (name, pos) in lamps {
+        let lamp =
+            circuit.lamps.iter().find(|l| l.pos == *pos).ok_or_else(|| format!("output {name}: no lamp at {pos}"))?;
+        let lit = |edges: &[Option<Edges>]| -> Option<(u32, u32)> {
+            lamp.reads.iter().filter_map(|&n| edges[n]).fold(None, |acc: Option<(u32, u32)>, e| {
+                let r = range(Some(Edges {
+                    rise: e.rise,
+                    fall: e.fall.map(|(a, b)| (a + LAMP_OFF_TICKS, b + LAMP_OFF_TICKS)),
+                }));
+                match (acc, r) {
+                    (Some((a, b)), Some((c, d))) => Some((a.min(c), b.max(d))),
+                    (x, None) => x,
+                    (None, y) => y,
+                }
+            })
+        };
+        let from_ff = lit(&from_flip_flops);
+        let from_in = lit(&from_inputs);
+        if let Some((_, hi)) = from_ff {
+            settle_from_edge = settle_from_edge.max(hi as i32);
+        }
+        if let Some((_, hi)) = from_in {
+            settle_after_inputs = settle_after_inputs.max(hi as i32);
+        }
+        let (min, max) = match (from_ff, from_in) {
+            (Some((a, b)), Some((c, d))) => (a.min(c), b.max(d)),
+            (Some(r), None) | (None, Some(r)) => r,
+            (None, None) => (0, 0),
+        };
+        outputs.insert(name.clone(), OutputTiming { min, max, path: Vec::new(), exact: None });
+    }
+    // Pick the period: setup from flip-flops, the input window, outputs settled
+    // before the next edge, an even number, high and low each at least the minimum.
+    let tau = tau_from.max(0);
+    loop {
+        let tau_by = period + tau_by_minus_period.min(0).max(-period); // inputs must settle before the next edge
+        let tau_by = if tau_by_minus_period == i32::MAX { period - 1 } else { tau_by };
+        let outputs_ok = settle_from_edge < period && tau + settle_after_inputs < period;
+        if tau <= tau_by && outputs_ok {
+            break;
+        }
+        period += 2;
+        if period > 400 {
+            return Err("no clock period below 400 ticks satisfies the design".to_string());
+        }
+    }
+    if period % 2 == 1 {
+        period += 1;
+    }
+    for t in &mut flip_flop_timing {
+        if let Some((_, hi)) = t.d_from_flip_flops {
+            t.setup_slack = Some(period - (hi as i32 + spec.setup - t.clock_arrival as i32));
+        }
+    }
+    let tau_by = if tau_by_minus_period == i32::MAX { period - 1 } else { period + tau_by_minus_period };
+    let sequential = Sequential {
+        clock: clock.0,
+        active: active.to_string(),
+        period: period as u32,
+        high: (period / 2) as u32,
+        input_change_from: tau as u32,
+        input_change_by: tau_by.max(tau) as u32,
+        input_change_at: tau as u32,
+        sample_at: (period - 1) as u32,
+        flip_flops: flip_flop_timing,
+        hold_violations: violations,
+    };
+    Ok(Timing { outputs, exhaustive: false, sequential: Some(sequential), input_spacing: 0 })
+}
 
 /// Analyzes the circuit of `world`, whose inputs are the `probes` and whose
 /// outputs are the `lamps` (named, in order): the bound by path, and the exact
@@ -129,6 +374,89 @@ pub fn analyze_circuit(
     Ok(timing)
 }
 
+/// The parts of a circuit with their delay rules, and the arrivals they give.
+struct Paths<'a> {
+    parts: Vec<(Part, &'a [usize], &'a [usize])>,
+}
+
+impl<'a> Paths<'a> {
+    fn new(world: &World, circuit: &'a Circuit) -> Result<Paths<'a>, String> {
+        let mut parts: Vec<(Part, &[usize], &[usize])> = Vec::new();
+        for torch in &circuit.torches {
+            parts.push((Part::Torch, &torch.reads, &torch.drives));
+        }
+        for repeater in &circuit.repeaters {
+            let delay = match world.get(repeater.pos) {
+                Block::Repeater { delay, .. } => 2 * u32::from(delay),
+                other => return Err(format!("expected a repeater at {}, found {other}", repeater.pos)),
+            };
+            parts.push((Part::Repeater(delay), &repeater.reads, &repeater.drives));
+        }
+        Ok(Paths { parts })
+    }
+
+    /// Arrival at every net when the given nets change as `starts` says and
+    /// nothing else does, in topological order. Fails on a loop.
+    fn arrivals(&self, circuit: &Circuit, starts: &[(usize, Edges)]) -> Result<Vec<Option<Edges>>, String> {
+        let parts = &self.parts;
+        let mut partial: Vec<Edges> = vec![Edges::NEVER; circuit.nets.len()];
+        let mut drivers_left: Vec<usize> = vec![0; circuit.nets.len()];
+        for (_, _, drives) in parts {
+            for &net in *drives {
+                drivers_left[net] += 1;
+            }
+        }
+        for &(net, edges) in starts {
+            partial[net] = partial[net].join(edges);
+        }
+        // A net is settled once every part driving it has been evaluated; a tie or a
+        // wire nothing drives is settled from the start and never changes.
+        let mut net_edges: Vec<Option<Edges>> =
+            drivers_left.iter().zip(&partial).map(|(&left, &e)| (left == 0).then_some(e)).collect();
+        let mut done = vec![false; parts.len()];
+        loop {
+            let mut progress = false;
+            for (p, (part, reads, drives)) in parts.iter().enumerate() {
+                if done[p] || reads.iter().any(|&n| net_edges[n].is_none()) {
+                    continue;
+                }
+                let input = reads.iter().fold(Edges::NEVER, |acc, &n| acc.join(net_edges[n].expect("settled")));
+                let output = match part {
+                    Part::Torch => input.inverted().shifted(TORCH_TICKS),
+                    Part::Repeater(delay) => input.shifted(*delay),
+                };
+                for &net in *drives {
+                    partial[net] = partial[net].join(output);
+                    drivers_left[net] -= 1;
+                    if drivers_left[net] == 0 {
+                        net_edges[net] = Some(partial[net]);
+                    }
+                }
+                done[p] = true;
+                progress = true;
+            }
+            if !progress {
+                break;
+            }
+        }
+        if let Some(p) = done.iter().position(|d| !d) {
+            let pos = match p < circuit.torches.len() {
+                true => circuit.torches[p].pos,
+                false => circuit.repeaters[p - circuit.torches.len()].pos,
+            };
+            return Err(format!(
+                "the circuit has a loop through the part at {pos}; timing needs a combinational circuit"
+            ));
+        }
+        Ok(net_edges)
+    }
+}
+
+/// What the probes drive: the nets an input change starts at.
+fn probe_nets(circuit: &Circuit, probes: &[Pos]) -> Vec<usize> {
+    circuit.sources.iter().filter(|s| probes.contains(&s.pos)).flat_map(|s| s.drives.iter().copied()).collect()
+}
+
 /// The earliest and latest arrival at each output along any path.
 pub fn bound_by_path(
     world: &World,
@@ -136,73 +464,11 @@ pub fn bound_by_path(
     probes: &[Pos],
     lamps: &[(String, Pos)],
 ) -> Result<Timing, String> {
-    // Parts as graph nodes: what they read, what they drive, and their delay rule.
-    let mut parts: Vec<(Part, &[usize], &[usize])> = Vec::new();
-    for torch in &circuit.torches {
-        parts.push((Part::Torch, &torch.reads, &torch.drives));
-    }
-    for repeater in &circuit.repeaters {
-        let delay = match world.get(repeater.pos) {
-            Block::Repeater { delay, .. } => 2 * u32::from(delay),
-            other => return Err(format!("expected a repeater at {}, found {other}", repeater.pos)),
-        };
-        parts.push((Part::Repeater(delay), &repeater.reads, &repeater.drives));
-    }
-
-    // Arrival at each net. Inputs change at tick 0; everything else waits for
-    // every part that drives it, in topological order.
-    let mut partial: Vec<Edges> = vec![Edges::NEVER; circuit.nets.len()];
-    let mut drivers_left: Vec<usize> = vec![0; circuit.nets.len()];
-    for (_, _, drives) in &parts {
-        for &net in *drives {
-            drivers_left[net] += 1;
-        }
-    }
-    for source in &circuit.sources {
-        if probes.contains(&source.pos) {
-            for &net in &source.drives {
-                partial[net] = partial[net].join(Edges { rise: Some((0, 0)), fall: Some((0, 0)) });
-            }
-        }
-    }
-    // A net is settled once every part driving it has been evaluated; a tie or a
-    // wire nothing drives is settled from the start and never changes.
-    let mut net_edges: Vec<Option<Edges>> =
-        drivers_left.iter().zip(&partial).map(|(&left, &e)| (left == 0).then_some(e)).collect();
-    let mut done = vec![false; parts.len()];
-    loop {
-        let mut progress = false;
-        for (p, (part, reads, drives)) in parts.iter().enumerate() {
-            if done[p] || reads.iter().any(|&n| net_edges[n].is_none()) {
-                continue;
-            }
-            let input = reads.iter().fold(Edges::NEVER, |acc, &n| acc.join(net_edges[n].expect("settled")));
-            let output = match part {
-                Part::Torch => input.inverted().shifted(TORCH_TICKS),
-                Part::Repeater(delay) => input.shifted(*delay),
-            };
-            for &net in *drives {
-                partial[net] = partial[net].join(output);
-                drivers_left[net] -= 1;
-                if drivers_left[net] == 0 {
-                    net_edges[net] = Some(partial[net]);
-                }
-            }
-            done[p] = true;
-            progress = true;
-        }
-        if !progress {
-            break;
-        }
-    }
-    if let Some(p) = done.iter().position(|d| !d) {
-        let pos = match p < circuit.torches.len() {
-            true => circuit.torches[p].pos,
-            false => circuit.repeaters[p - circuit.torches.len()].pos,
-        };
-        return Err(format!("the circuit has a loop through the part at {pos}; timing needs a combinational circuit"));
-    }
-
+    let paths = Paths::new(world, circuit)?;
+    let at_zero = Edges { rise: Some((0, 0)), fall: Some((0, 0)) };
+    let starts: Vec<(usize, Edges)> = probe_nets(circuit, probes).into_iter().map(|n| (n, at_zero)).collect();
+    let net_edges = paths.arrivals(circuit, &starts)?;
+    let parts = &paths.parts;
     let mut outputs = BTreeMap::new();
     for (name, pos) in lamps {
         let lamp =
@@ -225,13 +491,13 @@ pub fn bound_by_path(
                 at == Some(max)
             });
             if let Some(net) = net {
-                path = critical_path(circuit, &parts, &net_edges, net, falling);
+                path = critical_path(circuit, parts, &net_edges, net, falling);
                 path.push(format!("lamp at {pos}{}", if falling { " going dark" } else { " lighting" }));
             }
         }
         outputs.insert(name.clone(), OutputTiming { min, max, path, exact: None });
     }
-    Ok(Timing { outputs, exhaustive: false })
+    Ok(Timing { outputs, exhaustive: false, sequential: None, input_spacing: 0 })
 }
 
 enum Part {
@@ -665,6 +931,190 @@ pub fn simulate_walk(design: &Design, walk: &[u64]) -> Result<Vec<Vec<Vec<u32>>>
         out.push(changes);
     }
     Ok(out)
+}
+
+/// Drives the design's inputs through `walk` with `spacing` ticks between
+/// changes, whether or not it has settled, and returns the most times any one
+/// torch turned off within sixty ticks, with that torch.
+pub fn torch_stress(design: &Design, walk: &[u64], spacing: u32) -> Result<(usize, Option<Pos>), String> {
+    let probes = design.probes()?;
+    let on: Vec<Block> = design.inputs.iter().map(|p| p.on.parse()).collect::<Result<_, _>>()?;
+    let off: Vec<Block> = design.inputs.iter().map(|p| p.off.parse()).collect::<Result<_, _>>()?;
+    let n = design.inputs.len();
+    let mut sim = Sim::new(design.world()?);
+    let mut current = 0u64;
+    let mut worst = (0usize, None);
+    for &next in walk {
+        let mut stimuli: Vec<(Pos, Block)> = (0..n)
+            .filter(|&i| (current ^ next) >> i & 1 == 1)
+            .map(|i| (probes[i], if next >> i & 1 == 1 { on[i] } else { off[i] }))
+            .collect();
+        stimuli.sort_by_key(|(pos, _)| crate::trace::event_order(*pos));
+        for (pos, block) in stimuli {
+            sim.set_block(pos, block, false)?;
+        }
+        current = next;
+        for _ in 0..spacing {
+            sim.step();
+            for (pos, count) in sim.torch_turn_offs() {
+                if count > worst.0 {
+                    worst = (count, Some(pos));
+                }
+            }
+        }
+    }
+    Ok(worst)
+}
+
+/// Runs a clocked design for `cycles` cycles of random inputs at its reported
+/// period, the inputs changing when the report says, and returns the most times
+/// any one torch turned off within sixty ticks, with that torch.
+pub fn clock_stress(design: &Design, cycles: u32, seed: u64) -> Result<(usize, Option<Pos>), String> {
+    let seq = design.timing.sequential.as_ref().ok_or("not a clocked design")?;
+    let mut rng = Rng::new(seed);
+    let data: Vec<usize> = (0..design.inputs.len()).filter(|&i| design.inputs[i].name != seq.clock).collect();
+    let vectors: Vec<BTreeMap<String, u8>> = (0..cycles)
+        .map(|_| data.iter().map(|&i| (design.inputs[i].name.clone(), (rng.draw() & 1) as u8)).collect())
+        .collect();
+    let mut worst = (0usize, None);
+    run_cycles(design, &vectors, None, &mut |sim| {
+        for (pos, count) in sim.torch_turn_offs() {
+            if count > worst.0 {
+                worst = (count, Some(pos));
+            }
+        }
+    })?;
+    Ok(worst)
+}
+
+/// Drives a clocked design through one vector of inputs per cycle, as the
+/// harness does: the clock input makes its active edge at the start of each
+/// cycle and the other edge halfway, the inputs change `input_change_at` ticks
+/// in, and the outputs are read `sample_at` ticks in. With `shuffle`, the ticks
+/// that fall due together run in a random order within each priority. `watch`
+/// sees the simulator after every tick.
+pub fn run_cycles(
+    design: &Design,
+    vectors: &[BTreeMap<String, u8>],
+    shuffle: Option<u64>,
+    watch: &mut dyn FnMut(&Sim),
+) -> Result<Vec<BTreeMap<String, u8>>, String> {
+    let seq = design.timing.sequential.as_ref().ok_or("not a clocked design")?;
+    let probes = design.probes()?;
+    let lamps = design.lamps()?;
+    let clock = design.inputs.iter().position(|p| p.name == seq.clock).ok_or("the clock input is missing")?;
+    let on: Vec<Block> = design.inputs.iter().map(|p| p.on.parse()).collect::<Result<_, _>>()?;
+    let off: Vec<Block> = design.inputs.iter().map(|p| p.off.parse()).collect::<Result<_, _>>()?;
+    let mut sim = Sim::new(design.world()?);
+    let mut rng = shuffle.map(Rng::new);
+    let mut step = |sim: &mut Sim| match &mut rng {
+        Some(rng) => {
+            let groups = sim.due_groups();
+            let mut order = Vec::new();
+            let mut base = 0;
+            for g in groups {
+                let mut group: Vec<usize> = (base..base + g).collect();
+                for i in (1..g).rev() {
+                    group.swap(i, rng.below(i + 1));
+                }
+                order.extend(group);
+                base += g;
+            }
+            sim.step_in_order(&order);
+        }
+        None => sim.step(),
+    };
+    let active_high = seq.active == "rising";
+    // The clock rests at the level before its active edge.
+    sim.set_block(probes[clock], if active_high { off[clock] } else { on[clock] }, false)?;
+    for _ in 0..10 {
+        step(&mut sim);
+    }
+    let mut results = Vec::new();
+    for vector in vectors {
+        let mut outputs = BTreeMap::new();
+        for tick in 0..seq.period {
+            if tick == 0 {
+                sim.set_block(probes[clock], if active_high { on[clock] } else { off[clock] }, false)?;
+            }
+            if tick == seq.high {
+                sim.set_block(probes[clock], if active_high { off[clock] } else { on[clock] }, false)?;
+            }
+            if tick == seq.input_change_at {
+                let mut changes: Vec<(Pos, Block)> = Vec::new();
+                for (i, input) in design.inputs.iter().enumerate() {
+                    if i == clock {
+                        continue;
+                    }
+                    let value =
+                        *vector.get(&input.name).ok_or_else(|| format!("vector is missing input {}", input.name))?;
+                    changes.push((probes[i], if value != 0 { on[i] } else { off[i] }));
+                }
+                changes.sort_by_key(|(pos, _)| crate::trace::event_order(*pos));
+                for (pos, block) in changes {
+                    sim.set_block(pos, block, false)?;
+                }
+            }
+            if tick == seq.sample_at {
+                for (output, &lamp) in design.outputs.iter().zip(&lamps) {
+                    outputs.insert(output.name.clone(), u8::from(sim.world().get(lamp) == Block::Lamp { lit: true }));
+                }
+            }
+            step(&mut sim);
+            watch(&sim);
+        }
+        results.push(outputs);
+    }
+    Ok(results)
+}
+
+/// The walks that stress torches: every input toggling on its own, every pair
+/// toggling together (which pulses a gate whose two paths from them differ in
+/// length), and random changes.
+pub fn stress_walks(n: usize) -> Vec<(String, Vec<u64>)> {
+    let mut walks = Vec::new();
+    let toggles = |mask: u64| -> Vec<u64> { (0..16).map(|k| if k % 2 == 0 { mask } else { 0 }).collect() };
+    for i in 0..n {
+        walks.push((format!("input {i}"), toggles(1 << i)));
+    }
+    for i in 0..n {
+        for j in i + 1..n {
+            walks.push((format!("inputs {i} and {j} together"), toggles(1 << i | 1 << j)));
+        }
+    }
+    let mut rng = Rng::new(7);
+    let mask = if n >= 64 { u64::MAX } else { (1u64 << n) - 1 };
+    walks.push(("random changes".to_string(), (0..128).map(|_| rng.draw() & mask).collect()));
+    walks
+}
+
+/// The most times any torch turns off within sixty ticks over every stress walk
+/// at `spacing` ticks between changes, with the torch and the walk.
+pub fn worst_stress(design: &Design, spacing: u32) -> Result<(usize, Option<Pos>, String), String> {
+    let mut worst = (0usize, None, String::new());
+    for (name, walk) in stress_walks(design.inputs.len()) {
+        let (count, pos) = torch_stress(design, &walk, spacing)?;
+        if count > worst.0 {
+            worst = (count, pos, name);
+        }
+    }
+    Ok(worst)
+}
+
+/// The fewest ticks between input changes that keep every torch within the
+/// burnout budget over the stress walks, tried from eight upwards.
+pub fn input_spacing(design: &Design) -> Result<u32, String> {
+    let mut spacing = 8;
+    loop {
+        let (worst, _, _) = worst_stress(design, spacing)?;
+        if worst <= BURNOUT_BUDGET {
+            return Ok(spacing);
+        }
+        spacing += 2;
+        if spacing > 200 {
+            return Err("some torch turns off too often even with 200 ticks between input changes".to_string());
+        }
+    }
 }
 
 /// What a walk showed for each output: the earliest and latest lamp change, or

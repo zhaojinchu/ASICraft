@@ -266,6 +266,19 @@ impl Sim {
         &self.world
     }
 
+    /// How often each torch has turned off within the last sixty ticks, for the
+    /// ones that have at all. The game burns a torch out on its eighth.
+    pub fn torch_turn_offs(&self) -> std::collections::BTreeMap<Pos, usize> {
+        let now = self.time;
+        let mut out = std::collections::BTreeMap::new();
+        for &(pos, when) in &self.toggles {
+            if now - when <= BURNOUT_WINDOW {
+                *out.entry(pos).or_insert(0) += 1;
+            }
+        }
+        out
+    }
+
     /// Scheduled ticks that have not run, sorted by position.
     pub fn pending(&self) -> Vec<Pending> {
         let mut out: Vec<Pending> = self

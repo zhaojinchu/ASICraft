@@ -115,6 +115,11 @@ pub struct Tile {
     /// and which clock edge they act on (`edge rising` or `edge falling`).
     pub timing: BTreeMap<String, i32>,
     pub clock_edge: Option<String>,
+    /// Blocks whose state at rest (every input off, the clock low) differs from
+    /// the legend's: `rest X Y Z <state>` lines.
+    pub rest: Vec<(Pos, Block)>,
+    /// Flip-flops: the repeaters whose `powered` holds the stored value (`state X Y Z`).
+    pub state: Vec<Pos>,
     legend: BTreeMap<char, LegendEntry>,
     /// `layers[y][z][x]`
     layers: Vec<Vec<Vec<char>>>,
@@ -165,6 +170,8 @@ impl Tile {
         let mut lamp = None;
         let mut timing = BTreeMap::new();
         let mut clock_edge = None;
+        let mut rest = Vec::new();
+        let mut state = Vec::new();
         let mut legend = BTreeMap::new();
         let mut width = PITCH;
         let mut layers: Vec<Vec<Vec<char>>> = vec![vec![vec!['.'; PITCH as usize]; PITCH as usize]; HEIGHT as usize];
@@ -213,6 +220,13 @@ impl Tile {
                     Some(&"rising") | Some(&"falling") => clock_edge = Some(words[1].to_string()),
                     _ => return Err(at("edge needs rising or falling".into())),
                 },
+                ("rest", _) => {
+                    let pos = pos_at(1)?;
+                    let block: Block =
+                        words.get(4).ok_or_else(|| at("rest needs a block state".into()))?.parse().map_err(at)?;
+                    rest.push((pos, block));
+                }
+                ("state", _) => state.push(pos_at(1)?),
                 ("port", _) => {
                     let edge = words
                         .get(1)
@@ -283,6 +297,8 @@ impl Tile {
             lamp,
             timing,
             clock_edge,
+            rest,
+            state,
             legend,
             layers,
         };
@@ -390,9 +406,15 @@ impl Library {
     }
 
     /// The synthesis cells this library offers, as (name, input pins) pairs.
-    /// `NOT`, `NOR2` and `NOR3` are the NOR tile with one to three inputs.
+    /// `NOT`, `NOR2` and `NOR3` are the NOR tile with one to three inputs;
+    /// `DFF` is the flip-flop, with pins `D` and `CLK`.
     pub fn cells(&self) -> Vec<(&'static str, Vec<&'static str>)> {
-        vec![("NOT", vec!["A"]), ("NOR2", vec!["A", "B"]), ("NOR3", vec!["A", "B", "C"])]
+        vec![("NOT", vec!["A"]), ("NOR2", vec!["A", "B"]), ("NOR3", vec!["A", "B", "C"]), ("DFF", vec!["D", "CLK"])]
+    }
+
+    /// The combinational cells among [`Library::cells`].
+    pub fn gates(&self) -> Vec<(&'static str, Vec<&'static str>)> {
+        self.cells().into_iter().filter(|(name, _)| *name != "DFF").collect()
     }
 
     /// The cell library in Liberty format, for Yosys's `abc -liberty`.
@@ -403,13 +425,19 @@ impl Library {
     pub fn liberty(&self) -> String {
         let mut out = String::from("library(redfab) {\n");
         out.push_str("  cell(BUF) {\n    area: 4;\n    pin(A) { direction: input; }\n    pin(Y) { direction: output; function: \"A\"; }\n  }\n");
-        for (name, pins) in self.cells() {
+        for (name, pins) in self.gates() {
             out.push_str(&format!("  cell({name}) {{\n    area: 1;\n"));
             for pin in &pins {
                 out.push_str(&format!("    pin({pin}) {{ direction: input; }}\n"));
             }
             out.push_str(&format!("    pin(Y) {{ direction: output; function: \"!({})\"; }}\n  }}\n", pins.join("+")));
         }
+        // The flip-flop acts on the falling clock edge (stage 8); `dfflegalize`
+        // turns a design's rising-edge flip-flops into these with an inverter on
+        // the clock.
+        out.push_str(
+            "  cell(DFF) {\n    area: 4;\n    ff(IQ, IQN) { clocked_on: \"!CLK\"; next_state: \"D\"; }\n    pin(D) { direction: input; }\n    pin(CLK) { direction: input; clock: true; }\n    pin(Q) { direction: output; function: \"IQ\"; }\n  }\n",
+        );
         out.push_str("}\n");
         out
     }
@@ -418,7 +446,8 @@ impl Library {
     /// simulating a mapped netlist.
     pub fn verilog_models(&self) -> String {
         let mut out = String::from("module BUF(input A, output Y);\n  assign Y = A;\nendmodule\n");
-        for (name, pins) in self.cells() {
+        out.push_str("module DFF(input D, input CLK, output reg Q);\n  always @(negedge CLK) Q <= D;\nendmodule\n");
+        for (name, pins) in self.gates() {
             let ports: Vec<String> = pins.iter().map(|p| format!("input {p}")).collect();
             out.push_str(&format!(
                 "module {name}({}, output Y);\n  assign Y = ~({});\nendmodule\n",
@@ -545,9 +574,19 @@ impl Variant {
         name
     }
 
-    /// The blocks, rotated, with the repeater (if any) in place.
+    /// The blocks, rotated, with the repeater (if any) in place, and every block
+    /// in its state at rest.
     pub fn blocks(&self, library: &Library) -> Vec<(Pos, Block)> {
-        let mut blocks = self.tile(library).blocks(&self.edges, self.rotation);
+        let tile = self.tile(library);
+        let mut blocks = tile.blocks(&self.edges, self.rotation);
+        for (pos, block) in &tile.rest {
+            let turned = rotate_pos_in(*pos, self.rotation, tile.width);
+            for (p, b) in &mut blocks {
+                if *p == turned {
+                    *b = block.rotated(self.rotation);
+                }
+            }
+        }
         if let Some(entry) = self.repeater_entry {
             // The cell next to the entry port, one step towards the centre.
             let port = self.tile(library).port(entry).expect("the repeater's entry is a port of the tile");

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::extract::{Circuit, Component};
 use crate::geom::Pos;
+use crate::layout::Macro;
 use crate::netlist::{Cell, Netlist};
 
 /// Extracted nets grouped into logical nets, with everything resolved to the
@@ -37,13 +38,26 @@ impl Logical {
 /// Returns one message per mismatch; an empty list means the layout is correct.
 pub fn lvs(
     netlist: &Netlist,
-    circuit: &Circuit,
+    whole: &Circuit,
     probes: &[Pos],
     lamps: &[Pos],
     ties: &[(usize, bool, Pos)],
+    macros: &[Macro],
 ) -> Vec<String> {
     let mut problems = Vec::new();
+    // A flip-flop is one part: its insides are checked block by block elsewhere;
+    // here only its three ports take part, as a source (Q) and two sinks (D, clock).
+    let (filtered, _) = whole.outside(&|pos| macros.iter().any(|m| m.contains(pos)));
+    let circuit = &filtered;
     let first = |net: usize| circuit.nets[net].first().map_or_else(|| "?".to_string(), Pos::to_string);
+    let mut macro_q: Vec<(usize, Option<usize>)> = Vec::new(); // (cell, net at the Q port)
+    for m in macros {
+        let q = circuit.net_of(m.q);
+        if q.is_none() {
+            problems.push(format!("flip-flop {}: no wire leaves its Q port at {}", netlist.cells[m.cell].name, m.q));
+        }
+        macro_q.push((m.cell, q));
+    }
 
     for (from, to) in &circuit.one_way {
         problems.push(format!("power passes from the wire at {from} to the wire at {to} but not back"));
@@ -95,6 +109,11 @@ pub fn lvs(
             drivers[net].push(component.pos);
         }
     }
+    for (m, (_, q)) in macros.iter().zip(&macro_q) {
+        if let Some(q) = q {
+            drivers[logical.of(*q)].push(m.q);
+        }
+    }
     let zero_anchors: BTreeSet<usize> =
         ties.iter().filter(|t| !t.1).filter_map(|t| circuit.net_of(t.2)).map(|n| logical.of(n)).collect();
     for (net, list) in drivers.iter().enumerate() {
@@ -122,6 +141,7 @@ pub fn lvs(
     for component in circuit.torches.iter().chain(&circuit.sources) {
         reached.extend(component.drives.iter().copied());
     }
+    reached.extend(macro_q.iter().filter_map(|(_, q)| *q));
     for &(_, value, anchor) in ties {
         if !value && let Some(net) = circuit.net_of(anchor) {
             reached.insert(net);
@@ -183,6 +203,13 @@ pub fn lvs(
         }
     }
 
+    // Flip-flop outputs are sources for the matching, like inputs.
+    for (cell, q) in &macro_q {
+        if let Some(q) = q {
+            net_map[netlist.cells[*cell].output] = Some(logical.of(*q));
+        }
+    }
+
     // Cells: match forward from mapped nets. Cells with the same inputs compute
     // the same thing, so their torches cannot be told apart and need not be: they
     // are matched as a group, and their output nets become one class that reads
@@ -199,7 +226,7 @@ pub fn lvs(
     loop {
         let mut progress = false;
         for c in 0..netlist.cells.len() {
-            if torch_of_cell[c].is_some() {
+            if torch_of_cell[c].is_some() || netlist.cells[c].is_dff() {
                 continue;
             }
             let mapped_inputs = |cell: &Cell, net_map: &[Option<usize>]| -> Option<Vec<usize>> {
@@ -250,7 +277,7 @@ pub fn lvs(
         }
     }
     for (c, cell) in netlist.cells.iter().enumerate() {
-        if torch_of_cell[c].is_none() {
+        if torch_of_cell[c].is_none() && !cell.is_dff() {
             // Name the wanted nets by one position each, so the layout can be looked at.
             let wanted: Vec<String> = cell
                 .inputs
@@ -278,6 +305,25 @@ pub fn lvs(
                 torch.pos,
                 describe_reads(torch, circuit)
             ));
+        }
+    }
+
+    // Flip-flop inputs: the nets at the D and clock ports must be the cell's.
+    for m in macros {
+        let cell = &netlist.cells[m.cell];
+        for (pin, port, what) in [(0, m.d, "D"), (1, m.clk, "clock")] {
+            let want = cell.inputs.get(pin).and_then(|&n| net_map[n]).map(|l| find(&mut class, l));
+            let got = circuit.net_of(port).map(|n| find(&mut class, logical.of(n)));
+            match (want, got) {
+                (Some(w), Some(g)) if w == g => {}
+                (_, None) => {
+                    problems.push(format!("flip-flop {}: no wire reaches its {what} port at {port}", cell.name))
+                }
+                (None, _) => problems.push(format!("flip-flop {}: its {what} net is not in the layout", cell.name)),
+                _ => {
+                    problems.push(format!("flip-flop {}: the wire at its {what} port is not its {what} net", cell.name))
+                }
+            }
         }
     }
 
