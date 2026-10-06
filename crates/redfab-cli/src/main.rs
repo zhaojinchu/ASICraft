@@ -23,6 +23,8 @@ fn main() -> ExitCode {
         Some("pnr-random") => pnr_random_command(&args[1..]),
         Some("lvs") => lvs_command(&args[1..]),
         Some("extract") => extract_command(&args[1..]),
+        Some("timing") => timing_command(&args[1..]),
+        Some("timing-measure") => timing_measure_command(&args[1..]),
         Some("simulate") => simulate_command(&args[1..]),
         Some("replay") => replay_report_command(&args[1..]),
         Some("structure") => structure_command(&args[1..]),
@@ -488,6 +490,95 @@ fn run_yosys(dir: &Path, script: &str) -> Result<(), String> {
             dir.join(format!("{script}.log")).display()
         ))
     }
+}
+
+/// `redfab timing DESIGN.json`
+///
+/// Prints the timing report of a built design: for each output, the earliest
+/// and latest game tick after an input change at which its lamp can change.
+fn timing_command(args: &[String]) -> Result<bool, String> {
+    let (design, paths) = match args {
+        [design] => (design, false),
+        [design, flag] if flag == "--paths" => (design, true),
+        _ => return Err("usage: redfab timing DESIGN.json [--paths]".into()),
+    };
+    let design = redfab_core::build::Design::from_json(&read(Path::new(design))?)?;
+    print!("{}", timing_report(&design));
+    if paths {
+        print!("{}", worst_paths(&design));
+    }
+    Ok(true)
+}
+
+fn timing_report(design: &redfab_core::build::Design) -> String {
+    let timing = &design.timing;
+    let mut out = format!(
+        "design {}: outputs settle within {} game ticks of an input change (bound by path{})\n",
+        design.name,
+        design.settle_ticks,
+        if timing.exhaustive { "; exact figures over every pair of input combinations" } else { "" }
+    );
+    out += "  output        by path          exact\n";
+    for (name, t) in &timing.outputs {
+        let exact = match t.exact {
+            Some((lo, hi)) => format!("{lo:>4} to {hi:>4} gt"),
+            None if timing.exhaustive => "never changes".to_string(),
+            None => "-".to_string(),
+        };
+        out += &format!("  {name:<12} {:>4} to {:>4} gt   {exact}\n", t.min, t.max);
+    }
+    out
+}
+
+fn worst_paths(design: &redfab_core::build::Design) -> String {
+    let mut out = String::new();
+    for (name, t) in &design.timing.outputs {
+        out += &format!("{name}: worst case {} gt\n", t.max);
+        for step in &t.path {
+            out += &format!("    {step}\n");
+        }
+    }
+    out
+}
+
+/// `redfab timing-measure DESIGN.json [--multi N] [--seed S]`
+///
+/// Runs the design in the simulator through every single-bit input change from
+/// every input combination (a sample when there are more than ten inputs) and N
+/// random changes of several bits, and compares when the lamps changed with the
+/// design's timing report. Fails if the report is not tight.
+fn timing_measure_command(args: &[String]) -> Result<bool, String> {
+    let mut design = None;
+    let mut multi = 256usize;
+    let mut seed = 1u64;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--multi" => multi = it.next().and_then(|n| n.parse().ok()).ok_or("--multi needs a number")?,
+            "--seed" => seed = it.next().and_then(|n| n.parse().ok()).ok_or("--seed needs a number")?,
+            other => design = Some(PathBuf::from(other)),
+        }
+    }
+    let path = design.ok_or("usage: redfab timing-measure DESIGN.json [--multi N] [--seed S]")?;
+    let design = redfab_core::build::Design::from_json(&read(&path)?)?;
+    let measurement = redfab_core::timing::measure(&design, 10, multi, seed)?;
+    print!("{}", timing_report(&design));
+    for (name, seen) in &measurement.seen {
+        match seen {
+            Some((lo, hi)) => println!("  {name:<12} simulator shows {lo:>4} to {hi:>4} gt"),
+            None => println!("  {name:<12} simulator shows no change"),
+        }
+    }
+    for p in &measurement.problems {
+        println!("  FAIL  {p}");
+    }
+    println!(
+        "{}: the timed model and the report {} the block simulator over {} input changes",
+        design.name,
+        if measurement.problems.is_empty() { "agree with" } else { "do NOT agree with" },
+        measurement.changes
+    );
+    Ok(measurement.problems.is_empty())
 }
 
 /// `redfab extract DESIGN.json`

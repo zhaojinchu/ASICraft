@@ -6,21 +6,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::bake::bake;
 use crate::block::Block;
-use crate::extract::{extract, weak_signals};
+use crate::extract::{Circuit, extract, weak_signals};
 use crate::geom::Pos;
 use crate::layout::Placed;
 use crate::lvs::lvs;
-use crate::netlist::{Driver, Netlist};
+use crate::netlist::Netlist;
 use crate::place::place;
 use crate::route::route;
 use crate::sim::Sim;
 use crate::structure::structure_file;
 use crate::tile::Library;
+use crate::timing::Timing;
 use crate::world::World;
 
 pub const DESIGN_FORMAT: &str = "redfab-design/1";
 /// A lamp goes out this many game ticks after it loses power.
-const LAMP_OFF_DELAY: u32 = 4;
 /// The most routing columns tried between gate columns before giving up.
 const MAX_ROUTING_COLS: i32 = 6;
 
@@ -36,8 +36,12 @@ pub struct Design {
     /// Constant nets: the block that anchors each (a torch for 1, a dust for 0).
     #[serde(default)]
     pub constants: Vec<ConstantPin>,
-    /// Game ticks after an input change by which every output is final.
+    /// Game ticks after an input change by which every output is final: the
+    /// worst case in `timing`.
     pub settle_ticks: u32,
+    /// Best and worst case for each output, in game ticks after an input change.
+    #[serde(default)]
+    pub timing: Timing,
     /// Position (`x,y,z`) to full block state.
     pub blocks: BTreeMap<String, String>,
 }
@@ -133,8 +137,18 @@ pub fn build_unchecked(netlist: &Netlist, name: &str) -> Result<(Built, Vec<Stri
     let realized = layout.realize(&library, netlist)?;
     let world = bake(realized.world)?;
 
-    let problems = check_world(&world, netlist, &realized.probes, &realized.lamps, &realized.ties);
-    let settle_ticks = settle_ticks(netlist, &routed.repeaters, library.nor.delay);
+    let circuit = extract(&world, &realized.probes);
+    let mut problems = check_circuit(&world, &circuit, netlist, &realized.probes, &realized.lamps, &realized.ties);
+    let lamps_named: Vec<(String, Pos)> =
+        netlist.outputs.iter().map(|p| p.name.clone()).zip(realized.lamps.iter().copied()).collect();
+    let timing = match crate::timing::analyze_circuit(&world, &circuit, &realized.probes, &lamps_named) {
+        Ok(timing) => timing,
+        Err(e) => {
+            problems.push(format!("timing: {e}"));
+            Timing::default()
+        }
+    };
+    let settle_ticks = timing.settle_ticks();
     let repeater_count = layout
         .tiles
         .values()
@@ -169,15 +183,17 @@ pub fn build_unchecked(netlist: &Netlist, name: &str) -> Result<(Built, Vec<Stri
             .map(|&(net, value, pos)| ConstantPin { net, value, anchor: pos.to_string() })
             .collect(),
         settle_ticks,
+        timing,
         blocks: world.iter().map(|(pos, block)| (pos.to_string(), block.to_string())).collect(),
     };
     let (cols, rows) = layout.size();
     let report = format!(
-        "design {name}\n  cells: {}\n  tiles: {} ({cols} columns x {rows} rows, {} routing columns between gate columns)\n  repeaters: {repeater_count}\n  blocks: {} in {sx} x {sy} x {sz}\n  settles within {} game ticks of an input change\n{}",
+        "design {name}\n  cells: {}\n  tiles: {} ({cols} columns x {rows} rows, {} routing columns between gate columns)\n  repeaters: {repeater_count}\n  blocks: {} in {sx} x {sy} x {sz}\n  outputs settle {} to {} game ticks after an input change\n{}",
         netlist.cells.len(),
         layout.tiles.len(),
         routing_cols,
         design.blocks.len(),
+        design.timing.outputs.values().map(|t| t.min).min().unwrap_or(0),
         design.settle_ticks,
         if problems.is_empty() { "  layout matches the netlist\n" } else { "" },
     );
@@ -198,54 +214,6 @@ pub fn place_and_route(netlist: &Netlist) -> Result<(crate::route::Routed, i32),
     Err(format!("routing failed even with {MAX_ROUTING_COLS} routing columns: {last}"))
 }
 
-/// Game ticks after which every output is final: the longest path through
-/// gates (each `gate_delay`) and repeaters (2 each) to an output, plus the lamp's
-/// 4-tick turn-off. Stage 7 replaces this with a proper timing analysis.
-fn settle_ticks(netlist: &Netlist, repeaters: &BTreeMap<usize, Vec<u32>>, gate_delay: u32) -> u32 {
-    let drivers = netlist.drivers().unwrap_or_default();
-    // Repeaters between a net's driver and the sink at index `i` of `sinks_of(net)`.
-    let hops = |net: usize, sink: (usize, usize)| -> u32 {
-        repeaters
-            .get(&net)
-            .and_then(|counts| {
-                netlist.sinks_of(net).iter().position(|s| *s == sink).and_then(|i| counts.get(i).copied())
-            })
-            .unwrap_or(0)
-    };
-    let mut memo: Vec<Option<u32>> = vec![None; netlist.cells.len()];
-    fn ready(
-        c: usize,
-        netlist: &Netlist,
-        drivers: &[Driver],
-        hops: &dyn Fn(usize, (usize, usize)) -> u32,
-        gate_delay: u32,
-        memo: &mut Vec<Option<u32>>,
-    ) -> u32 {
-        if let Some(a) = memo[c] {
-            return a;
-        }
-        let mut latest = 0;
-        for (pin, &net) in netlist.cells[c].inputs.iter().enumerate() {
-            let at_source = match drivers[net] {
-                Driver::Cell(d) => ready(d, netlist, drivers, hops, gate_delay, memo),
-                _ => 0,
-            };
-            latest = latest.max(at_source + 2 * hops(net, (c, pin)));
-        }
-        memo[c] = Some(latest + gate_delay);
-        latest + gate_delay
-    }
-    let mut worst = 0;
-    for (o, port) in netlist.outputs.iter().enumerate() {
-        let at_source = match drivers[port.net] {
-            Driver::Cell(d) => ready(d, netlist, &drivers, &hops, gate_delay, &mut memo),
-            _ => 0,
-        };
-        worst = worst.max(at_source + 2 * hops(port.net, (usize::MAX, o)) + LAMP_OFF_DELAY);
-    }
-    worst.max(LAMP_OFF_DELAY)
-}
-
 /// The layout-versus-netlist check and the signal-strength check on a block world.
 pub fn check_world(
     world: &World,
@@ -254,9 +222,20 @@ pub fn check_world(
     lamps: &[Pos],
     ties: &[(usize, bool, Pos)],
 ) -> Vec<String> {
-    let circuit = extract(world, probes);
-    let mut problems = lvs(netlist, &circuit, probes, lamps, ties);
-    problems.extend(weak_signals(world, probes, &circuit));
+    check_circuit(world, &extract(world, probes), netlist, probes, lamps, ties)
+}
+
+/// [`check_world`] on a circuit already read back from the world.
+pub fn check_circuit(
+    world: &World,
+    circuit: &Circuit,
+    netlist: &Netlist,
+    probes: &[Pos],
+    lamps: &[Pos],
+    ties: &[(usize, bool, Pos)],
+) -> Vec<String> {
+    let mut problems = lvs(netlist, circuit, probes, lamps, ties);
+    problems.extend(weak_signals(world, probes, circuit));
     problems
 }
 
