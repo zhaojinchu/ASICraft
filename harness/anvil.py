@@ -97,15 +97,27 @@ def read_world_blocks(region_dir: Path, box: Box) -> tuple[dict[Pos, BlockState]
     return SnapshotReader(region_dir).read([box])
 
 
+class StaleSnapshot(Exception):
+    """A chunk on disk is older than the save that was asked for, or is half written."""
+
+
 class SnapshotReader:
     """Reads the blocks inside a set of boxes out of a world directory. Only the
     chunks and cells the boxes cover are decoded; everything else in a chunk is
-    skipped (the NBT reader leaves big arrays undecoded)."""
+    skipped (the NBT reader leaves big arrays undecoded).
+
+    The game keeps writing region files after `save-all flush` has replied, so a
+    read can see a chunk from before the save, one half written, or, while the
+    game is moving records around inside the file, no record or a neighbour's
+    record under this chunk's header entry. Every chunk asked for must have a
+    record that decodes and says it is that chunk, and with `saved_at` (a game
+    time) it must carry that time as its `LastUpdate`. The caller retries on
+    `StaleSnapshot`."""
 
     def __init__(self, region_dir: Path):
         self.region_dir = region_dir
 
-    def read(self, boxes: list[Box]) -> tuple[dict[Pos, BlockState], list[PendingTick]]:
+    def read(self, boxes: list[Box], saved_at: int | None = None) -> tuple[dict[Pos, BlockState], list[PendingTick]]:
         blocks: dict[Pos, BlockState] = {}
         pending: list[PendingTick] = []
         if not boxes:
@@ -124,12 +136,19 @@ class SnapshotReader:
                 path = self.region_dir / f"r.{key[0]}.{key[1]}.mca"
                 region_cache[key] = path.read_bytes() if path.exists() else None
             data = region_cache[key]
-            if data is None:
-                continue
-            raw = _chunk_bytes(data, cx, cz)
+            raw = _chunk_bytes(data, cx, cz) if data is not None else None
             if raw is None:
-                continue
-            chunk = read_nbt(_decompress(raw))
+                # Every chunk the harness reads is force-loaded and generated, so
+                # an absent record is the game rewriting its header entry.
+                raise StaleSnapshot(f"chunk {cx},{cz} has no record in the region file")
+            try:
+                chunk = read_nbt(_decompress(raw))
+            except Exception as e:  # a torn write: zlib or NBT garbage
+                raise StaleSnapshot(f"chunk {cx},{cz} does not decode: {e}") from e
+            if (chunk.get("xPos"), chunk.get("zPos")) != (cx, cz):
+                raise StaleSnapshot(f"the record for chunk {cx},{cz} holds chunk {chunk.get('xPos')},{chunk.get('zPos')}")
+            if saved_at is not None and chunk.get("LastUpdate", -1) != saved_at:
+                raise StaleSnapshot(f"chunk {cx},{cz} was saved at game time {chunk.get('LastUpdate')}, not {saved_at}")
             for section in chunk.get("sections", []):
                 sy = section["Y"]
                 if sy * 16 + 15 < y0 or sy * 16 > y1:
@@ -166,4 +185,4 @@ def _decompress(raw: bytes) -> bytes:
     raise ValueError(f"unsupported chunk compression {compression}")
 
 
-__all__ = ["AIR", "Box", "PendingTick", "SnapshotReader", "read_region_blocks", "read_world_blocks"]
+__all__ = ["AIR", "Box", "PendingTick", "SnapshotReader", "StaleSnapshot", "read_region_blocks", "read_world_blocks"]

@@ -8,7 +8,9 @@ import json
 import struct
 from pathlib import Path
 
-from harness.anvil import read_region_blocks
+import pytest
+
+from harness.anvil import SnapshotReader, StaleSnapshot, read_region_blocks
 from harness.blockstate import format_pos
 from harness.nbt import read_nbt
 
@@ -20,6 +22,42 @@ def test_region_blocks_and_pending_ticks_match_expected():
     blocks, pending = read_region_blocks(DATA / "r.0.0.mca", expected["box"])
     assert {format_pos(k): str(v) for k, v in blocks.items()} == expected["blocks"]
     assert [p.to_json() for p in pending] == expected["pending"]
+
+
+def test_a_read_can_insist_on_the_save_it_asked_for():
+    expected = json.loads((DATA / "r.0.0.expected.json").read_text())
+    reader = SnapshotReader(DATA)
+    blocks, _ = reader.read([expected["box"]], saved_at=1)  # the fixture's chunks say LastUpdate 1
+    assert {format_pos(k): str(v) for k, v in blocks.items()} == expected["blocks"]
+    with pytest.raises(StaleSnapshot):
+        reader.read([expected["box"]], saved_at=2)
+
+
+def test_a_torn_chunk_counts_as_stale(tmp_path: Path):
+    expected = json.loads((DATA / "r.0.0.expected.json").read_text())
+    data = bytearray((DATA / "r.0.0.mca").read_bytes())
+    offset = int.from_bytes(data[:3], "big") * 4096  # chunk (0, 0)'s sectors
+    data[offset + 5: offset + 5 + 64] = bytes(64)  # overwrite the start of its compressed bytes
+    (tmp_path / "r.0.0.mca").write_bytes(data)
+    with pytest.raises(StaleSnapshot):
+        SnapshotReader(tmp_path).read([expected["box"]], saved_at=1)
+    with pytest.raises(StaleSnapshot):
+        SnapshotReader(tmp_path).read([expected["box"]])
+
+
+def test_a_record_of_the_wrong_chunk_counts_as_stale(tmp_path: Path):
+    """While the game moves records inside the file, a header entry can point at
+    sectors that now hold a neighbour's record."""
+    expected = json.loads((DATA / "r.0.0.expected.json").read_text())
+    data = bytearray((DATA / "r.0.0.mca").read_bytes())
+    data[0:4] = data[4:8]  # chunk (0, 0)'s entry now points at chunk (1, 0)'s record
+    (tmp_path / "r.0.0.mca").write_bytes(data)
+    with pytest.raises(StaleSnapshot, match="holds chunk 1,0"):
+        SnapshotReader(tmp_path).read([expected["box"]])
+    data[0:4] = bytes(4)  # and now no record at all
+    (tmp_path / "r.0.0.mca").write_bytes(data)
+    with pytest.raises(StaleSnapshot, match="no record"):
+        SnapshotReader(tmp_path).read([expected["box"]])
 
 
 def _tag(tag_type: int, name: str, payload: bytes) -> bytes:

@@ -19,7 +19,8 @@ from .trace import Fixture, States, Trace
 
 PLOT_Y = 64            # all plots sit at this height, in an otherwise empty world
 MARKER_Y = PLOT_Y - 8  # marker blocks that force every plot chunk to be re-saved each tick
-CELL = 32              # distance between plot cells (two chunks)
+ROW_WIDTH = 256        # plots are laid out in rows this wide
+CELL_MARGIN = 24       # room in a cell beyond the fixture: the straddle shift plus a gap
 SETTLE_TICKS = 10      # run after update-placement so torches and repeaters reach rest
 GLASS = BlockState("minecraft:glass")
 
@@ -75,27 +76,35 @@ class Plot:
     placement: Placement
 
 
+def cell_size(fixture: Fixture) -> int:
+    """The square of world a plot of the fixture needs, a whole number of chunks."""
+    longest = max(fixture.size[0], fixture.size[2])
+    return -(-(longest + CELL_MARGIN) // 16) * 16
+
+
 def layout(fixtures: list[Fixture], variants: tuple[str, ...] = ("aligned", "straddle", "rotated")) -> list[Plot]:
-    """One plot per fixture per variant, on a grid of CELL-sized cells.
+    """One plot per fixture per variant, in rows of chunk-aligned cells sized to fit.
 
     aligned:  origin at a chunk corner.
     straddle: origin shifted so the plot crosses a chunk border on both axes.
     rotated:  a quarter turn clockwise, at a chunk corner.
     """
     plots = []
-    n = 0
-    per_row = 8
+    x = z = row_height = 0
     for fx in fixtures:
         sx, _, sz = fx.size
-        if sx > CELL - 8 or sz > CELL - 8:
-            raise ValueError(f"fixture {fx.name} is too large for a {CELL}-block cell")
+        cell = cell_size(fx)
         for variant in variants:
-            base_x, base_z = (n % per_row) * CELL, (n // per_row) * CELL
-            n += 1
+            if x > 0 and x + cell > ROW_WIDTH:
+                x, z, row_height = 0, z + row_height, 0
+            base_x, base_z = x, z
+            x, row_height = x + cell, max(row_height, cell)
             if variant == "aligned":
                 plots.append(Plot(fx, variant, Placement(Rotation(0), (base_x, PLOT_Y, base_z), fx.size)))
             elif variant == "straddle":
-                origin = (base_x + 16 - max(1, sx // 2), PLOT_Y, base_z + 16 - max(1, sz // 2))
+                # Shift by less than a chunk so that a chunk border falls inside the plot.
+                shift = lambda s: (16 - max(1, s // 2)) % 16
+                origin = (base_x + shift(sx), PLOT_Y, base_z + shift(sz))
                 plots.append(Plot(fx, variant, Placement(Rotation(0), origin, fx.size)))
             elif variant == "rotated":
                 plots.append(Plot(fx, variant, Placement(Rotation(1), (base_x, PLOT_Y, base_z), fx.size)))
@@ -195,7 +204,8 @@ class Runner:
                     traces[key].record(tick, states, pend)
             if tick % 50 == 0:
                 log(f"  tick {tick}/{total} ({time.monotonic() - t0:.1f}s)")
-        log(f"ran {total} ticks in {time.monotonic() - t0:.1f}s, {session.commands_sent} commands so far")
+        log(f"ran {total} ticks in {time.monotonic() - t0:.1f}s, {session.commands_sent} commands so far, "
+            f"{session.stale_snapshots} reads repeated for a save still in progress")
         return traces
 
     def _snapshot(self, boxes: list[Box]):
@@ -207,7 +217,8 @@ class Runner:
         marker = BlockState("minecraft:stone" if self._marker_phase else "minecraft:glass")
         for cz, (cx0, cx1) in self._marker_rows:
             self.session.fill(((cx0 * 16, MARKER_Y, cz * 16), (cx1 * 16 + 15, MARKER_Y, cz * 16)), marker, True)
-        return self.session.snapshot(boxes)
+        # Every plot chunk changed just now, so every one must come back saved at this tick.
+        return self.session.snapshot(boxes, fresh=True)
 
     def _apply_events(self, plots: list[Plot], tick: int) -> None:
         for plot in plots:
