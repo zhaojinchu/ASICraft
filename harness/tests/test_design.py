@@ -42,3 +42,19 @@ def test_plots_of_large_fixtures_do_not_overlap():
             assert x0 // 16 != x1 // 16 and z0 // 16 != z1 // 16, box
         if plot.variant == "aligned":
             assert box[0][0] % 16 == 0 and box[0][2] % 16 == 0
+
+
+def test_lamp_changes_are_measured_from_the_last_input_change():
+    from harness.design import lamp_changes
+    from harness.trace import Fixture, Trace
+
+    design = {"outputs": [{"name": "y", "lamp": "5,1,2"}]}
+    fixture = Fixture(name="t", doc="", size=(8, 4, 8), placement="strict", blocks={}, ticks=40,
+                      events=[(2, {}), (20, {})], expect=[])
+    trace = Trace.from_json({
+        "format": "redfab-trace/1", "fixture": "t", "source": {}, "size": [8, 4, 8], "initial": {},
+        "ticks": [{"tick": 8, "changes": {"5,1,2": "minecraft:redstone_lamp[lit=true]"}},
+                  {"tick": 12, "changes": {"0,1,0": "minecraft:stone"}},
+                  {"tick": 30, "changes": {"5,1,2": "minecraft:redstone_lamp[lit=false]"}}],
+    }, 40)
+    assert lamp_changes(fixture, trace, design) == {"y": [6, 10]}

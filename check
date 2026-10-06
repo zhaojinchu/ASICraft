@@ -321,6 +321,42 @@ if [ $VANILLA = 1 ]; then
     run adder4-exhaustive   design_exhaustive_vanilla
 fi
 
+# ---------------------------------------------------------------- stage 7
+
+# The timing report must be tight. On every design, the simulator applies every
+# single-bit input flip from every input combination and a sample of multi-bit
+# changes, and watches each lamp: the latest change observed for an output must equal
+# its reported worst case, and nothing may change earlier than its reported best case.
+timing_tight() {
+    for d in $DESIGNS; do
+        $REDFAB timing-measure build/designs/$d/design.json || return 1
+    done
+}
+
+# Building the same source twice must give byte-identical output.
+build_deterministic() {
+    rm -rf build/again &&
+    $REDFAB build designs/adder4/top.sv --top top -o build/again/adder4 >/dev/null &&
+    cmp build/designs/adder4/mapped.json build/again/adder4/mapped.json &&
+    cmp build/designs/adder4/design.json build/again/adder4/design.json &&
+    cmp build/designs/adder4/world.nbt build/again/adder4/world.nbt &&
+    echo "adder4 builds the same twice"
+}
+
+# In the game (from the traces recorded by design-vanilla above): after every input
+# change, no lamp changes later than its reported worst case, and the worst case is
+# reached by at least one of the recorded changes of the full adder.
+timing_traces() {
+    uv run --frozen python -m harness.design timing-traces $DESIGNS
+}
+
+echo "stage 7: timing analysis"
+run timing-tight        timing_tight
+run build-deterministic build_deterministic
+if [ $VANILLA = 1 ]; then
+    run timing-traces       timing_traces
+fi
+
 # ---------------------------------------------------------------- summary
 
 echo
