@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use crate::geom::Pos;
 use crate::netlist::Netlist;
-use crate::tile::{Edge, HEIGHT, Library, PITCH, Tile};
+use crate::tile::{Edge, HEIGHT, Kind, Library, PITCH, Variant};
 use crate::world::World;
 
 /// What occupies one grid position.
@@ -35,13 +35,15 @@ impl Placed {
         }
     }
 
-    fn tile<'a>(&self, library: &'a Library) -> &'a Tile {
-        match self {
-            Placed::Input { .. } => &library.input,
-            Placed::Output { .. } => &library.output,
-            Placed::Wire { .. } => &library.wire,
-            Placed::Gate { .. } => &library.nor,
-        }
+    /// The tile variant this placement uses.
+    pub fn variant(&self) -> Variant {
+        let kind = match self {
+            Placed::Input { .. } => Kind::Input,
+            Placed::Output { .. } => Kind::Output,
+            Placed::Wire { .. } => Kind::Wire,
+            Placed::Gate { .. } => Kind::Nor,
+        };
+        Variant::new(kind, &self.edges())
     }
 }
 
@@ -100,8 +102,9 @@ impl Layout {
         for (&(col, row), placed) in &self.tiles {
             let origin = Pos::new(col * PITCH, 0, row * PITCH);
             let at = |p: Pos| Pos::new(origin.x + p.x, origin.y + p.y, origin.z + p.z);
-            let tile = placed.tile(library);
-            for (pos, block) in tile.blocks(&placed.edges()) {
+            let variant = placed.variant();
+            let tile = variant.tile(library);
+            for (pos, block) in variant.blocks(library) {
                 world.set(at(pos), block);
             }
             match placed {

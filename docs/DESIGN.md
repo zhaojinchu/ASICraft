@@ -24,9 +24,10 @@ The staged build plan and its status are in `PLAN.md`. Decisions made after this
 | Extractor / circuit graph | Stage 2 | Stage 3, with the layout-versus-netlist check that uses it | The simulator no longer needs it |
 | Where Yosys runs | The PyPI build natively, the npm build in the browser | **The npm build everywhere**, under Node on your machine (`synth/yosys.mjs`) | Stage 3 found that technology mapping (ABC) silently kills the PyPI build under its runtime. The npm build is the one the browser uses anyway |
 | Cell library | NOT, NOR, OR, AND, BUF, DFF | `NOT`, `NOR2`, `NOR3` (one NOR tile with one to three inputs) plus `BUF` | ABC refuses a library without a buffer. `BUF` is priced so it is never preferred, and a buffer in a netlist becomes plain wire |
-| Tile grid | "Pick P and H after building NOR3, crossing and DFF" | Provisionally **5 × 5 blocks, 4 high**, glass floor, ports at edge midpoints at y = 1, gates take inputs on W/N/S and drive E (`cells/README.md`) | 5 is the smallest pitch at which one wire can bridge another inside a tile. Stage 5 confirms or changes it |
+| Tile grid | "Pick P and H after building NOR3, crossing and DFF" | **5 × 5 blocks, 4 high**, glass floor, ports at edge midpoints at y = 1, gates take inputs on W/N/S and drive E (`cells/README.md`). Fixed in stage 5 | 5 is the smallest pitch at which one wire can bridge another inside a tile; the crossing tile exists and works in the game |
 | How the layout is read back | A rule-based extractor | **By asking the simulator**: raise one net, or switch one torch or input on, and see what it powers (`extract.rs`) | The extractor then cannot disagree with the rules that were checked against the game |
 | Driving inputs | Levers | The lever sits on a stone block; tests and the playground swap that block for a redstone block | A command that changes a lever's state powers nothing (stage 1) |
+| Tile contract check | "Prove it in the harness exhaustively once per library change" (§4.2) | **Static, from the blocks**: every pair of tile variants side by side and random 2×2 groups are read back with the extractor, and any connection between tiles other than through matched ports is an error (`tiletest.rs`). The game runs every variant's fixture and random groups as well | The extractor uses the simulator's rules, which the game checked; the static check runs in seconds for all 3,442 groups |
 
 ---
 
@@ -494,7 +495,7 @@ The `$dlatch` bug alone is a reason to make "no latches in the netlist" a **hard
 ## 10. Open decisions
 
 1. **Which Minecraft version to pin.** I recommend **26.3**, with Litematica 0.29.1, the vanilla 26.3 server jar and Java 25. MCHPRS's 1.20.4 doesn't constrain this, because it's no longer in the correctness loop. Bump the version deliberately, and only after re-running the tile-library vanilla traces.
-2. **Tile pitch P and plane height H.** Decide after you've built NOR3, Cross and DFF in-game. Don't guess.
+2. **Tile pitch P and plane height H.** Decided in stage 5: 5 × 5, 4 high. The DFF (stage 8) has to fit that; if it can't, it becomes a two-tile cell rather than a larger pitch.
 3. **Comparators and copper bulbs.** I recommend **no** for v1. Comparators make strength analog, which complicates extraction and legality. A waxed copper bulb plus a comparator is a T flip-flop that toggles in 0 gt plus the comparator's 2 gt, and it can't burn out. That's tempting for counters, but it's a T-FF, not a D-FF, and redpiler and `rilc` can't model it, so you'd lose the second extractor. Revisit both later, for XOR, ROM and counter density.
 4. **Rust.** If you're not willing to write Rust, use C++20, not Python (§5).
 5. **Which DFF design.** Master/slave repeater-lock, or a pulse-latch. Build both in-game and characterize both, then pick the one with the larger hold margin, not the smaller footprint.

@@ -11,7 +11,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | 2 | Simulator, part 1 | **done** 2026-10-05 | Block-level simulator matches all 417 recorded traces (36 mechanics, 381 random); structure files load in the game |
 | 3 | First circuit: one NOR gate | **done** 2026-10-05 | `not1`, `nor2`, `nor3` go from SystemVerilog to working circuits in the game; every check from the plan passes |
 | 4 | Simulator, part 2 | **done** 2026-10-05 | Repeaters, locking and tick priorities; all 60 mechanics traces and both random corpora (764 traces) match |
-| 5 | Full combinational tile set | not started | |
+| 5 | Full combinational tile set | **done** 2026-10-05 | Eight tiles, 39 variants; all hold in the game and match the simulator; the tile contract holds for all 3,442 pairs and groups checked |
 | 6 | Placement and routing | not started | |
 | 7 | Timing analysis | not started | |
 | 8 | Flip-flop characterization | not started | |
@@ -129,6 +129,23 @@ Findings and surprises from each stage go here, newest last.
 **Also:** the Rust code now has a `rustfmt.toml` (120 columns, fewer forced line breaks); the one-time reformat touched every file.
 
 **Not in this stage:** reading repeaters back out of a layout for the netlist check. That comes with the repeater tile in stage 5.
+
+### Stage 5 (2026-10-05)
+
+**Built:** the full combinational tile set (`cells/`): `wire` (any two to four edges: straight, turn, fan-out), `cross`, `repeater` (any of four orientations, settings 1 to 4), `nor` (one to three inputs), `tie_high`, `tie_low`, plus `input` and `output`. Tiles can be placed rotated. Three new checks: a fixture per tile variant with drivers and readers on its ports and expectations from its description (`redfab tile-fixtures`, `check-fixtures`); the static tile-contract check over every pair of variants and random 2×2 groups (`redfab tile-adjacency`); and `harness/tiles.py`, which runs every fixture and random tile groups in the game. `harness/show.py tiles` places the whole library in a row to look at.
+
+**Results:**
+
+- The tile size is fixed at 5 × 5 × 4: the crossing fits, and nothing smaller could hold it.
+- All 39 variants and 24 random groups hold in the game at three placements in both modes (126 traces), and every trace matches the simulator.
+- The static contract check passes for all 3,442 pairs and groups.
+
+**Two defects caught before the game saw them:**
+
+1. The static check flagged the **input tile**: its lever's block sat on the tile border, so as a redstone block it would have powered a neighbouring tile's wire. The block moved one cell in, and the border rule no longer makes an exception for it.
+2. The simulator flagged the **crossing**: the north-south wire climbed onto its bridge but could not come down, because a signal only steps down onto a block that conducts and the steps stood on glass. The steps are stone now; the west-east wire beside them is unaffected because a wire reads neither weakly powered blocks nor, with a conducting block above it, anything diagonal.
+
+**Not in this stage:** reading repeaters and constants back out of a layout for the netlist check, and using the new tiles in a build. Both come with placement and routing in stage 6.
 
 ---
 

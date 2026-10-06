@@ -15,6 +15,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("check-traces") => check_traces(&args[1..]),
+        Some("tile-adjacency") => tile_adjacency_command(),
+        Some("tile-fixtures") => tile_fixtures_command(&args[1..]),
+        Some("check-fixtures") => check_fixtures_command(&args[1..]),
         Some("build") => build_command(&args[1..]),
         Some("lvs") => lvs_command(&args[1..]),
         Some("simulate") => simulate_command(&args[1..]),
@@ -169,6 +172,93 @@ fn structure_pattern_command(args: &[String]) -> Result<bool, String> {
     }
     fs::write(out, redfab_core::structure::structure_file(&world)).map_err(|e| format!("{out}: {e}"))?;
     Ok(true)
+}
+
+/// `redfab tile-adjacency`: every pair of tile variants side by side, and 400
+/// random 2×2 groups, must interact only through matched ports.
+fn tile_adjacency_command() -> Result<bool, String> {
+    let library = redfab_core::tile::Library::builtin()?;
+    let (checked, problems) = redfab_core::tiletest::check_all_adjacency(&library, 400, 1);
+    for problem in &problems {
+        println!("{problem}");
+    }
+    println!("{checked} tile groups checked, {} problems", problems.len());
+    Ok(problems.is_empty())
+}
+
+/// `redfab tile-fixtures DIR [--groups N] [--seed S]`: writes a fixture for every
+/// tile variant, plus N random tile groups (pairs and 2×2) for the game.
+fn tile_fixtures_command(args: &[String]) -> Result<bool, String> {
+    let mut dir = None;
+    let mut groups = 24;
+    let mut seed = 1;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--groups" => groups = it.next().and_then(|n| n.parse().ok()).ok_or("--groups needs a number")?,
+            "--seed" => seed = it.next().and_then(|n| n.parse().ok()).ok_or("--seed needs a number")?,
+            other => dir = Some(PathBuf::from(other)),
+        }
+    }
+    let dir = dir.ok_or("usage: redfab tile-fixtures DIR [--groups N] [--seed S]")?;
+    fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let library = redfab_core::tile::Library::builtin()?;
+    let mut count = 0;
+    for (name, fixture) in redfab_core::tiletest::all_variant_fixtures(&library) {
+        fs::write(
+            dir.join(format!("{name}.fixture.json")),
+            serde_json::to_string(&fixture).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        count += 1;
+    }
+    let mut rng = redfab_core::tiletest::Rng::new(seed);
+    for i in 0..groups {
+        let (cols, rows) = [(2, 1), (1, 2), (2, 2)][i % 3];
+        let name = format!("group_{seed}_{i:02}");
+        let fixture = redfab_core::tiletest::group_fixture(&name, cols, rows, &mut rng, &library);
+        fs::write(
+            dir.join(format!("{name}.fixture.json")),
+            serde_json::to_string(&fixture).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        count += 1;
+    }
+    println!("wrote {count} fixtures to {}", dir.display());
+    Ok(true)
+}
+
+/// `redfab check-fixtures DIR`: runs every fixture in DIR in the simulator and
+/// checks its expectations. Writes the simulated traces next to the fixtures.
+fn check_fixtures_command(args: &[String]) -> Result<bool, String> {
+    let [dir] = args else {
+        return Err("usage: redfab check-fixtures DIR".into());
+    };
+    let dir = Path::new(dir);
+    let mut paths: Vec<PathBuf> = fs::read_dir(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.to_string_lossy().ends_with(".fixture.json"))
+        .collect();
+    paths.sort();
+    let (mut passed, mut failed) = (0, 0);
+    for path in &paths {
+        let name = path.file_name().unwrap_or_default().to_string_lossy().replace(".fixture.json", "");
+        let run = redfab_core::trace::run_fixture(&read(path)?).map_err(|e| format!("{name}: {e}"))?;
+        fs::write(
+            dir.join(format!("{name}.sim.trace.json")),
+            serde_json::to_string(&run.trace).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        if run.failures.is_empty() {
+            passed += 1;
+        } else {
+            failed += 1;
+            println!("  FAIL  {name}: {}", run.failures.join("; "));
+        }
+    }
+    println!("{}: {passed} fixtures meet their expectations in the simulator, {failed} do not", dir.display());
+    Ok(failed == 0 && passed > 0)
 }
 
 /// The Yosys commands that map a design to the tile library.
