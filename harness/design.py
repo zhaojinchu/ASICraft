@@ -5,6 +5,7 @@
     python -m harness.design vanilla NAME...          the game: function, traces vs simulator, placement
     python -m harness.design vanilla-negative NAME    broken layouts must fail in the game
     python -m harness.design exhaustive NAME          the game: every input combination, outputs only
+    python -m harness.design timing-traces NAME...    recorded game traces vs the design's timing report
 
 Build the designs first with `redfab build designs/<name>/top.sv -o build/designs/<name>`.
 """
@@ -26,7 +27,7 @@ from .place_template import place, read_box
 from .runner import Runner, layout
 from .server import ROOT, VanillaServer, cargo
 from .session import Session
-from .trace import Expectation, Fixture, first_trace_difference
+from .trace import Expectation, Fixture, Trace, first_trace_difference
 
 DESIGNS = ROOT / "build" / "designs"
 MAX_INPUT_BITS = 10  # all combinations are tried up to this many input bits
@@ -378,9 +379,65 @@ def cmd_exhaustive(name: str) -> int:
     return 1 if failures else 0
 
 
+def lamp_changes(fixture: Fixture, trace: Trace, design: dict) -> dict[str, list[int]]:
+    """For each output, how many ticks after the preceding input change every change
+    of its lamp happened in the recorded trace."""
+    lamps = {parse_pos(pin["lamp"]): pin["name"] for pin in design["outputs"]}
+    stimuli = sorted(tick for tick, _ in fixture.events)
+    changes: dict[str, list[int]] = {name: [] for name in lamps.values()}
+    for tick in sorted(trace.entries):
+        before = [t for t in stimuli if t <= tick]
+        if not before:
+            continue
+        for pos in trace.entries[tick].changes:
+            if pos in lamps:
+                changes[lamps[pos]].append(tick - before[-1])
+    return changes
+
+
+def cmd_timing_traces(names: list[str]) -> int:
+    """The traces design-vanilla recorded, against each design's timing report: no lamp
+    changes later than its worst case or earlier than its best case, and the full
+    adder reaches its worst case in the game."""
+    game_dir = DESIGNS / "_game"
+    failures: list[str] = []
+    reached = False
+    for name in names:
+        design, _ = load(name)
+        timing = design.get("timing")
+        if timing is None:
+            failures.append(f"{name}: design.json has no timing report")
+            continue
+        fixture = Fixture.from_json(json.loads((game_dir / f"{name}.fixture.json").read_text()))
+        for mode in MODES:
+            path = game_dir / f"{name}.{mode}.trace.json"
+            if not path.exists():
+                failures.append(f"{name}: no recorded trace {path.name}; run `design vanilla` first")
+                continue
+            trace = Trace.from_json(json.loads(path.read_text()), fixture.ticks)
+            for output, delays in lamp_changes(fixture, trace, design).items():
+                worst, best = timing["outputs"][output]["max"], timing["outputs"][output]["min"]
+                late = [d for d in delays if d > worst]
+                early = [d for d in delays if d < best]
+                if late:
+                    failures.append(f"{name} [{mode}]: {output} changed {max(late)} ticks after an input change, "
+                                    f"later than its reported worst case of {worst}")
+                if early:
+                    failures.append(f"{name} [{mode}]: {output} changed {min(early)} ticks after an input change, "
+                                    f"earlier than its reported best case of {best}")
+                if name == "fa1" and worst in delays:
+                    reached = True
+            print(f"{name} [{mode}]: lamp changes stay within the reported timing")
+    if "fa1" in names and not reached:
+        failures.append("fa1: no recorded lamp change reaches the reported worst case")
+    for failure in failures:
+        print("FAIL: " + failure)
+    return 1 if failures else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("action", choices=["sim", "lvs-negative", "vanilla", "vanilla-negative", "exhaustive"])
+    ap.add_argument("action", choices=["sim", "lvs-negative", "vanilla", "vanilla-negative", "exhaustive", "timing-traces"])
     ap.add_argument("names", nargs="+")
     args = ap.parse_args(argv)
     if args.action == "sim":
@@ -391,6 +448,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_vanilla(args.names)
     if args.action == "exhaustive":
         return cmd_exhaustive(args.names[0])
+    if args.action == "timing-traces":
+        return cmd_timing_traces(args.names)
     return cmd_vanilla_negative(args.names[0])
 
 
