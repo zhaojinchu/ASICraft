@@ -123,6 +123,8 @@ class Runner:
     def __init__(self, session: Session, source: dict):
         self.session = session
         self.source = source
+        # On a modded server: the observer's stream, compared with the snapshots.
+        self.stream_problems: list[str] = []
 
     def run(self, plots: list[Plot], log=print, settle_ticks: int = SETTLE_TICKS,
             allow_pending_at_start: bool = False) -> dict[tuple[str, str], Trace]:
@@ -175,9 +177,15 @@ class Runner:
                 session.step(settle_ticks)
         log(f"placed {len(plots)} plots in {time.monotonic() - t0:.1f}s")
 
+        # On a modded server, listen to the observer's stream from here on and check
+        # it against every snapshot: the stream must say the same as the disk.
+        stream = StreamCheck(session, boxes) if session.server.modded else None
+
         # --- tick 0 (stimuli listed for tick 0 are applied before it is recorded)
         self._apply_events(plots, 0)
         blocks, pending = self._snapshot(boxes)
+        if stream:
+            stream.check(blocks)
         traces: dict[tuple[str, str], Trace] = {}
         for plot in plots:
             states, pend = self._extract(plot, blocks, pending)
@@ -197,6 +205,8 @@ class Runner:
             session.step(1)
             self._apply_events(plots, tick)
             blocks, pending = self._snapshot(boxes)
+            if stream:
+                stream.check(blocks)
             for plot in plots:
                 key = (plot.fixture.name, plot.variant)
                 if tick <= plot.fixture.ticks and key in traces:
@@ -206,6 +216,10 @@ class Runner:
                 log(f"  tick {tick}/{total} ({time.monotonic() - t0:.1f}s)")
         log(f"ran {total} ticks in {time.monotonic() - t0:.1f}s, {session.commands_sent} commands so far, "
             f"{session.stale_snapshots} reads repeated for a save still in progress")
+        if stream:
+            self.stream_problems = stream.finish()
+            log(f"the observer's stream agreed with {stream.compared} snapshots" if not self.stream_problems
+                else f"the observer's stream disagreed: {self.stream_problems[0]}")
         return traces
 
     def _snapshot(self, boxes: list[Box]):
@@ -244,3 +258,92 @@ class Runner:
         ]
         pend.sort(key=lambda t: (t.pos, t.block))
         return states, pend
+
+
+class StreamCheck:
+    """Reads the observer mod's stream in a thread and compares the state it
+    implies, inside the boxes, with each snapshot the runner reads from disk.
+
+    The first snapshot is the base; the stream's changes received after it, up
+    to the tick of each later snapshot, are laid over it. A change the base
+    already holds is harmless to lay over it again, so the exact moment the
+    stream is first read does not matter."""
+
+    def __init__(self, session: Session, boxes: list[Box]):
+        import threading
+        from .observe import Observer
+
+        self.boxes = boxes
+        self.received: list[tuple[int, list]] = []
+        self.lock = threading.Lock()
+        self.problems: list[str] = []
+        self.compared = 0
+        self.session = session
+        self.base: dict[Pos, BlockState] | None = None
+        self.base_index = 0
+        self.observer = Observer(session.server.observer_port).__enter__()
+        self.thread = threading.Thread(target=self._pump, daemon=True)
+        self.thread.start()
+
+    def _pump(self) -> None:
+        try:
+            while True:
+                tick, changes = self.observer.next()
+                with self.lock:
+                    self.received.append((tick, changes))
+        except Exception:  # the stream ends when the server stops
+            pass
+
+    def _inside(self, pos: Pos) -> bool:
+        return any(_in_box(pos, box) for box in self.boxes)
+
+    def _state_at(self, tick: int) -> dict[Pos, BlockState]:
+        state = dict(self.base)
+        with self.lock:
+            received = self.received[self.base_index:]
+        for t, changes in received:
+            if t > tick:
+                break
+            for pos, text in changes:
+                if self._inside(pos):
+                    parsed = BlockState.parse(text)
+                    if parsed.is_air:
+                        state.pop(pos, None)
+                    else:
+                        state[pos] = parsed
+        return state
+
+    def check(self, snapshot: dict[Pos, BlockState]) -> None:
+        tick = self.session.gametime()
+        disk = {pos: st for pos, st in snapshot.items() if self._inside(pos)}
+        if self.base is None:
+            self.base = disk
+            with self.lock:
+                self.base_index = len(self.received)
+            return
+        # The stream flushes at the end of every server tick; wait for this one.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with self.lock:
+                reached = bool(self.received) and self.received[-1][0] >= tick
+            if reached:
+                break
+            time.sleep(0.005)
+        else:
+            self.problems.append(f"tick {tick}: the stream did not reach it")
+            return
+        streamed = self._state_at(tick)
+        self.compared += 1
+        if streamed != disk:
+            diff = [(pos, str(disk.get(pos)), str(streamed.get(pos)))
+                    for pos in sorted(set(disk) | set(streamed)) if disk.get(pos) != streamed.get(pos)]
+            self.problems.append(f"tick {tick}: the stream and the disk differ at {len(diff)} blocks, e.g. {diff[:2]} (disk, stream)")
+
+    def finish(self) -> list[str]:
+        self.observer.__exit__(None, None, None)
+        return self.problems
+
+
+def _in_box(pos: Pos, box: Box) -> bool:
+    (x0, y0, z0), (x1, y1, z1) = box
+    return x0 <= pos[0] <= x1 and y0 <= pos[1] <= y1 and z0 <= pos[2] <= z1

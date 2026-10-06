@@ -460,6 +460,27 @@ echo "stage 10: browser playground"
 run playground-pipeline playground_pipeline
 run playground-headless playground_headless
 
+# ---------------------------------------------------------------- stage 11
+
+# The observer mod (mod/) compiles against the server, Fabric Loader and Mixin with
+# javac alone: Minecraft 26.3 ships unobfuscated.
+mod_builds() {
+    tools/build_mod.sh
+}
+
+# On the Fabric server with the mod: every mechanics recording from stage 1 replays
+# exactly, in both modes and at three placements (the mod changes nothing), and the
+# mod's stream agrees with every snapshot read from disk, tick for tick.
+mechanics_modded() {
+    uv run --frozen python -m harness.mechanics verify --modded
+}
+
+echo "stage 11: server mod and live stream"
+run mod-builds          mod_builds
+if [ $VANILLA = 1 ]; then
+    run mechanics-modded    mechanics_modded
+fi
+
 # ---------------------------------------------------------------- summary
 
 echo

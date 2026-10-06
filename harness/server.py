@@ -57,13 +57,17 @@ class VanillaServer:
     """
 
     def __init__(self, name: str, properties: dict[str, str] | None = None, *,
-                 empty_world: bool = True, redstone_experiments: bool = False):
+                 empty_world: bool = True, redstone_experiments: bool = False, modded: bool = False):
         """`empty_world` makes a void superflat world (nothing but the blocks we place).
         `redstone_experiments` enables Mojang's experimental redstone data pack,
-        which must be chosen when the world is created."""
+        which must be chosen when the world is created. `modded` runs the server
+        through Fabric Loader with the observer mod (build/mod/redfab-observer.jar),
+        which streams block changes on `observer_port`."""
         pins = read_versions()
         self.redstone_experiments = redstone_experiments
         self.empty_world = empty_world
+        self.modded = modded
+        self.observer_port = _free_port() if modded else 0
         self.mc_version = pins["MC_VERSION"]
         self.run_dir = ROOT / "build" / "mc" / name
         self.java = ROOT / ".tools" / "jdk" / "Contents" / "Home" / "bin" / "java"
@@ -113,6 +117,23 @@ class VanillaServer:
             "".join(f"{key}={value}\n" for key, value in properties.items())
         )
 
+        if self.modded:
+            # Fabric's launcher expects its libraries beside it; the installed set is
+            # copied from .tools/fabric, and the mod goes into mods/.
+            fabric = ROOT / ".tools" / "fabric"
+            for item in ("libraries", ".fabric", "versions"):
+                shutil.copytree(fabric / item, self.run_dir / item, symlinks=True)
+            shutil.copy(fabric / "fabric-server-launch.jar", self.run_dir)
+            (self.run_dir / "fabric-server-launcher.properties").write_text(f"serverJar={self.jar}\n")
+            (self.run_dir / "mods").mkdir()
+            mod = ROOT / "build" / "mod" / "redfab-observer.jar"
+            if not mod.exists():
+                raise RuntimeError(f"{mod} is missing; run tools/build_mod.sh")
+            shutil.copy(mod, self.run_dir / "mods")
+            launch = [f"-Dredfab.observer.port={self.observer_port}", "-jar", str(self.run_dir / "fabric-server-launch.jar")]
+        else:
+            launch = ["-jar", str(self.jar)]
+
         started = time.monotonic()
         log = open(self.run_dir / "server.log", "wb")
         self._proc = subprocess.Popen(
@@ -124,8 +145,7 @@ class VanillaServer:
                 f"-DbundlerRepoDir={ROOT / '.tools' / 'mc' / 'bundle'}",
                 # Marker so stray processes can be found by run directory.
                 f"-Dredfab.run={self.run_dir}",
-                "-jar",
-                str(self.jar),
+                *launch,
                 "--nogui",
             ],
             cwd=self.run_dir,
