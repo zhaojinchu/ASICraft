@@ -357,6 +357,29 @@ if [ $VANILLA = 1 ]; then
     run timing-traces       timing_traces
 fi
 
+# ---------------------------------------------------------------- stage 8
+
+# Each flip-flop candidate has sweep fixtures among the tile fixtures: the data edge
+# moved one tick at a time against the clock edge, at several clock pulse widths, with
+# the clock also pulsed too briefly. The game runs them with the other tile fixtures
+# (tiles-vanilla), and their traces must equal the simulator's. Here, the table each
+# sweep gives in the simulator is turned into setup, hold, clock-to-output and
+# minimum pulse width, which must be what the tile's description says.
+dff_characterized() {
+    $REDFAB characterize build/tiles
+}
+
+# The chosen flip-flop must not depend on same-tick ordering: its sweep table is the
+# same under shuffled tick and update orders, and the capture window keeps at least one
+# redstone tick (2 game ticks) of margin from any same-tick coincidence.
+dff_margin() {
+    $REDFAB characterize build/tiles --shuffles 20 --margin 2 --chosen dff
+}
+
+echo "stage 8: flip-flop characterization"
+run dff-characterized   dff_characterized
+run dff-margin          dff_margin
+
 # ---------------------------------------------------------------- summary
 
 echo
