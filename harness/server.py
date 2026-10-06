@@ -18,6 +18,15 @@ from .rcon import Rcon, RconError
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def cargo() -> str:
+    """The cargo executable: on PATH, or rustup's default location."""
+    found = shutil.which("cargo")
+    if found:
+        return found
+    home = Path.home() / ".cargo" / "bin" / "cargo"
+    return str(home) if home.exists() else "cargo"
+
+
 def read_versions() -> dict[str, str]:
     """Parse versions.env (KEY=value lines)."""
     pins = {}

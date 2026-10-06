@@ -78,6 +78,7 @@ name = "redfab-cli"
 version = "0.0.0"
 dependencies = [
  "redfab-core",
+ "serde_json",
 ]
 
 [[package]]

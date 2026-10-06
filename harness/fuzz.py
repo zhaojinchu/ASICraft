@@ -25,7 +25,7 @@ from pathlib import Path
 
 from .mechanics import AIR, D, G, L, MODES, RB, S, T, Build, source_for
 from .runner import Runner, layout
-from .server import ROOT, VanillaServer
+from .server import ROOT, VanillaServer, cargo
 from .session import Session
 from .trace import Fixture, Trace, first_trace_difference
 
@@ -289,7 +289,7 @@ def main(argv: list[str] | None = None) -> int:
         (out / "STATS.json").write_text(json.dumps({"seed": seed, **stats}, indent=1) + "\n")
         return 0
 
-    result = subprocess.run(["cargo", "run", "-q", "-p", "redfab-cli", "--", "check-traces", str(out)],
+    result = subprocess.run([cargo(), "run", "-q", "-p", "redfab-cli", "--", "check-traces", str(out)],
                             cwd=ROOT, capture_output=True, text=True)
     print(result.stdout.strip())
     if result.returncode != 0:

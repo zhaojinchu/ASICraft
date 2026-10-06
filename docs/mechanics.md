@@ -107,6 +107,15 @@ Two game behaviours the editing stimuli exposed:
 - A wire reshaped by a neighbour's removal can point into a block for a moment while it still holds its old power. A lamp that hears an update in that moment lights, then goes out 4 ticks later. Whether it hears one depends on delivery order.
 - `setblock` of dust with no block underneath places it anyway, as a dot. redfab never emits unsupported dust or torches, and the simulator refuses them.
 
+## Tiles (stage 5)
+
+Every tile variant was run in the game with drivers and readers on its ports (`redfab tile-fixtures`), at three placements in both modes, and the recordings matched the simulator. Two things the tiles rely on that were measured along the way:
+
+| Fact | Where it matters | Measured |
+|---|---|---|
+| A signal steps down onto a lower wire only if the block beside the lower wire (the upper wire's support) conducts | the crossing's bridge | Glass steps: no signal; stone steps: signal. Consistent with `glass_down`/`stone_down` in stage 1. |
+| A repeater works on glass and is locked at placement if a powered repeater already points into its side | repeater tile, latches | yes |
+
 ## Still unmeasured
 
 - Setup, hold and clock-to-output of the flip-flop designs (stage 8).

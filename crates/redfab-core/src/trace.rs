@@ -16,8 +16,14 @@ pub struct FixtureFile {
     pub name: String,
     pub size: [i32; 3],
     #[serde(default)]
+    pub placement: String,
+    #[serde(default)]
+    pub blocks: BTreeMap<String, String>,
+    #[serde(default)]
     pub events: Vec<EventFile>,
     pub ticks: u32,
+    #[serde(default)]
+    pub expect: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -253,6 +259,135 @@ fn permutations(items: &[usize], limit: usize) -> Vec<Vec<usize>> {
         }
     }
     out
+}
+
+/// What `{"powered": true}` in an expectation means for each block.
+fn is_powered(block: Block) -> bool {
+    match block {
+        Block::Wire(w) => w.power > 0,
+        Block::Lamp { lit } | Block::Torch { lit } | Block::WallTorch { lit, .. } => lit,
+        Block::Repeater { powered, .. } | Block::Lever { powered, .. } => powered,
+        Block::RedstoneBlock => true,
+        _ => false,
+    }
+}
+
+/// The result of running a fixture in the simulator.
+pub struct FixtureRun {
+    /// The simulated trace, in the trace file format.
+    pub trace: serde_json::Value,
+    /// Expectations the simulation did not meet.
+    pub failures: Vec<String>,
+}
+
+/// Builds a fixture's blocks, lets them settle as the game harness would, then
+/// applies its events tick by tick and checks its expectations.
+pub fn run_fixture(fixture_json: &str) -> Result<FixtureRun, String> {
+    let fixture: FixtureFile = serde_json::from_str(fixture_json).map_err(|e| format!("fixture: {e}"))?;
+    let mut world = World::new((fixture.size[0], fixture.size[1], fixture.size[2]));
+    for (pos, state) in &fixture.blocks {
+        world.set(pos.parse()?, state.parse()?);
+    }
+    let mut sim = Sim::new(world);
+    sim.check_all_supported()?;
+    if fixture.placement != "strict" {
+        sim.fix_wire_shapes();
+        sim.poke_all();
+        sim.settle(200)?;
+    }
+    let mut events: BTreeMap<u32, Vec<(Pos, Block)>> = BTreeMap::new();
+    for event in &fixture.events {
+        for (pos, state) in &event.set {
+            events.entry(event.tick).or_default().push((pos.parse()?, state.parse()?));
+        }
+    }
+    for list in events.values_mut() {
+        list.sort_by_key(|(pos, _)| event_order(*pos));
+    }
+    for (pos, block) in events.get(&0).into_iter().flatten() {
+        sim.set_block(*pos, *block, false)?;
+    }
+
+    let mut states: Vec<BTreeMap<Pos, Block>> = vec![sim.world().iter().collect()];
+    let mut pendings = vec![sim.pending()];
+    for tick in 1..=fixture.ticks {
+        sim.step();
+        for (pos, block) in events.get(&tick).into_iter().flatten() {
+            sim.set_block(*pos, *block, false)?;
+        }
+        states.push(sim.world().iter().collect());
+        pendings.push(sim.pending());
+    }
+
+    let mut failures = Vec::new();
+    for expectation in &fixture.expect {
+        let tick = expectation["tick"].as_u64().or_else(|| expectation["from"].as_u64()).unwrap_or(0) as usize;
+        if tick >= states.len() {
+            failures.push(format!("expectation at tick {tick} is beyond the fixture's {} ticks", fixture.ticks));
+            continue;
+        }
+        if expectation["stable"].as_bool() == Some(true) {
+            for t in tick..states.len() {
+                if !pendings[t].is_empty() || (t > tick && states[t] != states[t - 1]) {
+                    failures
+                        .push(format!("expected stable from tick {tick}, but tick {t} changed or has pending ticks"));
+                    break;
+                }
+            }
+            continue;
+        }
+        let pos: Pos = expectation["pos"].as_str().ok_or("expectation without pos")?.parse()?;
+        let block = states[tick].get(&pos).copied().unwrap_or(Block::Air);
+        if let Some(powered) = expectation["powered"].as_bool() {
+            if is_powered(block) != powered {
+                failures.push(format!(
+                    "tick {tick} at {pos}: expected {}, got {block}",
+                    if powered { "powered" } else { "unpowered" }
+                ));
+            }
+        } else if let Some(want) = expectation["state"].as_str() {
+            let want: crate::block::StateText = want.parse()?;
+            let got = block.properties();
+            let same = block.name() == want.name
+                && want.props.iter().all(|(k, v)| got.iter().any(|(gk, gv)| gk == k && gv == v));
+            if !same {
+                failures.push(format!("tick {tick} at {pos}: expected {}, got {block}", expectation["state"]));
+            }
+        }
+    }
+
+    let mut ticks = Vec::new();
+    for t in 1..states.len() {
+        let mut changes = BTreeMap::new();
+        for (pos, block) in &states[t] {
+            if states[t - 1].get(pos) != Some(block) {
+                changes.insert(pos.to_string(), block.to_string());
+            }
+        }
+        for pos in states[t - 1].keys() {
+            if !states[t].contains_key(pos) {
+                changes.insert(pos.to_string(), "minecraft:air".to_string());
+            }
+        }
+        if changes.is_empty() && pendings[t].is_empty() {
+            continue;
+        }
+        let pending: Vec<_> = pendings[t]
+            .iter()
+            .map(|p| serde_json::json!({"pos": p.pos.to_string(), "block": p.block, "delay": p.delay, "priority": p.priority}))
+            .collect();
+        ticks.push(serde_json::json!({"tick": t, "changes": changes, "pending": pending}));
+    }
+    let trace = serde_json::json!({
+        "format": "redfab-trace/1",
+        "fixture": fixture.name,
+        "source": {"kind": "sim"},
+        "size": fixture.size,
+        "initial": states[0].iter().map(|(p, b)| (p.to_string(), b.to_string())).collect::<BTreeMap<_, _>>(),
+        "pending0": pendings[0].iter().map(|p| serde_json::json!({"pos": p.pos.to_string(), "block": p.block, "delay": p.delay, "priority": p.priority})).collect::<Vec<_>>(),
+        "ticks": ticks,
+    });
+    Ok(FixtureRun { trace, failures })
 }
 
 /// Stimuli that share a tick are applied in this order: by height, then x, then z.

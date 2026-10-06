@@ -33,24 +33,42 @@ def diff_states(before: States, after: States) -> States:
     return changes
 
 
+def is_powered(state: BlockState) -> bool:
+    """What `{"powered": true}` means for each kind of block."""
+    name = state.name
+    if name == "minecraft:redstone_wire":
+        return int(state.get("power", "0")) > 0
+    if name in ("minecraft:redstone_lamp", "minecraft:redstone_torch", "minecraft:redstone_wall_torch"):
+        return state.get("lit") == "true"
+    if name in ("minecraft:repeater", "minecraft:lever"):
+        return state.get("powered") == "true"
+    return name == "minecraft:redstone_block"
+
+
 @dataclass(frozen=True)
 class Expectation:
-    """Either a block state at a tick, or 'stable from tick t to the end'."""
+    """A block state at a tick, whether a block is powered at a tick, or
+    'stable from tick t to the end'."""
 
     tick: int
     pos: Pos | None = None
     state: BlockState | None = None
+    powered: bool | None = None
     stable: bool = False
 
     @classmethod
     def from_json(cls, data: dict) -> Expectation:
         if data.get("stable"):
             return cls(tick=int(data["from"]), stable=True)
+        if "powered" in data:
+            return cls(tick=int(data["tick"]), pos=parse_pos(data["pos"]), powered=bool(data["powered"]))
         return cls(tick=int(data["tick"]), pos=parse_pos(data["pos"]), state=BlockState.parse(data["state"]))
 
     def to_json(self) -> dict:
         if self.stable:
             return {"from": self.tick, "stable": True}
+        if self.powered is not None:
+            return {"tick": self.tick, "pos": format_pos(self.pos), "powered": self.powered}
         return {"tick": self.tick, "pos": format_pos(self.pos), "state": str(self.state)}
 
     def check(self, trace: Trace) -> str | None:
@@ -65,6 +83,11 @@ class Expectation:
             del baseline
             return None
         actual = trace.state_at(self.tick).get(self.pos, AIR)
+        if self.powered is not None:
+            if is_powered(actual) != self.powered:
+                want = "powered" if self.powered else "unpowered"
+                return f"tick {self.tick} at {format_pos(self.pos)}: expected {want}, got {actual}"
+            return None
         if not actual.matches(self.state):
             return f"tick {self.tick} at {format_pos(self.pos)}: expected {self.state}, got {actual}"
         return None

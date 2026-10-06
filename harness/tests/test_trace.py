@@ -65,6 +65,18 @@ def test_expectations_pass_and_fail():
     assert len(failures) == 2 and "tick 1" in failures[0]
 
 
+def test_powered_expectations():
+    trace = Trace.from_json(
+        {"format": "redfab-trace/1", "fixture": "t", "source": {"kind": "sim"}, "size": [1, 1, 1],
+         "initial": {"0,0,0": "minecraft:redstone_wire[east=side,north=none,power=0,south=none,west=side]"}, "pending0": [],
+         "ticks": [{"tick": 1, "changes": {"0,0,0": "minecraft:redstone_wire[east=side,north=none,power=7,south=none,west=side]"}}]},
+        ticks=2,
+    )
+    assert check_expectations(trace, [Expectation.from_json({"tick": 0, "pos": "0,0,0", "powered": False}),
+                                      Expectation.from_json({"tick": 1, "pos": "0,0,0", "powered": True})]) == []
+    assert len(check_expectations(trace, [Expectation.from_json({"tick": 1, "pos": "0,0,0", "powered": False})])) == 1
+
+
 def test_fixture_round_trip():
     fx = Fixture.from_json(
         {"format": "redfab-fixture/1", "name": "x", "doc": "d", "size": [1, 1, 1], "placement": "update",

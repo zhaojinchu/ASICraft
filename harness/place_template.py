@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 from .blockstate import BlockState, format_pos
-from .server import ROOT, VanillaServer
+from .server import ROOT, VanillaServer, cargo
 from .session import Session
 
 TRACES = [
@@ -31,7 +31,7 @@ Y = 64
 
 
 def redfab(*args: str) -> None:
-    subprocess.run(["cargo", "run", "-q", "-p", "redfab-cli", "--", *args], cwd=ROOT, check=True)
+    subprocess.run([cargo(), "run", "-q", "-p", "redfab-cli", "--", *args], cwd=ROOT, check=True)
 
 
 def read_box(session: Session, origin: tuple[int, int, int], size: tuple[int, int, int]) -> dict[str, str]:

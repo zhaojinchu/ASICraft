@@ -220,6 +220,27 @@ fn bool_name(b: bool) -> &'static str {
 }
 
 impl Block {
+    /// This block turned `quarter_turns` clockwise about the vertical axis
+    /// (north → east → south → west).
+    pub fn rotated(&self, quarter_turns: u8) -> Block {
+        let turn = |d: Dir| (0..quarter_turns % 4).fold(d, |d, _| d.clockwise());
+        match *self {
+            Block::Wire(w) => {
+                let sides = [w.north, w.east, w.south, w.west];
+                let shift = (quarter_turns % 4) as usize;
+                // side i moves to position (i + shift) mod 4 in the n, e, s, w cycle
+                let at = |i: usize| sides[(i + 4 - shift) % 4];
+                Block::Wire(Wire { power: w.power, north: at(0), east: at(1), south: at(2), west: at(3) })
+            }
+            Block::WallTorch { facing, lit } => Block::WallTorch { facing: turn(facing), lit },
+            Block::Repeater { facing, delay, locked, powered } => {
+                Block::Repeater { facing: turn(facing), delay, locked, powered }
+            }
+            Block::Lever { face, facing, powered } => Block::Lever { face, facing: turn(facing), powered },
+            other => other,
+        }
+    }
+
     /// Every property of this block's state with its value, sorted by name.
     pub fn properties(&self) -> Vec<(&'static str, String)> {
         match self {
@@ -390,6 +411,28 @@ mod tests {
         assert_eq!("redstone_torch".parse::<Block>().unwrap(), Block::Torch { lit: true });
         assert_eq!("minecraft:redstone_lamp".parse::<Block>().unwrap(), Block::Lamp { lit: false });
         assert_eq!("minecraft:redstone_wire".parse::<Block>().unwrap(), Block::Wire(Wire::DOT));
+    }
+
+    #[test]
+    fn rotation_turns_facings_and_wire_sides_clockwise() {
+        let turned = |s: &str, n: u8| s.parse::<Block>().unwrap().rotated(n).to_string();
+        assert_eq!(
+            turned("minecraft:repeater[facing=north]", 1),
+            "minecraft:repeater[delay=1,facing=east,locked=false,powered=false]"
+        );
+        assert_eq!(
+            turned("minecraft:redstone_wall_torch[facing=west]", 1),
+            "minecraft:redstone_wall_torch[facing=north,lit=true]"
+        );
+        assert_eq!(
+            turned("minecraft:redstone_wire[east=side,north=up]", 1),
+            "minecraft:redstone_wire[east=up,north=none,power=0,south=side,west=none]"
+        );
+        assert_eq!(
+            turned("minecraft:lever[face=floor,facing=south]", 2),
+            "minecraft:lever[face=floor,facing=north,powered=false]"
+        );
+        assert_eq!(turned("minecraft:stone", 3), "minecraft:stone");
     }
 
     #[test]
