@@ -32,6 +32,8 @@ pub struct Netlist {
     pub outputs: Vec<PortBit>,
     pub cells: Vec<Cell>,
     pub net_count: usize,
+    /// Nets that are constant 0 or 1 (at most one of each).
+    pub constants: Vec<(NetId, bool)>,
 }
 
 /// What drives a net.
@@ -39,21 +41,29 @@ pub struct Netlist {
 pub enum Driver {
     Input(usize),
     Cell(usize),
+    Const(bool),
 }
 
 impl Netlist {
     /// Reads module `top` from a Yosys JSON netlist.
     ///
-    /// Fails on anything the tile library cannot build: unknown cells, constant
-    /// nets, undriven or multiply driven nets. Buffers are dissolved into wire.
+    /// Fails on anything the tile library cannot build: unknown cells, undriven
+    /// or multiply driven nets. Buffers are dissolved into wire; constant bits
+    /// become constant nets.
     pub fn from_yosys_json(json: &str, top: &str, library: &Library) -> Result<Netlist, String> {
         let root: Value = serde_json::from_str(json).map_err(|e| format!("netlist JSON: {e}"))?;
         let module = root["modules"].get(top).ok_or_else(|| format!("module {top:?} not found in the netlist"))?;
         let cells_of_library: BTreeMap<&str, Vec<&str>> = library.cells().into_iter().collect();
 
-        // Yosys numbers nets from 2; strings are constants.
+        // Yosys numbers nets from 2; the strings "0" and "1" are constants, which
+        // get the private numbers 0 and 1 here.
         let bit = |value: &Value, what: &str| -> Result<u64, String> {
-            value.as_u64().ok_or_else(|| format!("{what} is tied to constant {value}; constants are not supported yet"))
+            match (value.as_u64(), value.as_str()) {
+                (Some(n), _) => Ok(n),
+                (_, Some("0")) => Ok(0),
+                (_, Some("1")) => Ok(1),
+                _ => Err(format!("{what} is tied to {value}, which the tile library cannot build")),
+            }
         };
 
         let mut alias: BTreeMap<u64, u64> = BTreeMap::new(); // buffer output -> buffer input
@@ -118,9 +128,34 @@ impl Netlist {
             })
             .collect();
 
-        let netlist = Netlist { inputs, outputs, cells, net_count: ids.len() };
+        let constants: Vec<(NetId, bool)> =
+            ids.iter().filter(|(raw, _)| **raw < 2).map(|(raw, id)| (*id, *raw == 1)).collect();
+        let netlist = Netlist { inputs, outputs, cells, net_count: ids.len(), constants };
         netlist.drivers()?; // every net has exactly one driver
         Ok(netlist)
+    }
+
+    /// The driver of `net`.
+    pub fn driver_of(&self, net: NetId) -> Result<Driver, String> {
+        Ok(self.drivers()?[net])
+    }
+
+    /// Every pin that reads `net`: `(cell, pin)` pairs and `(usize::MAX, output index)` for outputs.
+    pub fn sinks_of(&self, net: NetId) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (c, cell) in self.cells.iter().enumerate() {
+            for (pin, &n) in cell.inputs.iter().enumerate() {
+                if n == net {
+                    out.push((c, pin));
+                }
+            }
+        }
+        for (o, port) in self.outputs.iter().enumerate() {
+            if port.net == net {
+                out.push((usize::MAX, o));
+            }
+        }
+        out
     }
 
     /// The single driver of every net.
@@ -133,6 +168,9 @@ impl Netlist {
             drivers[net] = Some(driver);
             Ok(())
         };
+        for &(net, value) in &self.constants {
+            claim(net, Driver::Const(value), &format!("constant {}", u8::from(value)))?;
+        }
         for (i, port) in self.inputs.iter().enumerate() {
             claim(port.net, Driver::Input(i), &format!("input {}", port.name))?;
         }
@@ -160,12 +198,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_cells_outside_the_library_and_constants() {
+    fn rejects_cells_outside_the_library_and_undefined_bits() {
         let lib = Library::builtin().unwrap();
         let unknown = NOR2.replace("NOR2", "$_AND_");
         assert!(Netlist::from_yosys_json(&unknown, "top", &lib).unwrap_err().contains("not in the tile library"));
+        let undefined = NOR2.replace(r#""B":[3]"#, r#""B":["x"]"#);
+        assert!(Netlist::from_yosys_json(&undefined, "top", &lib).is_err());
+    }
+
+    #[test]
+    fn constant_bits_become_constant_nets() {
         let constant = NOR2.replace(r#""B":[3]"#, r#""B":["0"]"#);
-        assert!(Netlist::from_yosys_json(&constant, "top", &lib).unwrap_err().contains("constant"));
+        let n = Netlist::from_yosys_json(&constant, "top", &Library::builtin().unwrap()).unwrap();
+        assert_eq!(n.constants.len(), 1);
+        assert_eq!(n.driver_of(n.cells[0].inputs[1]).unwrap(), Driver::Const(false));
     }
 
     #[test]

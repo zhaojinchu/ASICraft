@@ -19,7 +19,10 @@ fn main() -> ExitCode {
         Some("tile-fixtures") => tile_fixtures_command(&args[1..]),
         Some("check-fixtures") => check_fixtures_command(&args[1..]),
         Some("build") => build_command(&args[1..]),
+        Some("layout") => layout_command(&args[1..]),
+        Some("pnr-random") => pnr_random_command(&args[1..]),
         Some("lvs") => lvs_command(&args[1..]),
+        Some("extract") => extract_command(&args[1..]),
         Some("simulate") => simulate_command(&args[1..]),
         Some("replay") => replay_report_command(&args[1..]),
         Some("structure") => structure_command(&args[1..]),
@@ -261,6 +264,112 @@ fn check_fixtures_command(args: &[String]) -> Result<bool, String> {
     Ok(failed == 0 && passed > 0)
 }
 
+/// `redfab pnr-random [--count N] [--seed S] [--dump DIR]`
+///
+/// Generates random combinational netlists and builds every one: placement,
+/// routing, the layout-versus-netlist and strength checks, and the simulator
+/// against a direct evaluation of the netlist on up to 16 input vectors. With
+/// `--dump`, the netlists that fail are written there as Yosys JSON.
+fn pnr_random_command(args: &[String]) -> Result<bool, String> {
+    let mut count = 20usize;
+    let mut seed = 1u64;
+    let mut dump: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--count" => count = it.next().and_then(|n| n.parse().ok()).ok_or("--count needs a number")?,
+            "--seed" => seed = it.next().and_then(|n| n.parse().ok()).ok_or("--seed needs a number")?,
+            "--dump" => dump = Some(PathBuf::from(it.next().ok_or("--dump needs a directory")?)),
+            other => {
+                return Err(format!("usage: redfab pnr-random [--count N] [--seed S] [--dump DIR] (got {other:?})"));
+            }
+        }
+    }
+    if let Some(dir) = &dump {
+        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let mut failures = 0;
+    let mut cells = 0;
+    let mut tiles = 0;
+    for i in 0..count {
+        let mut rng = redfab_core::tiletest::Rng::new(seed * 100_000 + i as u64);
+        // Mostly small, every fifth one larger.
+        let gates = if i % 5 == 4 { 20 + rng.below(21) } else { 1 + rng.below(16) };
+        let netlist = redfab_core::pnrtest::random_netlist(&mut rng, gates);
+        let name = format!("random_{seed}_{i:02}");
+        match redfab_core::pnrtest::build_and_verify(&netlist, &name, 16, &mut rng) {
+            Ok(built) => {
+                let line = built.report.lines().find(|l| l.contains("tiles:")).unwrap_or_default().trim().to_string();
+                println!("  ok    {name}: {} cells, {line}", netlist.cells.len());
+                cells += netlist.cells.len();
+                tiles += built.design.blocks.len();
+            }
+            Err(e) => {
+                failures += 1;
+                println!("  FAIL  {name}: {e}");
+                if let Some(dir) = &dump {
+                    let path = dir.join(format!("{name}.json"));
+                    fs::write(&path, netlist.to_yosys_json("top")).map_err(|e| format!("{}: {e}", path.display()))?;
+                    println!("        netlist written to {}", path.display());
+                }
+            }
+        }
+    }
+    println!(
+        "{} of {count} random netlists build and compute what they should ({cells} cells, {tiles} blocks)",
+        count - failures
+    );
+    Ok(failures == 0)
+}
+
+/// `redfab layout MAPPED.json [--top NAME]`: places and routes a mapped netlist
+/// and prints the layout as one character per tile (I input, O output, G gate,
+/// 1/0 constants, box drawing for wires, double lines for repeaters, ╬ crossing).
+fn layout_command(args: &[String]) -> Result<bool, String> {
+    let (mapped, top) = match args {
+        [mapped] => (mapped, "top"),
+        [mapped, flag, top] if flag == "--top" => (mapped, top.as_str()),
+        _ => return Err("usage: redfab layout MAPPED.json [--top NAME]".into()),
+    };
+    let library = redfab_core::tile::Library::builtin()?;
+    let netlist = redfab_core::netlist::Netlist::from_yosys_json(&read(Path::new(mapped))?, top, &library)?;
+    match redfab_core::build::place_and_route(&netlist) {
+        Ok((routed, cols)) => {
+            print!("{}", redfab_core::route::render(&routed.layout));
+            println!("({cols} routing columns between gate columns)");
+            Ok(true)
+        }
+        Err(e) => {
+            // Show the placement alone, with one routing column.
+            let placement = redfab_core::place::place(&netlist, 1)?;
+            let mut layout = redfab_core::layout::Layout::default();
+            for (c, &cell) in placement.gates.iter().enumerate() {
+                layout.tiles.insert(
+                    cell,
+                    redfab_core::layout::Placed::Gate { cell: c, pin_edges: placement.pin_edges[c].clone() },
+                );
+            }
+            for (i, &cell) in placement.inputs.iter().enumerate() {
+                layout.tiles.insert(cell, redfab_core::layout::Placed::Input { port: i, read: true });
+            }
+            for (o, &cell) in placement.outputs.iter().enumerate() {
+                layout.tiles.insert(cell, redfab_core::layout::Placed::Output { port: o });
+            }
+            for &(net, value, cell) in &placement.ties {
+                let placed = if value {
+                    redfab_core::layout::Placed::TieHigh { net }
+                } else {
+                    redfab_core::layout::Placed::TieLow { net }
+                };
+                layout.tiles.insert(cell, placed);
+            }
+            print!("{}", redfab_core::route::render(&layout));
+            println!("routing failed: {e}");
+            Ok(false)
+        }
+    }
+}
+
 /// The Yosys commands that map a design to the tile library.
 const MAP_SCRIPT: &str = "\
 read_slang --threads 1 --top {top} top.sv
@@ -316,7 +425,7 @@ fn build_command(args: &[String]) -> Result<bool, String> {
         }
     }
     let (Some(source), Some(out)) = (source, out) else {
-        return Err("usage: redfab build SOURCE.sv [--top NAME] -o DIR".into());
+        return Err("usage: redfab build SOURCE.sv|MAPPED.json [--top NAME] -o DIR".into());
     };
     let name = out.file_name().and_then(|n| n.to_str()).unwrap_or("design").to_string();
 
@@ -325,14 +434,29 @@ fn build_command(args: &[String]) -> Result<bool, String> {
     let write = |file: &str, data: &[u8]| {
         fs::write(out.join(file), data).map_err(|e| format!("{}: {e}", out.join(file).display()))
     };
+    for stale in ["mapped.json", "mapped.v", "design.json", "world.nbt", "report.txt"] {
+        let _ = fs::remove_file(out.join(stale));
+    }
+    // A mapped netlist (as `pnr-random --dump` writes) skips synthesis and the proof;
+    // its layout is written even when it fails the checks, so it can be examined.
+    if source.extension().is_some_and(|e| e == "json") {
+        let mapped = read(&source)?;
+        write("mapped.json", mapped.as_bytes())?;
+        let netlist = redfab_core::netlist::Netlist::from_yosys_json(&mapped, &top, &library)?;
+        let (built, problems) = redfab_core::build::build_unchecked(&netlist, &name)?;
+        write("design.json", built.design.to_json().as_bytes())?;
+        write("world.nbt", &built.structure)?;
+        print!("{}", built.report);
+        for problem in &problems {
+            println!("  problem: {problem}");
+        }
+        return Ok(problems.is_empty());
+    }
     write("top.sv", read(&source)?.as_bytes())?;
     write("cells.lib", library.liberty().as_bytes())?;
     write("cells.v", library.verilog_models().as_bytes())?;
     write("map.ys", MAP_SCRIPT.replace("{top}", &top).as_bytes())?;
     write("equiv.ys", EQUIV_SCRIPT.replace("{top}", &top).as_bytes())?;
-    for stale in ["mapped.json", "mapped.v", "design.json", "world.nbt", "report.txt"] {
-        let _ = fs::remove_file(out.join(stale));
-    }
 
     run_yosys(&out, "map.ys").map_err(|e| format!("synthesis failed: {e}"))?;
     run_yosys(&out, "equiv.ys").map_err(|e| format!("the mapped netlist is NOT proven equal to the source: {e}"))?;
@@ -364,6 +488,33 @@ fn run_yosys(dir: &Path, script: &str) -> Result<(), String> {
             dir.join(format!("{script}.log")).display()
         ))
     }
+}
+
+/// `redfab extract DESIGN.json`
+///
+/// Prints the circuit read back from a design's blocks: every net with its
+/// tiles, and every torch, repeater, lamp and source with what it reads and drives.
+fn extract_command(args: &[String]) -> Result<bool, String> {
+    let [design] = args else { return Err("usage: redfab extract DESIGN.json".into()) };
+    let design = redfab_core::build::Design::from_json(&read(Path::new(design))?)?;
+    let circuit = redfab_core::extract::extract(&design.world()?, &design.probes()?);
+    let tile =
+        |p: &redfab_core::geom::Pos| format!("({},{})", p.x / redfab_core::tile::PITCH, p.z / redfab_core::tile::PITCH);
+    for (i, net) in circuit.nets.iter().enumerate() {
+        let mut tiles: Vec<String> = net.iter().map(tile).collect();
+        tiles.dedup();
+        println!("net {i}: {} dust in tiles {}", net.len(), tiles.join(" "));
+    }
+    let list = |what: &str, items: &[redfab_core::extract::Component]| {
+        for c in items {
+            println!("{what} at {} in tile {}: reads {:?}, drives {:?}", c.pos, tile(&c.pos), c.reads, c.drives);
+        }
+    };
+    list("torch", &circuit.torches);
+    list("repeater", &circuit.repeaters);
+    list("lamp", &circuit.lamps);
+    list("source", &circuit.sources);
+    Ok(true)
 }
 
 /// `redfab lvs DESIGN.json MAPPED.json [--top NAME]`: checks a design file's

@@ -310,7 +310,6 @@ pub struct Library {
     pub wire: Tile,
     pub nor: Tile,
     pub cross: Tile,
-    pub repeater: Tile,
     pub tie_high: Tile,
     pub tie_low: Tile,
 }
@@ -326,7 +325,6 @@ impl Library {
             wire: parse("wire", include_str!("../../../cells/wire.tile"))?,
             nor: parse("nor", include_str!("../../../cells/nor.tile"))?,
             cross: parse("cross", include_str!("../../../cells/cross.tile"))?,
-            repeater: parse("repeater", include_str!("../../../cells/repeater.tile"))?,
             tie_high: parse("tie_high", include_str!("../../../cells/tie_high.tile"))?,
             tie_low: parse("tie_low", include_str!("../../../cells/tie_low.tile"))?,
         })
@@ -381,14 +379,13 @@ pub enum Kind {
     Wire,
     Nor,
     Cross,
-    Repeater,
     TieHigh,
     TieLow,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 8] =
-        [Kind::Input, Kind::Output, Kind::Wire, Kind::Nor, Kind::Cross, Kind::Repeater, Kind::TieHigh, Kind::TieLow];
+    pub const ALL: [Kind; 7] =
+        [Kind::Input, Kind::Output, Kind::Wire, Kind::Nor, Kind::Cross, Kind::TieHigh, Kind::TieLow];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -397,7 +394,6 @@ impl Kind {
             Kind::Wire => "wire",
             Kind::Nor => "nor",
             Kind::Cross => "cross",
-            Kind::Repeater => "repeater",
             Kind::TieHigh => "tie_high",
             Kind::TieLow => "tie_low",
         }
@@ -405,14 +401,17 @@ impl Kind {
 }
 
 /// One concrete way to use a tile: which of its ports are used, how it is turned,
-/// and (for a repeater) its setting.
+/// and for a wire whether it carries a repeater.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Variant {
     pub kind: Kind,
     /// Used ports, named as in the tile file (before rotation).
     pub edges: Vec<Edge>,
     pub rotation: u8,
-    /// Repeater setting 1 to 4; ignored by other tiles.
+    /// For a wire: the edge the signal enters by when the tile carries a repeater
+    /// (named before rotation). The repeater replaces the dust next to that port.
+    pub repeater_entry: Option<Edge>,
+    /// Repeater setting 1 to 4; ignored without a repeater.
     pub delay: u8,
 }
 
@@ -429,7 +428,12 @@ pub struct VariantPort {
 
 impl Variant {
     pub fn new(kind: Kind, edges: &[Edge]) -> Variant {
-        Variant { kind, edges: edges.to_vec(), rotation: 0, delay: 1 }
+        Variant { kind, edges: edges.to_vec(), rotation: 0, repeater_entry: None, delay: 1 }
+    }
+
+    /// A wire joining `edges` with a repeater in the arm of `entry`.
+    pub fn repeater(edges: &[Edge], entry: Edge, delay: u8) -> Variant {
+        Variant { kind: Kind::Wire, edges: edges.to_vec(), rotation: 0, repeater_entry: Some(entry), delay }
     }
 
     pub fn tile<'a>(&self, library: &'a Library) -> &'a Tile {
@@ -439,40 +443,42 @@ impl Variant {
             Kind::Wire => &library.wire,
             Kind::Nor => &library.nor,
             Kind::Cross => &library.cross,
-            Kind::Repeater => &library.repeater,
             Kind::TieHigh => &library.tie_high,
             Kind::TieLow => &library.tie_low,
         }
     }
 
-    /// A short name, e.g. `wire_WS`, `nor_WN`, `repeater_r1_d3`.
+    /// A short name, e.g. `wire_WS`, `nor_WN`, `wire_WE_repW_d3`.
     pub fn name(&self) -> String {
         let mut name = self.kind.name().to_string();
         if matches!(self.kind, Kind::Wire | Kind::Nor) {
             name.push('_');
             name.extend(self.edges.iter().map(|e| e.letter()));
         }
+        if let Some(entry) = self.repeater_entry {
+            name.push_str(&format!("_rep{}_d{}", entry.letter(), self.delay));
+        }
         if self.rotation != 0 {
             name.push_str(&format!("_r{}", self.rotation));
-        }
-        if self.kind == Kind::Repeater {
-            name.push_str(&format!("_d{}", self.delay));
         }
         name
     }
 
-    /// The blocks, rotated, with the repeater set to `delay`.
+    /// The blocks, rotated, with the repeater (if any) in place.
     pub fn blocks(&self, library: &Library) -> Vec<(Pos, Block)> {
-        self.tile(library)
-            .blocks(&self.edges, self.rotation)
-            .into_iter()
-            .map(|(pos, block)| match block {
-                Block::Repeater { facing, locked, powered, .. } => {
-                    (pos, Block::Repeater { facing, delay: self.delay, locked, powered })
+        let mut blocks = self.tile(library).blocks(&self.edges, self.rotation);
+        if let Some(entry) = self.repeater_entry {
+            // The cell next to the entry port, one step towards the centre.
+            let port = self.tile(library).port(entry).expect("the repeater's entry is a port of the tile");
+            let inner = rotate_pos(port.pos.offset(entry.dir().opposite()), self.rotation);
+            let facing = entry.rotated(self.rotation).dir();
+            for (pos, block) in &mut blocks {
+                if *pos == inner {
+                    *block = Block::Repeater { facing, delay: self.delay, locked: false, powered: false };
                 }
-                other => (pos, other),
-            })
-            .collect()
+            }
+        }
+        blocks
     }
 
     /// The used ports after rotation, with their internal net numbers.
@@ -492,31 +498,45 @@ impl Variant {
                     },
                     // West-east and north-south never meet.
                     Kind::Cross => u8::from(matches!(p.edge, Edge::North | Edge::South)),
-                    // The repeater separates its input net from its output net.
-                    Kind::Repeater => u8::from(p.edge == Edge::East),
                     _ => 0,
                 };
-                VariantPort {
-                    edge: p.edge.rotated(self.rotation),
-                    kind: p.kind,
-                    pos: rotate_pos(p.pos, self.rotation),
-                    net,
-                }
+                let kind = match (self.repeater_entry, p.kind) {
+                    // With a repeater the entry port is an input and the ports it feeds
+                    // are outputs; in a crossing the other axis is unaffected.
+                    (Some(entry), PortKind::Io) if self.kind == Kind::Cross => {
+                        if p.edge == entry {
+                            PortKind::In
+                        } else if p.edge == entry.opposite() {
+                            PortKind::Out
+                        } else {
+                            PortKind::Io
+                        }
+                    }
+                    (Some(entry), PortKind::Io) => {
+                        if p.edge == entry {
+                            PortKind::In
+                        } else {
+                            PortKind::Out
+                        }
+                    }
+                    (_, kind) => kind,
+                };
+                VariantPort { edge: p.edge.rotated(self.rotation), kind, pos: rotate_pos(p.pos, self.rotation), net }
             })
             .collect()
     }
 
     /// Game ticks from an input change to the output change.
     pub fn delay_ticks(&self, library: &Library) -> u32 {
-        match self.kind {
-            Kind::Repeater => 2 * u32::from(self.delay),
-            _ => self.tile(library).delay,
+        match self.repeater_entry {
+            Some(_) => 2 * u32::from(self.delay),
+            None => self.tile(library).delay,
         }
     }
 
     /// Every variant the library offers: wiring with every combination of two or
-    /// more edges, NOR with every non-empty set of inputs, the repeater in every
-    /// orientation and setting, and the fixed tiles.
+    /// more edges, each of those with a repeater on each possible entry, NOR with
+    /// every non-empty set of inputs, and the fixed tiles.
     pub fn all() -> Vec<Variant> {
         let mut out = vec![Variant::new(Kind::Input, &[Edge::East]), Variant::new(Kind::Output, &[Edge::West])];
         for mask in 1u8..16 {
@@ -524,7 +544,13 @@ impl Variant {
                 Edge::ALL.iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, e)| *e).collect();
             if edges.len() >= 2 {
                 out.push(Variant::new(Kind::Wire, &edges));
+                for &entry in &edges {
+                    out.push(Variant::repeater(&edges, entry, 1));
+                }
             }
+        }
+        for delay in 2..=4 {
+            out.push(Variant::repeater(&[Edge::West, Edge::East], Edge::West, delay));
         }
         for mask in 1u8..8 {
             let inputs = [Edge::West, Edge::North, Edge::South];
@@ -534,10 +560,14 @@ impl Variant {
             out.push(Variant::new(Kind::Nor, &edges));
         }
         out.push(Variant::new(Kind::Cross, &Edge::ALL));
-        for rotation in 0..4 {
-            for delay in 1..=4 {
-                out.push(Variant { kind: Kind::Repeater, edges: vec![Edge::West, Edge::East], rotation, delay });
-            }
+        for entry in [Edge::West, Edge::East] {
+            out.push(Variant {
+                kind: Kind::Cross,
+                edges: Edge::ALL.to_vec(),
+                rotation: 0,
+                repeater_entry: Some(entry),
+                delay: 1,
+            });
         }
         out.push(Variant::new(Kind::TieHigh, &[Edge::East]));
         out.push(Variant::new(Kind::TieLow, &[Edge::East]));
@@ -571,20 +601,21 @@ mod tests {
     }
 
     #[test]
-    fn a_rotated_repeater_faces_the_rotated_input() {
+    fn a_repeater_sits_in_the_entry_arm_facing_its_port() {
         let lib = Library::builtin().unwrap();
-        let south_to_north =
-            Variant { kind: Kind::Repeater, edges: vec![Edge::West, Edge::East], rotation: 1, delay: 2 };
-        let ports = south_to_north.ports(&lib);
+        // A west-to-south turn with a repeater on the west arm, turned a quarter: north-to-west.
+        let turn = Variant { rotation: 1, ..Variant::repeater(&[Edge::West, Edge::South], Edge::West, 2) };
+        let ports = turn.ports(&lib);
         assert_eq!(
             ports.iter().map(|p| (p.edge, p.kind)).collect::<Vec<_>>(),
-            vec![(Edge::North, PortKind::In), (Edge::South, PortKind::Out)]
+            vec![(Edge::North, PortKind::In), (Edge::West, PortKind::Out)]
         );
-        let repeater =
-            south_to_north.blocks(&lib).into_iter().find(|(_, b)| matches!(b, Block::Repeater { .. })).unwrap();
+        let repeater = turn.blocks(&lib).into_iter().find(|(_, b)| matches!(b, Block::Repeater { .. })).unwrap();
         assert_eq!(repeater.1.to_string(), "minecraft:repeater[delay=2,facing=north,locked=false,powered=false]");
         assert_eq!(repeater.0, Pos::new(2, 1, 1));
-        assert_eq!(Variant::all().len(), 2 + 11 + 7 + 1 + 16 + 2);
+        assert_eq!(turn.blocks(&lib).iter().filter(|(_, b)| matches!(b, Block::Wire(_))).count(), 4);
+        // 2 io tiles, 11 wires + 28 repeater placements + 3 more delays, 7 NORs, 3 crossings, 2 ties
+        assert_eq!(Variant::all().len(), 2 + 11 + 28 + 3 + 7 + 3 + 2);
     }
 
     #[test]
