@@ -380,6 +380,59 @@ echo "stage 8: flip-flop characterization"
 run dff-characterized   dff_characterized
 run dff-margin          dff_margin
 
+# ---------------------------------------------------------------- stage 9
+
+CLOCKED="counter4 fsm shift2"
+
+# Clocked designs build like the others: flip-flops mapped in synthesis, the
+# sequential proof, a register column, hold and skew analysis with repeater delays
+# raised where a path is too short, and the burnout budget. The report states the
+# shortest clock period.
+build_clocked() {
+    for d in $CLOCKED; do
+        $REDFAB build designs/$d/top.sv --top top -o build/designs/$d || return 1
+    done
+}
+
+# For 64 clock cycles of random inputs at the reported period: the block simulator's
+# outputs equal Verilator's every cycle, and stay equal when the ticks that fall due
+# together are run in shuffled orders.
+cycles_sim() {
+    uv run --frozen python -m harness.design cycles $CLOCKED
+}
+
+# A copy of the shift register with a clock repeater slowed so that the second
+# flip-flop's clock arrives late must be flagged for a hold violation ...
+hold_negative() {
+    uv run --frozen python -m harness.design hold-negative shift2
+}
+
+# ... and a copy of the counter with one input of a gate delayed, so that its torch
+# glitches every cycle, must be flagged for exceeding the burnout budget.
+burnout_negative() {
+    uv run --frozen python -m harness.design burnout-negative counter4
+}
+
+# In the game, at three placements and in both modes: 64 cycles of the counter and
+# the state machine equal Verilator; the two broken copies fail.
+cycles_vanilla() {
+    uv run --frozen python -m harness.design cycles-vanilla counter4 fsm
+}
+negatives_vanilla() {
+    uv run --frozen python -m harness.design hold-negative-vanilla shift2 &&
+    uv run --frozen python -m harness.design burnout-negative-vanilla counter4
+}
+
+echo "stage 9: counter and state machine"
+run build-clocked       build_clocked
+run cycles-sim          cycles_sim
+run hold-negative       hold_negative
+run burnout-negative    burnout_negative
+if [ $VANILLA = 1 ]; then
+    run cycles-vanilla      cycles_vanilla
+    run negatives-vanilla   negatives_vanilla
+fi
+
 # ---------------------------------------------------------------- summary
 
 echo
