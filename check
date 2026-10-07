@@ -481,6 +481,34 @@ if [ $VANILLA = 1 ]; then
     run mechanics-modded    mechanics_modded
 fi
 
+# ---------------------------------------------------------------- stage 12
+
+# The live playground's backend under Node, with a fake world standing in for the
+# game: submissions are compiled in a sandboxed child process (killed at the time
+# and memory limits), placed as the native build in a free plot, and driven by
+# levers that reach only their probe blocks; the stream reaches viewers filtered
+# to their plot; the recording of what the stream said equals the simulator's
+# trace when the simulator plays the game, and replays natively; a design too big
+# for a plot, an unexpected field, a hostile source and bad lever messages are all
+# refused; plots are limited, released and cleared.
+live_test() {
+    node --test tools/live_test.mjs
+}
+
+# On the real modded server, in a headless browser: an inverter driven through the
+# API and the counter driven through the page both record traces that replay
+# natively tick for tick; the page shows what the server shows; with a counter
+# running in every plot the server's tick time stays within budget.
+live_check() {
+    node tools/live_check.mjs
+}
+
+echo "stage 12: live playground"
+run live-test          live_test
+if [ $VANILLA = 1 ]; then
+    run live-vanilla       live_check
+fi
+
 # ---------------------------------------------------------------- summary
 
 echo
