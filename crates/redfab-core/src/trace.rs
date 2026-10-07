@@ -461,7 +461,7 @@ impl Recorder {
     }
 
     /// What differs from `from` to `to`, with air for blocks that went away.
-    fn diff(from: &BTreeMap<Pos, Block>, to: &BTreeMap<Pos, Block>) -> Vec<(Pos, Block)> {
+    pub fn diff(from: &BTreeMap<Pos, Block>, to: &BTreeMap<Pos, Block>) -> Vec<(Pos, Block)> {
         let mut changed = Vec::new();
         for (pos, block) in to {
             if from.get(pos) != Some(block) {

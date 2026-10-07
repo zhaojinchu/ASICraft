@@ -53,6 +53,8 @@ class FakeWorld {
     }
     async clear(box) {
         this.cleared.push(box);
+        const [[x0, , z0], [x1, , z1]] = box;
+        this.sims = this.sims.filter((s) => !(s.origin[0] >= x0 && s.origin[0] <= x1 && s.origin[2] >= z0 && s.origin[2] <= z1));
     }
     async tickTime() {
         return this.tickTimes;
@@ -62,6 +64,7 @@ class FakeWorld {
         assert.ok(structure instanceof Uint8Array && structure.length > 0, 'a structure file is placed');
         this.placed.push({ name, origin, blocks: Object.keys(design.blocks).length });
         if (this.simulate) {
+            this.sims = this.sims.filter((s) => key(s.origin) !== key(origin));
             const { handle } = core.call({ op: 'sim_new', design: JSON.stringify(design) });
             this.sims.push({ handle, design, origin });
         }
@@ -80,9 +83,9 @@ class FakeWorld {
         const reply = core.call({ op: 'sim_set', handle: sim.handle, input, on: state === sim.design.inputs[input].on });
         this.emit(this.tick, reply.changes.map(([p, s]) => [key(add(pos(p), sim.origin)), s]));
     }
-    /// Runs the simulated designs: one message per tick with changes, a heartbeat
-    /// every twenty, and a pause between ticks so the backend can react as it
-    /// would to a real server.
+    /// Runs the simulated designs: one message at the end of every tick, as the
+    /// mod sends, and a pause between ticks so the backend can react to each as it
+    /// would with a real server.
     async step(ticks) {
         for (let k = 0; k < ticks; k++) {
             this.tick += 1;
@@ -91,7 +94,7 @@ class FakeWorld {
                 const reply = core.call({ op: 'sim_step', handle: sim.handle, ticks: 1 });
                 changes.push(...reply.changes.map(([p, s]) => [key(add(pos(p), sim.origin)), s]));
             }
-            if (changes.length || this.tick % 20 === 0) this.emit(this.tick, changes);
+            this.emit(this.tick, changes);
             await new Promise((ok) => setImmediate(ok));
             await new Promise((ok) => setImmediate(ok));
         }
@@ -153,7 +156,7 @@ test('a plot settles, then its levers reach the probe blocks and nothing else do
         const { design, origin } = reply.body;
         const { client, hello } = await control(wsBase, reply.body);
         assert.equal(hello.state, 'settling');
-        assert.deepEqual(hello.lamps, [0]);
+        assert.deepEqual(hello.lamps, [1], 'a NOR with both inputs off lights its lamp');
         assert.deepEqual(hello.inputs, [0, 0]);
 
         // Levers are refused until the design has settled, and nothing is written.
@@ -171,7 +174,7 @@ test('a plot settles, then its levers reach the probe blocks and nothing else do
         assert.deepEqual([ack.ok, ack.set, ack.on], [true, 'a', true]);
         const a = design.inputs.find((p) => p.name === 'a');
         assert.deepEqual(world.setblocks, [[add(pos(a.probe), origin), a.on]]);
-        const update = await client.next((m) => m.changes !== undefined);
+        const update = await client.next((m) => m.changes?.length > 0);
         assert.deepEqual(update.changes, [[a.probe, a.on]], 'the change comes back in design coordinates');
         assert.deepEqual(update.inputs, [1, 0]);
 
@@ -202,15 +205,15 @@ test('a plot settles, then its levers reach the probe blocks and nothing else do
         // The stream reaches viewers filtered to the plot and translated to its coordinates.
         const y = design.outputs.find((p) => p.name === 'y');
         const lampWorld = key(add(pos(y.lamp), origin));
-        world.emit(world.tick + 1, [[lampWorld, 'minecraft:redstone_lamp[lit=true]'], ['5000,64,5000', 'minecraft:stone'], [key(add([0, 0, -1], origin)), 'minecraft:stone']]);
-        const lit = await viewer.next((m) => m.changes !== undefined && m.changes.length > 0);
-        assert.deepEqual(lit.changes, [[y.lamp, 'minecraft:redstone_lamp[lit=true]']]);
-        assert.deepEqual(lit.lamps, [1]);
-        const again = await client.next((m) => m.changes !== undefined && m.changes.length > 0);
-        assert.deepEqual(again.lamps, [1]);
+        world.emit(world.tick + 1, [[lampWorld, 'minecraft:redstone_lamp[lit=false]'], ['5000,64,5000', 'minecraft:stone'], [key(add([0, 0, -1], origin)), 'minecraft:stone']]);
+        const dark = await viewer.next((m) => m.changes?.length > 0);
+        assert.deepEqual(dark.changes, [[y.lamp, 'minecraft:redstone_lamp[lit=false]']]);
+        assert.deepEqual(dark.lamps, [0]);
+        const again = await client.next((m) => m.changes?.length > 0);
+        assert.deepEqual(again.lamps, [0]);
         const info = await api(base, `/api/plots/${reply.body.plot}`);
         assert.equal(info.status, 200);
-        assert.deepEqual([info.body.state, info.body.lamps, info.body.inputs], ['live', [1], [1, 0]]);
+        assert.deepEqual([info.body.state, info.body.lamps, info.body.inputs], ['live', [0], [1, 0]]);
         client.close();
         viewer.close();
     } finally {
@@ -246,9 +249,9 @@ test('the trace the backend records equals the simulator trace of the same stimu
             assert.equal(trace.source.kind, 'live');
             assert.equal(fixture.placement, 'strict');
             assert.deepEqual(fixture.size, design.size);
-            assert.ok(fixture.events.length >= 6, `the lever changes were recorded as events (${fixture.events.length})`);
+            assert.ok(fixture.events.length >= 6, `${name}: the lever changes were recorded as events (${fixture.events.length})`);
             const lamp = design.outputs[0].lamp;
-            assert.ok(changesAt(trace, lamp) >= 2, `the lamp changed in the recording (${changesAt(trace, lamp)} times)`);
+            assert.ok(changesAt(trace, lamp) >= 2, `${name}: the lamp changed in the recording (${changesAt(trace, lamp)} times)`);
 
             const simulated = world.simTrace(world.sims.length - 1);
             assert.equal(firstTraceDifference(trace, simulated.trace), null, `${name}: live recording vs the simulator that played the game`);
@@ -283,7 +286,8 @@ test('a design that does not fit a plot is refused before anything is placed', a
 });
 
 test('the submission is source only: limits hold, unexpected fields are refused, hostile sources are stopped', async () => {
-    const { backend, world, base } = await live({ plots: 2, compile: { seconds: 20, memoryMb: 512, queue: 2 } });
+    // A normal compile peaks near 900 MB (Yosys in WebAssembly); the limit sits above that.
+    const { backend, world, base } = await live({ plots: 2, compile: { seconds: 20, memoryMb: 1280, queue: 2 } });
     try {
         const big = await api(base, '/api/submit', { method: 'POST', body: { source: 'x'.repeat(LIMITS.sourceBytes + 1), top: 'top' } });
         assert.ok([400, 413].includes(big.status));
@@ -332,7 +336,7 @@ endmodule
         assert.ok(Date.now() - started <= 23_000);
         // ... one that eats memory is killed at the memory limit, well before the time limit ...
         started = Date.now();
-        const fat = await api(base, '/api/submit', { method: 'POST', body: { source: `// redfab-test: allocate 1200\n${designSource('not1')}`, top: 'top' } });
+        const fat = await api(base, '/api/submit', { method: 'POST', body: { source: `// redfab-test: allocate 2400\n${designSource('not1')}`, top: 'top' } });
         assert.equal(fat.status, 400);
         assert.match(fat.body.error, /memory/);
         assert.ok(Date.now() - started <= 15_000, `killed in ${Date.now() - started} ms`);

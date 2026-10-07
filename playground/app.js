@@ -1,6 +1,8 @@
 // The page: an editor, a compile button, the worker that compiles and
 // simulates, a panel of levers and lamps, and the 3D view. The simulator runs
-// at the game's 20 ticks a second.
+// at the game's 20 ticks a second. Served by the live backend (server/), the
+// page can also send the source there: the server builds it, places it on the
+// Minecraft server, and the view then shows the server's blocks instead.
 
 import { View } from './view.js';
 import { LIMITS } from './compile.js';
@@ -20,6 +22,8 @@ const tickLabel = el('tick');
 const compileButton = el('compile');
 const runButton = el('run');
 const downloadButton = el('download');
+const liveButton = el('live');
+const releaseButton = el('release');
 const examples = el('examples');
 
 const view = new View(el('view'));
@@ -34,6 +38,11 @@ let tick = 0;
 let timer = null;
 let stepping = false;
 let clockTimer = null;
+// 'sim': the worker's simulator drives the view. 'live': the server's stream does.
+let mode = 'sim';
+let livePlot = null;
+let liveSocket = null;
+let liveTick = 0;
 
 function setStatus(text, kind = '') {
     status.textContent = text;
@@ -70,6 +79,7 @@ function ask(message) {
 
 async function compile() {
     stopRunning();
+    leaveLive();
     design = null;
     compileButton.disabled = true;
     runButton.disabled = true;
@@ -111,12 +121,14 @@ function showDesign() {
     view.show(design);
     inputState = design.inputs.map(() => 0);
     tick = 0;
+    const seq = design.timing?.sequential;
     for (const [i, pin] of design.inputs.entries()) {
         const button = document.createElement('button');
         button.className = 'lever';
         button.textContent = pin.name;
         button.dataset.input = pin.name;
         button.dataset.on = '0';
+        button.disabled = Boolean(seq && pin.name === seq.clock); // the clock is driven, not clicked
         button.addEventListener('click', () => toggle(i));
         inputsPanel.appendChild(button);
     }
@@ -128,23 +140,27 @@ function showDesign() {
         lamp.innerHTML = `<span class="bulb"></span>${pin.name}`;
         outputsPanel.appendChild(lamp);
     }
-    // A clocked design gets its clock from the page, at the reported period.
-    const seq = design.timing?.sequential;
+    // A clocked design gets its clock from the page (or the server), at the reported period.
     if (seq) {
         const note = document.createElement('span');
         note.className = 'label';
-        note.textContent = `clock ${seq.clock}: period ${seq.period} ticks, driven by the page`;
+        note.textContent = `clock ${seq.clock}: period ${seq.period} ticks, driven by the ${mode === 'live' ? 'server' : 'page'}`;
         inputsPanel.appendChild(note);
     }
-    runButton.disabled = false;
-    downloadButton.disabled = false;
-    startRunning();
+    runButton.disabled = mode === 'live';
+    downloadButton.disabled = mode === 'live';
+    if (mode === 'sim') startRunning();
 }
 
 async function toggle(i) {
     if (!design) return;
     const seq = design.timing?.sequential;
-    if (seq && design.inputs[i].name === seq.clock) return; // the page drives the clock
+    if (seq && design.inputs[i].name === seq.clock) return; // the page or the server drives the clock
+    if (mode === 'live') {
+        // The server flips the probe block; the lever shows the new state once the stream reports it.
+        if (liveSocket?.readyState === WebSocket.OPEN) liveSocket.send(JSON.stringify({ set: design.inputs[i].name, on: inputState[i] !== 1 }));
+        return;
+    }
     inputState[i] = inputState[i] ? 0 : 1;
     inputsPanel.querySelector(`[data-input="${CSS.escape(design.inputs[i].name)}"]`).dataset.on = String(inputState[i]);
     await ask({ op: 'set', input: i, on: inputState[i] === 1 });
@@ -199,6 +215,118 @@ function stopRunning() {
     timer = null;
     clockTimer = null;
 }
+
+// --- the live server
+
+function clearPanels() {
+    inputsPanel.replaceChildren(label('inputs'));
+    outputsPanel.replaceChildren(label('outputs'));
+    tickLabel.textContent = '';
+}
+
+/// Sends the source to the server, which builds it and places it in the game.
+async function goLive() {
+    stopRunning();
+    leaveLive();
+    design = null;
+    mode = 'live';
+    compileButton.disabled = true;
+    liveButton.disabled = true;
+    runButton.disabled = true;
+    downloadButton.disabled = true;
+    log.textContent = '';
+    clearPanels();
+    setStatus('Sent to the server; building…');
+    const name = examples.value || 'design';
+    try {
+        const reply = await fetch('/api/submit', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ source: source.value, top: 'top', name }),
+        });
+        const body = await reply.json();
+        if (!reply.ok) throw new Error(body.error || `the server answered ${reply.status}`);
+        design = body.design;
+        livePlot = { plot: body.plot, token: body.token, origin: body.origin };
+        log.textContent = body.report;
+        setStatus(`On the server at plot ${body.plot}, settling…`);
+        showDesign();
+        releaseButton.hidden = false;
+        connectLive();
+    } catch (err) {
+        mode = 'sim';
+        setStatus(err.message.split('\n')[0], 'bad');
+        log.textContent += `\n${err.message}\n`;
+    } finally {
+        compileButton.disabled = false;
+        liveButton.disabled = false;
+    }
+}
+
+function connectLive() {
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    liveSocket = new WebSocket(`${scheme}://${location.host}/live?plot=${livePlot.plot}&token=${livePlot.token}`);
+    liveSocket.onmessage = ({ data }) => {
+        const m = JSON.parse(data);
+        if (!design) return;
+        if (typeof m.tick === 'number') {
+            liveTick = m.tick;
+            tickLabel.textContent = `server tick ${liveTick}`;
+        }
+        if (m.changes) view.update(m.changes);
+        if (m.lamps) {
+            for (const [o, pin] of design.outputs.entries()) {
+                outputsPanel.querySelector(`[data-output="${CSS.escape(pin.name)}"]`).dataset.lit = String(m.lamps[o]);
+            }
+        }
+        if (m.inputs) {
+            inputState = m.inputs.slice();
+            for (const [i, pin] of design.inputs.entries()) {
+                inputsPanel.querySelector(`[data-input="${CSS.escape(pin.name)}"]`).dataset.on = String(m.inputs[i]);
+            }
+        }
+        if (m.state === 'live') setStatus(`Live on the server at plot ${livePlot.plot}.`, 'ok');
+        if (m.state === 'released') {
+            setStatus(`The server released plot ${livePlot.plot}: ${m.why}.`, 'bad');
+            leaveLive();
+        }
+        if (m.ok === false) setStatus(m.error, 'bad');
+    };
+    liveSocket.onclose = () => {
+        if (mode === 'live') setStatus('The connection to the server closed.', 'bad');
+    };
+}
+
+function leaveLive() {
+    if (liveSocket) {
+        liveSocket.onclose = null;
+        liveSocket.close();
+        liveSocket = null;
+    }
+    livePlot = null;
+    mode = 'sim';
+    releaseButton.hidden = true;
+}
+
+/// Gives the plot back; the server clears it.
+async function release() {
+    if (!livePlot) return;
+    const { plot, token } = livePlot;
+    leaveLive();
+    await fetch(`/api/plots/${plot}?token=${token}`, { method: 'DELETE' }).catch(() => {});
+    design = null;
+    clearPanels();
+    runButton.disabled = true;
+    downloadButton.disabled = true;
+    setStatus(`Released plot ${plot}. Compile to simulate here again.`);
+}
+
+// The live button appears only when the page is served by the live backend.
+fetch('/api/status').then((r) => (r.ok ? r.json() : null)).then((s) => {
+    if (s?.live) liveButton.hidden = false;
+}).catch(() => {});
+liveButton.addEventListener('click', goLive);
+releaseButton.addEventListener('click', release);
 
 runButton.addEventListener('click', () => (running ? stopRunning() : startRunning()));
 compileButton.addEventListener('click', compile);
@@ -262,4 +390,9 @@ window.redfab = {
     loadExample,
     setSource: (text) => { source.value = text; },
     ready: () => ask({ op: 'ping' }),
+    live: goLive,
+    release,
+    get mode() { return mode; },
+    get livePlot() { return livePlot; },
+    get liveTick() { return liveTick; },
 };

@@ -81,9 +81,12 @@ try {
             not1.client.send({ set: 'a', on });
             const ack = await not1.client.next((m) => m.ok !== undefined);
             if (!ack.ok) throw new Error(`not1: set a: ${ack.error}`);
+            // Wait `ticks` game ticks from now: the stream reports every tick.
+            not1.client.drain();
             const now = (await not1.client.next((m) => m.tick !== undefined)).tick;
             await not1.client.next((m) => m.tick >= now + ticks, 15_000);
         };
+        // Two full swings, then a 3-tick pulse too short to reach the lamp: all of it is recorded and must replay.
         await flip(true, 24);
         await flip(false, 24);
         await flip(true, 3);
@@ -94,7 +97,8 @@ try {
         if (exported.status !== 200) fail(`not1: trace export: ${exported.body.error}`);
         else {
             const y = not1.design.outputs[0].lamp;
-            if (changesAt(exported.body.trace, y) < 4) fail(`not1: the lamp changed only ${changesAt(exported.body.trace, y)} times in the recording`);
+            if (exported.body.fixture.events.length !== 4) fail(`not1: ${exported.body.fixture.events.length} lever changes were recorded, not 4`);
+            if (changesAt(exported.body.trace, y) < 2) fail(`not1: the lamp changed only ${changesAt(exported.body.trace, y)} times in the recording`);
             replays('not1', exported.body.fixture, exported.body.trace);
         }
         not1.client.close();
