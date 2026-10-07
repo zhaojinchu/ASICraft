@@ -65,10 +65,11 @@ public final class WebSocketServer {
                 + "Sec-WebSocket-Accept: " + accept + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
             out.flush();
             client = new Client(socket, out);
+            // The hello is queued before the client can receive a broadcast, so it is always first.
+            client.send(hello.get());
             synchronized (clients) {
                 clients.add(client);
             }
-            client.send(hello.get());
             // Read the client's frames: answer pings, stop on close, ignore the rest.
             while (true) {
                 int first = in.read();
