@@ -1,6 +1,9 @@
 // The redfab observer: a server mod that only watches. Every block state change
 // in the overworld is collected, and at the end of each server tick the batch
 // goes out, with the game time, to every client of a WebSocket on localhost.
+// Changes made between ticks go out as a tick starts, under the number of the
+// tick just completed: that is when commands run, and what they do counts as
+// the last thing in that tick.
 // Nothing here changes a block or a tick.
 package dev.redfab.observer;
 
@@ -35,11 +38,21 @@ public final class Observer implements ModInitializer {
 
     /// The server finished tick `tick` (the overworld's game time).
     public static void tickDone(long tick) {
+        flush(tick, true);
+    }
+
+    /// A tick is about to start; `tick` is still the last completed one. What
+    /// changed since its end happened between ticks and belongs to it.
+    public static void betweenTicks(long tick) {
+        flush(tick, false);
+    }
+
+    private static void flush(long tick, boolean heartbeat) {
         String batch;
         synchronized (changes) {
             lastTick = tick;
-            if (changes.isEmpty() && tick % 20 != 0) {
-                return; // a heartbeat every second keeps clients sure of the tick
+            if (changes.isEmpty() && !heartbeat) {
+                return; // the end of every tick goes out even when nothing changed
             }
             batch = "{\"tick\":" + tick + ",\"changes\":[" + String.join(",", changes) + "]}";
             changes.clear();

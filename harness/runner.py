@@ -280,7 +280,10 @@ class StreamCheck:
         self.compared = 0
         self.session = session
         self.base: dict[Pos, BlockState] | None = None
-        self.base_index = 0
+        # The state the stream implies, kept up to date as the stream is read:
+        # entries before `cursor` have been laid over it.
+        self.state: dict[Pos, BlockState] = {}
+        self.cursor = 0
         self.observer = Observer(session.server.observer_port).__enter__()
         self.thread = threading.Thread(target=self._pump, daemon=True)
         self.thread.start()
@@ -297,29 +300,33 @@ class StreamCheck:
     def _inside(self, pos: Pos) -> bool:
         return any(_in_box(pos, box) for box in self.boxes)
 
-    def _state_at(self, tick: int) -> dict[Pos, BlockState]:
-        state = dict(self.base)
+    def _advance(self, tick: int) -> None:
+        """Lays the stream's changes up to and including `tick` over the state. Only
+        the entries not yet applied are looked at, so a long run stays linear."""
         with self.lock:
-            received = self.received[self.base_index:]
-        for t, changes in received:
+            received = self.received
+            count = len(received)
+        while self.cursor < count:
+            t, changes = received[self.cursor]
             if t > tick:
                 break
             for pos, text in changes:
                 if self._inside(pos):
                     parsed = BlockState.parse(text)
                     if parsed.is_air:
-                        state.pop(pos, None)
+                        self.state.pop(pos, None)
                     else:
-                        state[pos] = parsed
-        return state
+                        self.state[pos] = parsed
+            self.cursor += 1
 
     def check(self, snapshot: dict[Pos, BlockState]) -> None:
         tick = self.session.gametime()
         disk = {pos: st for pos, st in snapshot.items() if self._inside(pos)}
         if self.base is None:
             self.base = disk
+            self.state = dict(disk)
             with self.lock:
-                self.base_index = len(self.received)
+                self.cursor = len(self.received)
             return
         # The stream flushes at the end of every server tick; wait for this one.
         deadline = time.monotonic() + 10
@@ -332,7 +339,8 @@ class StreamCheck:
         else:
             self.problems.append(f"tick {tick}: the stream did not reach it")
             return
-        streamed = self._state_at(tick)
+        self._advance(tick)
+        streamed = self.state
         self.compared += 1
         if streamed != disk:
             diff = [(pos, str(disk.get(pos)), str(streamed.get(pos)))
