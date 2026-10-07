@@ -21,6 +21,7 @@ pub mod pnrtest;
 pub mod route;
 pub mod sim;
 pub mod structure;
+pub mod synth;
 pub mod tile;
 pub mod tiletest;
 pub mod timing;

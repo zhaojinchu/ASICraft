@@ -374,45 +374,6 @@ fn layout_command(args: &[String]) -> Result<bool, String> {
     }
 }
 
-/// The Yosys commands that map a design to the tile library.
-const MAP_SCRIPT: &str = "\
-read_slang --threads 1 --top {top} top.sv
-proc
-opt
-techmap
-opt
-dfflegalize -cell $_DFF_N_ 01
-dfflibmap -liberty cells.lib
-abc -liberty cells.lib
-opt_clean
-write_json mapped.json
-write_verilog -noattr mapped.v
-";
-
-/// The Yosys commands that prove the mapped netlist equals the source.
-const EQUIV_SCRIPT: &str = "\
-read_slang --threads 1 --top {top} top.sv
-proc
-opt_clean
-rename {top} gold
-design -stash gold
-read_verilog mapped.v
-read_verilog cells.v
-hierarchy -top {top}
-flatten
-proc
-opt_clean
-rename {top} gate
-design -stash gate
-design -copy-from gold -as gold gold
-design -copy-from gate -as gate gate
-equiv_make gold gate equiv
-hierarchy -top equiv
-equiv_simple
-equiv_induct
-equiv_status -assert
-";
-
 /// `redfab build SOURCE.sv [--top NAME] -o DIR`
 ///
 /// Synthesizes the design to the tile library, proves the mapped netlist equals
@@ -461,8 +422,8 @@ fn build_command(args: &[String]) -> Result<bool, String> {
         write("top.sv", read(&source)?.as_bytes())?;
         write("cells.lib", library.liberty().as_bytes())?;
         write("cells.v", library.verilog_models().as_bytes())?;
-        write("map.ys", MAP_SCRIPT.replace("{top}", &top).as_bytes())?;
-        write("equiv.ys", EQUIV_SCRIPT.replace("{top}", &top).as_bytes())?;
+        write("map.ys", redfab_core::synth::MAP_SCRIPT.replace("{top}", &top).as_bytes())?;
+        write("equiv.ys", redfab_core::synth::EQUIV_SCRIPT.replace("{top}", &top).as_bytes())?;
         run_yosys(&out, "map.ys").map_err(|e| format!("synthesis failed: {e}"))?;
         run_yosys(&out, "equiv.ys")
             .map_err(|e| format!("the mapped netlist is NOT proven equal to the source: {e}"))?;
@@ -633,7 +594,15 @@ fn timing_report(design: &redfab_core::build::Design) -> String {
     if let Some(seq) = &timing.sequential {
         let mut out = format!(
             "design {}: clock {} ({} edge), period {} game ticks, high {}; inputs change {} ticks after the edge (allowed {} to {}); outputs read at {}\n",
-            design.name, seq.clock, seq.active, seq.period, seq.high, seq.input_change_at, seq.input_change_from, seq.input_change_by, seq.sample_at
+            design.name,
+            seq.clock,
+            seq.active,
+            seq.period,
+            seq.high,
+            seq.input_change_at,
+            seq.input_change_from,
+            seq.input_change_by,
+            seq.sample_at
         );
         out += "  flip-flop                         clock at   D from flip-flops   D from inputs   hold slack   setup slack\n";
         for f in &seq.flip_flops {
