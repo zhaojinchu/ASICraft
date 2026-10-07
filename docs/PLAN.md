@@ -18,7 +18,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | 9 | Counter and state machine | **done** 2026-10-06 | Flip-flops synthesized, placed and routed; sequential timing with hold fixes and a burnout budget; the 4-bit counter and a state machine match Verilator for 64 cycles in the game at three placements in both modes; a hold-broken copy and an over-driven inverter fail as predicted |
 | 10 | Browser playground, no server | **done** 2026-10-06 | The page compiles SystemVerilog with YoWASP Yosys and the WebAssembly core in a worker and runs the result in the 3D view with the same simulator the game was checked against; a headless browser types each design, compiles, flips levers and reads the right lamps; the pipeline under Node gives byte-identical designs; limits hold |
 | 11 | Server mod and live stream | **done** 2026-10-06 | Fabric Loader 0.19.5 runs on 26.3; the observer mod (two Mixins, a built-in WebSocket server, no Fabric API, compiled with javac since 26.3 ships unobfuscated) streams every block change with its tick; all mechanics recordings replay exactly on the modded server and the stream agrees with the disk tick for tick |
-| 12 | Live playground, local | not started | |
+| 12 | Live playground, local | **done** 2026-10-07 | A Node backend compiles submissions in a sandboxed child process, places them in plots on the modded server and relays the stream to the page; the counter driven from a headless browser records 946 ticks and 16 lever changes that replay natively tick for tick; six counters running cost 3.4 ms per tick |
 | 13 | Put it online | not started | |
 
 ## Stage log
@@ -248,6 +248,22 @@ Both are flip-flops. The master/slave is better on every figure, so it is `dff`.
 - On the modded server, every mechanics recording from stage 1 replays exactly in both modes at three placements, and the stream agrees with every snapshot, tick for tick.
 
 **Fallback not needed:** the plan allowed polling block states over the remote console if Fabric failed on 26.3. It did not fail.
+
+
+### Stage 12 (2026-10-07)
+
+**Built:** `server/` (see its README): the backend behind the page. A submission is source only; it is compiled in a child process (the page's own pipeline under Node) that is killed past the time limit or the memory limit, placed with `/place template … strict` in a free plot of a row of fixed cells, and driven by web levers that reach nothing but the probe blocks. The observer mod's stream is relayed to viewers filtered to their plot and translated to design coordinates; a clocked design's clock is driven from the stream, so each edge lands on the tick it is due. Everything since placement is a recording in the trace format, exported as a fixture and a trace, and the checks hold the live server to the same standard as everything else: the native replay of the fixture must equal the recording tick for tick. The page gained **Run on the server**: the view then shows the game's blocks. Two small changes underneath: the mod also flushes what changed *between* ticks, under the number of the tick just completed (that is when commands run, and what the trace format calls the last thing in that tick), and sends the end of every tick; and `sim_set` reports what changed at once, so the native simulator can play the part of the game in the fast checks.
+
+**Checks:** `tools/live_test.mjs` drives the backend against a fake world under Node, eight tests in about 35 s: placed designs are the native builds at chunk-aligned origins and the stream shows them placed exactly; levers are refused until the design settles, then reach only their probe block, and bad lever messages, a viewer without the token, and the clock input write nothing; the stream reaches viewers filtered and translated; with the native simulator playing the game, the recording of the inverter and of the shift register (clock driven by the backend) equals the simulator's own trace and replays natively; a design too big for a plot is refused before anything is placed; a source over the limit, a bad module name, every unexpected field, a hostile generate loop, a compile that hangs and one that eats memory are refused, and the backend is fine afterwards; plots are limited, released when their controller leaves, cleared, and reused; compiles run one at a time behind a bounded queue. `tools/live_check.mjs` runs the real backend on the real modded server: an inverter driven through the API (two swings and a 3-tick pulse) and the counter driven through a headless browser (enable, reset, five periods) both record traces that replay natively tick for tick; the page shows the server's lamps; six counters running keep the tick time within budget.
+
+**Results:**
+
+- Both recordings replay natively tick for tick: the counter's 946 ticks with 16 lever changes (its clock included), the inverter's 87 ticks with 4. The between-ticks flush is what makes this exact: without it a command's changes would be labelled with the next tick.
+- Tick time with six counters running at once: 3.4 ms average, 6.9 ms at the 95th percentile, against a budget of 25 and 45 ms.
+- A normal compile peaks near 900 MB of memory (Yosys in WebAssembly), which set the sandbox's limit at 2 GB.
+- The modded mechanics replay (stage 11's check) fell from 12 minutes to 45 seconds per mode: the stream check in the harness replayed every change since the base on every tick; it now applies them incrementally.
+
+**Try it:** `node server/live.mjs`, then open http://127.0.0.1:8766/ and click **Run on the server**.
 
 ---
 

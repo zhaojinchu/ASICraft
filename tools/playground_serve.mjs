@@ -6,6 +6,7 @@
 // /node_modules/...      YoWASP Yosys and three.js
 // /designs/NAME/top.sv   the example designs
 // /core/redfab_wasm.wasm the core, built for wasm32 in release mode
+// /api/status            {"live": false}: no live backend here (see server/)
 
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
@@ -29,6 +30,11 @@ export function resolve(url) {
 
 export function serve(port = 0) {
     const server = createServer(async (req, res) => {
+        // The page asks whether a live backend (server/) is behind it. Here there is none.
+        if (req.url.split('?')[0] === '/api/status') {
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+            return res.end(JSON.stringify({ live: false }));
+        }
         const file = resolve(req.url);
         try {
             if (!file || !(await stat(file)).isFile()) throw new Error('not found');

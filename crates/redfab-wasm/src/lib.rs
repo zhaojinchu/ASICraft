@@ -17,7 +17,7 @@
 //! - `library`: what synthesis needs: `{liberty, models, map, equiv}`.
 //! - `sim_new` `{design}`: a simulator on a design file: `{handle}`.
 //! - `sim_set` `{handle, input, on}`: flips input number `input`, as the last
-//!   event of the current tick.
+//!   event of the current tick: `{changes: [[pos, state]]}`, what changed at once.
 //! - `sim_step` `{handle, ticks}`: runs ticks: `{tick, changes: [[pos, state]],
 //!   lamps: [0|1]}`.
 //! - `sim_trace` `{handle}`: everything so far as a fixture and its trace, in
@@ -100,9 +100,14 @@ fn handle(request: &Value) -> Result<Value, String> {
                 let pin = r.design.inputs.get(input).ok_or("no such input")?;
                 let block: Block = if on { pin.on.parse()? } else { pin.off.parse()? };
                 let probe = r.probes[input];
+                let before: BTreeMap<Pos, Block> = r.sim.world().iter().collect();
                 r.sim.set_block(probe, block, false)?;
                 r.recorder.event(&r.sim, probe, block);
-                Ok(json!({"ok": true}))
+                // What changed at once: the probe, and what dust and lamps did in response.
+                let after: BTreeMap<Pos, Block> = r.sim.world().iter().collect();
+                let changes: Vec<(String, String)> =
+                    Recorder::diff(&before, &after).into_iter().map(|(p, b)| (p.to_string(), b.to_string())).collect();
+                Ok(json!({"ok": true, "changes": changes}))
             })
         }
         "sim_step" => {

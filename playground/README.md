@@ -28,6 +28,9 @@ Files:
 - `view.js` — three.js: every block an instance of a cube, recoloured as it
   changes state.
 
-What is not here: nothing is sent anywhere, so nothing needs guarding beyond
+Served this way, nothing is sent anywhere, so nothing needs guarding beyond
 the browser's own sandbox and the limits that keep a bad design from hanging
-the page. The live playground (stage 12) adds the server side.
+the page. Served by the live backend (`server/`, stage 12) the page also
+offers **Run on the server**: the source goes to the server, which builds it,
+places it in the game, and streams the game's blocks back; the view then
+shows those, and the levers reach the probe blocks in the world.

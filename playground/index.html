@@ -48,7 +48,7 @@
 <body>
 <header>
   <h1>redfab playground</h1>
-  <span class="hint">SystemVerilog in, a redstone circuit out, simulated here with the game's own rules.</span>
+  <span class="hint">SystemVerilog in, a redstone circuit out: simulated here with the game's own rules, or run live on the server.</span>
 </header>
 <main>
   <section id="left">
@@ -57,6 +57,8 @@
       <button id="compile" class="primary">Compile</button>
       <button id="run" disabled>Pause</button>
       <button id="download" disabled title="the structure file, for /place template or Litematica">world.nbt</button>
+      <button id="live" hidden title="build on the server and run it in the game">Run on the server</button>
+      <button id="release" hidden title="give the plot back">Stop</button>
     </div>
     <textarea id="source" spellcheck="false" aria-label="SystemVerilog source"></textarea>
     <div id="status">Ready.</div>
