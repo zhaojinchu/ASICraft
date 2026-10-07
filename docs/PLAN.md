@@ -16,7 +16,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | 7 | Timing analysis | **done** 2026-10-06 | Best and worst case per output: a bound by path and exact figures over every pair of input combinations from a timed model of the parts; the model agrees with the block simulator on every lamp change of 10k input changes of the adder, and the game stays within the report |
 | 8 | Flip-flop characterization | **done** 2026-10-06 | Two candidates built and swept tick by tick; the master/slave pair of locked repeaters chosen (setup 1, hold 5, clock-to-output 8, period ≥ 12); the sweep tables are reproduced by the simulator and the game |
 | 9 | Counter and state machine | **done** 2026-10-06 | Flip-flops synthesized, placed and routed; sequential timing with hold fixes and a burnout budget; the 4-bit counter and a state machine match Verilator for 64 cycles in the game at three placements in both modes; a hold-broken copy and an over-driven inverter fail as predicted |
-| 10 | Browser playground, no server | not started | |
+| 10 | Browser playground, no server | **done** 2026-10-06 | The page compiles SystemVerilog with YoWASP Yosys and the WebAssembly core in a worker and runs the result in the 3D view with the same simulator the game was checked against; a headless browser types each design, compiles, flips levers and reads the right lamps; the pipeline under Node gives byte-identical designs; limits hold |
 | 11 | Server mod and live stream | not started | |
 | 12 | Live playground, local | not started | |
 | 13 | Put it online | not started | |
@@ -226,6 +226,16 @@ Both are flip-flops. The master/slave is better on every figure, so it is `dff`.
 2. The first hold negative the tool flagged did not misbehave: by the tile's conservative figures the data arrived two ticks after the clock, which is the ordering-dependent boundary tick, and the simulator happened to capture the old value. The negative now slows the clock past the hold margin, so the new value is captured beyond doubt.
 
 **Known costs, left for later stages:** the counter's period of 132 ticks (6.6 s) comes from its long feedback paths; the clock skew of up to 16 ticks across four flip-flops comes from the repeaters the clock net needs. Both are density problems for the later compaction pass; the analysis makes them safe, not small.
+
+### Stage 10 (2026-10-06)
+
+**Built:** `playground/` (see its README): a page with an editor, Compile, a panel of levers and lamps, and a three.js view of the blocks; a worker that runs YoWASP Yosys and the WebAssembly core; `compile.js`, the same pipeline as `redfab build` (synthesis, the equivalence proof, placement, routing, the checks) with the limits (source 64 KB, 400 cells, 80,000 blocks, 90 s, after which the page terminates the worker); and the core's one-call interface (`redfab_call`) with `build`, `library`, and `sim_new`/`sim_set`/`sim_step`/`sim_trace`/`sim_free`, so the view is driven by the same simulator the game was checked against. The synthesis scripts moved into the core (`synth.rs`) so the command line and the browser cannot drift apart. A trace recorder (`trace::Recorder`) lets what the browser simulated be replayed natively. `node tools/playground_serve.mjs` serves it locally.
+
+**Checks:** `tools/playground_test.mjs` runs the pipeline under Node with the same Yosys and core the page uses: every design (including the clocked ones) comes out byte-identical to the native build; a stimulus simulated in the core's browser interface traces exactly as `redfab check-fixtures` replays it; a source over the size limit, a design over the cell limit and a bad module name are refused with a message; a compile that never finishes is stopped at the time limit and the worker is usable afterwards; a hostile source (a generate loop of four million gates) is refused within the limit. `tools/playground_check.mjs` drives the page in headless Brave: for the inverter, the NOR, the full adder and the constants it loads the source, compiles, flips the levers (the first through a click on the lever in the 3D view, the rest through the panel), steps the simulator and reads the lamps, which match the native simulator on every input combination; the counter compiles and runs at the game's 20 ticks a second with the page driving its clock. Screenshots land in `build/playground/`.
+
+**Results:** everything above passes. Compiling the full adder in the browser takes under a second; the 4-bit adder about 14 s (its all-pairs timing check); the counter 3 s.
+
+**Try it:** `node tools/playground_serve.mjs`, then open http://127.0.0.1:8765/ in a browser.
 
 ---
 

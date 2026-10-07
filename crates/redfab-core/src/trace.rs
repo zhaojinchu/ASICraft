@@ -390,6 +390,134 @@ pub fn run_fixture(fixture_json: &str) -> Result<FixtureRun, String> {
     Ok(FixtureRun { trace, failures })
 }
 
+/// Records a running simulation as a fixture and its trace, the way
+/// [`run_fixture`] would record the same stimuli: the state after any events at
+/// tick 0 is the initial state, and an event applied after tick `t`'s step is
+/// part of tick `t`. The playground uses it so that what the browser simulates
+/// can be replayed natively and compared.
+pub struct Recorder {
+    name: String,
+    size: [i32; 3],
+    tick: u32,
+    /// The state at tick 0 (after any events at tick 0), before the last step,
+    /// and now.
+    initial: BTreeMap<Pos, Block>,
+    before: BTreeMap<Pos, Block>,
+    last: BTreeMap<Pos, Block>,
+    pending0: Vec<crate::sim::Pending>,
+    events: BTreeMap<u32, BTreeMap<String, String>>,
+    /// Per tick from 1: its changes and pending ticks.
+    ticks: Vec<(BTreeMap<String, String>, Vec<crate::sim::Pending>)>,
+}
+
+impl Recorder {
+    pub fn start(name: &str, size: [i32; 3], sim: &Sim) -> Recorder {
+        let now: BTreeMap<Pos, Block> = sim.world().iter().collect();
+        Recorder {
+            name: name.to_string(),
+            size,
+            tick: 0,
+            initial: now.clone(),
+            before: now.clone(),
+            last: now,
+            pending0: sim.pending(),
+            events: BTreeMap::new(),
+            ticks: Vec::new(),
+        }
+    }
+
+    pub fn tick(&self) -> u32 {
+        self.tick
+    }
+
+    /// A block set by the caller at the current tick, after `sim` has taken it.
+    /// Dust reacts at once, so the whole world is looked at again.
+    pub fn event(&mut self, sim: &Sim, pos: Pos, block: Block) {
+        self.events.entry(self.tick).or_default().insert(pos.to_string(), block.to_string());
+        let now: BTreeMap<Pos, Block> = sim.world().iter().collect();
+        if self.tick == 0 {
+            self.initial = now.clone();
+            self.before = now.clone();
+            self.last = now;
+            self.pending0 = sim.pending();
+            return;
+        }
+        // Part of the tick just stepped.
+        self.last = now;
+        let entry = self.ticks.last_mut().expect("a tick has been recorded");
+        entry.0 =
+            Self::diff(&self.before, &self.last).into_iter().map(|(p, b)| (p.to_string(), b.to_string())).collect();
+        entry.1 = sim.pending();
+    }
+
+    /// Records the tick `sim` has just stepped. Returns what changed.
+    pub fn record(&mut self, sim: &Sim) -> Vec<(Pos, Block)> {
+        self.tick += 1;
+        let now: BTreeMap<Pos, Block> = sim.world().iter().collect();
+        let changed = Self::diff(&self.last, &now);
+        self.ticks.push((changed.iter().map(|(p, b)| (p.to_string(), b.to_string())).collect(), sim.pending()));
+        self.before = std::mem::replace(&mut self.last, now);
+        changed
+    }
+
+    /// What differs from `from` to `to`, with air for blocks that went away.
+    fn diff(from: &BTreeMap<Pos, Block>, to: &BTreeMap<Pos, Block>) -> Vec<(Pos, Block)> {
+        let mut changed = Vec::new();
+        for (pos, block) in to {
+            if from.get(pos) != Some(block) {
+                changed.push((*pos, *block));
+            }
+        }
+        for pos in from.keys() {
+            if !to.contains_key(pos) {
+                changed.push((*pos, Block::Air));
+            }
+        }
+        changed
+    }
+
+    /// The fixture (with `blocks` as placed, strictly) and the trace so far.
+    pub fn finish(&self, blocks: &BTreeMap<String, String>) -> (serde_json::Value, serde_json::Value) {
+        let pending = |list: &[crate::sim::Pending]| -> Vec<serde_json::Value> {
+            list.iter()
+                .map(|p| serde_json::json!({"pos": p.pos.to_string(), "block": p.block, "delay": p.delay, "priority": p.priority}))
+                .collect()
+        };
+        let fixture = serde_json::json!({
+            "format": "redfab-fixture/1",
+            "name": self.name,
+            "doc": "recorded in the playground",
+            "size": self.size,
+            "placement": "strict",
+            "blocks": blocks,
+            "events": self.events.iter().map(|(t, set)| serde_json::json!({"tick": t, "set": set})).collect::<Vec<_>>(),
+            "ticks": self.tick,
+            "expect": [],
+        });
+        let initial: BTreeMap<String, String> =
+            self.initial.iter().map(|(p, b)| (p.to_string(), b.to_string())).collect();
+        let ticks: Vec<serde_json::Value> = self
+            .ticks
+            .iter()
+            .enumerate()
+            .filter(|(_, (changes, pend))| !changes.is_empty() || !pend.is_empty())
+            .map(
+                |(i, (changes, pend))| serde_json::json!({"tick": i + 1, "changes": changes, "pending": pending(pend)}),
+            )
+            .collect();
+        let trace = serde_json::json!({
+            "format": "redfab-trace/1",
+            "fixture": self.name,
+            "source": {"kind": "sim"},
+            "size": self.size,
+            "initial": initial,
+            "pending0": pending(&self.pending0),
+            "ticks": ticks,
+        });
+        (fixture, trace)
+    }
+}
+
 /// Stimuli that share a tick are applied in this order: by height, then x, then z.
 /// The order matters when two inputs of one gate change together.
 pub fn event_order(pos: Pos) -> (i32, i32, i32) {
