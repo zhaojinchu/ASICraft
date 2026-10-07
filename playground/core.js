@@ -5,7 +5,7 @@
 //   core.call({ op: 'build', mapped, top, name })  -> { ok, design, structure, report } | { ok: false, error }
 //   core.call({ op: 'library' })                   -> { liberty, models, map, equiv }
 //   core.call({ op: 'sim_new', design })           -> { handle }
-//   core.call({ op: 'sim_set', handle, input, on })
+//   core.call({ op: 'sim_set', handle, input, on })   -> { changes: [[pos, state], ...] }  (what changed at once)
 //   core.call({ op: 'sim_step', handle, ticks })   -> { tick, changes: [[pos, state], ...], lamps: [0|1, ...] }
 //   core.call({ op: 'sim_trace', handle })         -> { fixture, trace }  (the trace format, for comparing with the native simulator)
 //   core.call({ op: 'sim_free', handle })

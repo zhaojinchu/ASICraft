@@ -65,7 +65,8 @@ export function connect(url) {
     let closed = null;
     ws.onmessage = (e) => {
         const message = JSON.parse(e.data);
-        if (waiting.length) waiting.shift().resolve(message);
+        const index = waiting.findIndex((w) => w.predicate(message));
+        if (index >= 0) waiting.splice(index, 1)[0].resolve(message);
         else queue.push(message);
     };
     ws.onclose = (e) => {
@@ -84,29 +85,33 @@ export function connect(url) {
         send(message) {
             ws.send(JSON.stringify(message));
         },
-        /// The next message, or a message matching `predicate`, within `ms`.
+        /// The next message matching `predicate` (queued or to come), within `ms`.
         next(predicate = () => true, ms = 10_000) {
             return new Promise((resolve, reject) => {
-                const deadline = setTimeout(() => reject(new Error(`no matching message within ${ms} ms`)), ms);
-                const take = (message) => {
-                    if (predicate(message)) {
-                        clearTimeout(deadline);
-                        resolve(message);
-                    } else {
-                        waiting.push({ resolve: take, reject });
-                    }
-                };
                 const index = queue.findIndex(predicate);
                 if (index >= 0) {
-                    const [message] = queue.splice(index, 1);
+                    resolve(queue.splice(index, 1)[0]);
+                    return;
+                }
+                if (closed) {
+                    reject(new Error(`closed: ${closed.code} ${closed.reason}`));
+                    return;
+                }
+                const entry = { predicate, reject };
+                const deadline = setTimeout(() => {
+                    waiting.splice(waiting.indexOf(entry), 1);
+                    reject(new Error(`no matching message within ${ms} ms`));
+                }, ms);
+                entry.resolve = (message) => {
                     clearTimeout(deadline);
                     resolve(message);
-                } else if (closed) {
-                    reject(new Error(`closed: ${closed.code} ${closed.reason}`));
-                } else {
-                    waiting.push({ resolve: take, reject });
-                }
+                };
+                waiting.push(entry);
             });
+        },
+        /// Forgets queued messages, so the next wait is for a fresh one.
+        drain() {
+            queue.length = 0;
         },
         get closed() {
             return closed;
