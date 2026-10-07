@@ -38,6 +38,35 @@ else
     echo "$MC_SERVER_SHA1  $JAR" | shasum -a 1 -c -
 fi
 
+# --- Fabric Loader: the launcher jar, run once so it installs the loader and Mixin
+# beside the vanilla server's libraries; .tools/fabric is then copied into each
+# modded server's run directory.
+FABRIC=.tools/fabric
+if [ -f "$FABRIC/libraries/net/fabricmc/fabric-loader/$FABRIC_LOADER_VERSION/fabric-loader-$FABRIC_LOADER_VERSION.jar" ]; then
+    say "Fabric Loader $FABRIC_LOADER_VERSION already installed"
+else
+    say "installing Fabric Loader $FABRIC_LOADER_VERSION"
+    rm -rf "$FABRIC" && mkdir -p "$FABRIC"
+    curl -fsSL "$FABRIC_LAUNCHER_URL" -o "$FABRIC/fabric-server-launch.jar"
+    echo "$FABRIC_LAUNCHER_SHA256  $FABRIC/fabric-server-launch.jar" | shasum -a 256 -c -
+    (
+        cd "$FABRIC"
+        printf 'serverJar=%s\n' "$(cd ../.. && pwd)/$JAR" > fabric-server-launcher.properties
+        echo "eula=true" > eula.txt
+        printf 'server-port=25599\nenable-rcon=false\nonline-mode=false\nlevel-type=minecraft\\:flat\n' > server.properties
+        # Starts the server once to fetch the libraries; stop it as soon as it is up.
+        ../jdk/Contents/Home/bin/java -Xmx1G -jar fabric-server-launch.jar nogui > install.log 2>&1 &
+        pid=$!
+        for _ in $(seq 1 120); do
+            grep -q 'Done (' install.log 2>/dev/null && break
+            sleep 1
+        done
+        kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+        rm -rf world logs mods eula.txt server.properties banned-*.json ops.json usercache.json whitelist.json
+    )
+    [ -f "$FABRIC/.fabric/server/$MC_VERSION-server.jar" ] || { echo "Fabric install failed; see $FABRIC/install.log"; exit 1; }
+fi
+
 # --- Rust (version comes from rust-toolchain.toml)
 export PATH="$HOME/.cargo/bin:$PATH"
 if ! command -v rustup >/dev/null; then
