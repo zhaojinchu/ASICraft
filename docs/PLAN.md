@@ -17,7 +17,7 @@ This is the approved staged plan (2026-10-01) plus the status of each stage. Des
 | 8 | Flip-flop characterization | **done** 2026-10-06 | Two candidates built and swept tick by tick; the master/slave pair of locked repeaters chosen (setup 1, hold 5, clock-to-output 8, period ≥ 12); the sweep tables are reproduced by the simulator and the game |
 | 9 | Counter and state machine | **done** 2026-10-06 | Flip-flops synthesized, placed and routed; sequential timing with hold fixes and a burnout budget; the 4-bit counter and a state machine match Verilator for 64 cycles in the game at three placements in both modes; a hold-broken copy and an over-driven inverter fail as predicted |
 | 10 | Browser playground, no server | **done** 2026-10-06 | The page compiles SystemVerilog with YoWASP Yosys and the WebAssembly core in a worker and runs the result in the 3D view with the same simulator the game was checked against; a headless browser types each design, compiles, flips levers and reads the right lamps; the pipeline under Node gives byte-identical designs; limits hold |
-| 11 | Server mod and live stream | not started | |
+| 11 | Server mod and live stream | **done** 2026-10-06 | Fabric Loader 0.19.5 runs on 26.3; the observer mod (two Mixins, a built-in WebSocket server, no Fabric API, compiled with javac since 26.3 ships unobfuscated) streams every block change with its tick; all mechanics recordings replay exactly on the modded server and the stream agrees with the disk tick for tick |
 | 12 | Live playground, local | not started | |
 | 13 | Put it online | not started | |
 
@@ -236,6 +236,18 @@ Both are flip-flops. The master/slave is better on every figure, so it is `dff`.
 **Results:** everything above passes. Compiling the full adder in the browser takes under a second; the 4-bit adder about 14 s (its all-pairs timing check); the counter 3 s.
 
 **Try it:** `node tools/playground_serve.mjs`, then open http://127.0.0.1:8765/ in a browser.
+
+### Stage 11 (2026-10-06)
+
+**Built:** `mod/` (see its README): a Fabric server mod of four Java files. A Mixin on `LevelChunk.setBlockState` collects every block state change in the overworld (the method returns the old state when something changed); a Mixin at the tail of `MinecraftServer.tickServer` sends the batch with the overworld's game time, which is what `/time query gametime` reports and the harness steps by. A WebSocket server of its own (RFC 6455, text frames out, close and ping in; one writer thread per client so the server thread never waits on a socket) serves clients on localhost. No Fabric API. `tools/build_mod.sh` compiles with `javac` alone against the server jar, Fabric Loader and Mixin, which `tools/setup.sh` installs by running the pinned Fabric server launcher once (`.tools/fabric`). The harness gained `VanillaServer(modded=True)`, `harness/observe.py` (a receive-only WebSocket client) and `--modded` for the mechanics verification, under which the runner also lays the stream's changes over the first snapshot and compares with every later snapshot read from disk.
+
+**Results:**
+
+- Fabric Loader 0.19.5 loads on Minecraft 26.3; the mod is listed and both Mixins apply.
+- Minecraft 26.3 ships unobfuscated (Fabric lists intermediary `0.0.0` and no Yarn for it), so the mod compiles against the real class names with no remapping and no Gradle, which keeps the toolchain to the JDK already pinned.
+- On the modded server, every mechanics recording from stage 1 replays exactly in both modes at three placements, and the stream agrees with every snapshot, tick for tick.
+
+**Fallback not needed:** the plan allowed polling block states over the remote console if Fabric failed on 26.3. It did not fail.
 
 ---
 

@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "redfab-observer",
+  "version": "0.1.0",
+  "name": "redfab observer",
+  "description": "Streams block changes with their tick over a WebSocket on localhost. Observes only.",
+  "license": "MIT",
+  "environment": "server",
+  "entrypoints": { "main": ["dev.redfab.observer.Observer"] },
+  "mixins": ["redfab-observer.mixins.json"],
+  "depends": { "fabricloader": ">=0.19.0", "minecraft": "26.3", "java": ">=25" }
+}
