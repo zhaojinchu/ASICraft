@@ -14,16 +14,19 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from harness.server import read_versions  # noqa: E402
+
 OUT = ROOT / "harness" / "data" / "block_defaults.json"
 
 
 def main() -> int:
-    pins = dict(line.split("=", 1) for line in (ROOT / "versions.env").read_text().splitlines()
-                if "=" in line and not line.startswith("#"))
+    pins = read_versions()
     mc = pins["MC_VERSION"]
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(
-            [str(ROOT / ".tools/jdk/Contents/Home/bin/java"), "-DbundlerMainClass=net.minecraft.data.Main",
+            [str(ROOT / ".tools/java"), "-DbundlerMainClass=net.minecraft.data.Main",
              f"-DbundlerRepoDir={ROOT / '.tools/mc/bundle'}", "-jar", str(ROOT / f".tools/mc/server-{mc}.jar"), "--reports"],
             cwd=tmp, check=True, capture_output=True,
         )
