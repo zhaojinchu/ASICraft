@@ -423,7 +423,7 @@ fn layout_command(args: &[String]) -> Result<bool, String> {
     };
     let library = redfab_core::tile::Library::builtin()?;
     let netlist = redfab_core::netlist::Netlist::from_yosys_json(&read(Path::new(mapped))?, top, &library)?;
-    match redfab_core::build::place_and_route(&netlist) {
+    match redfab_core::build::place_and_route(&library, &netlist) {
         Ok((routed, cols)) => {
             print!("{}", redfab_core::route::render(&routed.layout));
             println!(
@@ -840,8 +840,18 @@ fn extract_command(args: &[String]) -> Result<bool, String> {
     let [design] = args else { return Err("usage: redfab extract DESIGN.json".into()) };
     let design = redfab_core::build::Design::from_json(&read(Path::new(design))?)?;
     let circuit = redfab_core::extract::extract(&design.world()?, &design.probes()?);
-    let tile =
-        |p: &redfab_core::geom::Pos| format!("({},{})", p.x / redfab_core::tile::PITCH, p.z / redfab_core::tile::PITCH);
+    // Which cell a block is in, by the same table the layout is realized with: a
+    // design file does not name its column widths, so every column is a cell wide.
+    let pitch = redfab_core::tile::PITCH;
+    let [sx, _, sz] = design.size;
+    let xs = redfab_core::layout::origins(&vec![pitch; (sx / pitch) as usize]);
+    let zs = redfab_core::layout::origins(&vec![pitch; (sz / pitch) as usize]);
+    let tile = |p: &redfab_core::geom::Pos| {
+        let cell = |origins: &[i32], at: i32| {
+            redfab_core::layout::index_at(origins, at).map_or("?".to_string(), |i| i.to_string())
+        };
+        format!("({},{})", cell(&xs, p.x), cell(&zs, p.z))
+    };
     for (i, net) in circuit.nets.iter().enumerate() {
         let mut tiles: Vec<String> = net.iter().map(tile).collect();
         tiles.dedup();
