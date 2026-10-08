@@ -2,13 +2,16 @@
 // Everything slow lives here so the page stays responsive; the page terminates
 // the worker when a compile takes too long.
 
-import { runYosys } from '/node_modules/@yowasp/yosys/gen/bundle.js';
+// The package path carries its version so the server can let the browser keep
+// the 67 MB Yosys core for good (see tools/playground_serve.mjs).
+import { runYosys } from '/pkg/@yowasp/yosys@0.68.1207/gen/bundle.js';
 import { loadCore } from './core.js';
 import { compile } from './compile.js';
 
 let core = null;
 let handle = null;
 let structure = null;
+let designText = null;
 
 async function ready() {
     if (!core) {
@@ -36,21 +39,26 @@ self.onmessage = async ({ data }) => {
                     core: c,
                     runYosys,
                     log: (text) => self.postMessage({ id, log: text }),
+                    phase: (name) => self.postMessage({ id, phase: name }),
                 });
                 handle = c.call({ op: 'sim_new', design: built.designText }).handle;
                 structure = built.structure;
-                reply({ design: built.design, report: built.report });
+                designText = built.designText;
+                reply({ design: built.design, report: built.report, top: built.top, name: built.name, cells: built.cells });
                 break;
             }
             case 'structure':
                 reply({ structure });
                 break;
+            case 'design':
+                reply({ design: designText });
+                break;
             case 'ping':
                 reply({});
                 break;
             case 'set':
-                c.call({ op: 'sim_set', handle, input: data.input, on: data.on });
-                reply({});
+                // What changed at once: the probe and the dust and lamps that repowered with it.
+                reply(c.call({ op: 'sim_set', handle, input: data.input, on: data.on }));
                 break;
             case 'step':
                 reply(c.call({ op: 'sim_step', handle, ticks: data.ticks }));
