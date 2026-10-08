@@ -34,7 +34,7 @@ impl Sim {
                 }
             }
             Block::Lever { powered, .. } => {
-                if powered {
+                if powered && self.mutation != Some(Mutation::LeverPowersNothing) {
                     15
                 } else {
                     0
@@ -88,7 +88,12 @@ impl Sim {
                 self.own_signal(pos, block, dir, wires)
             }
             // A lever strongly powers only the block it is mounted on.
-            Block::Lever { powered: true, .. } if block.lever_mount() == Some(dir.opposite()) => 15,
+            Block::Lever { powered: true, .. }
+                if block.lever_mount() == Some(dir.opposite())
+                    && self.mutation != Some(Mutation::LeverPowersNothing) =>
+            {
+                15
+            }
             _ => 0,
         }
     }

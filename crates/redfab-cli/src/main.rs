@@ -11,6 +11,53 @@ use redfab_core::trace::{Replay, replay};
 /// File-name suffixes of recorded traces, by redstone mode.
 const TRACE_MODES: [&str; 2] = ["vanilla", "vanilla-rx"];
 
+const USAGE: &str = "\
+usage: redfab COMMAND [ARGS]
+
+From SystemVerilog to a redstone circuit:
+  build SOURCE.sv|MAPPED.json [--top NAME] [--break hold] -o DIR
+                      synthesize, prove, place, route and check; writes design.json, world.nbt, report.txt
+  simulate DESIGN.json VECTORS.json [--shuffle SEED]
+                      apply input vectors (clock cycles for a clocked design) in the simulator
+  timing DESIGN.json [--paths]
+                      the timing report of a built design
+  layout MAPPED.json [--top NAME]
+                      place and route a mapped netlist and draw it, one character per tile
+  extract DESIGN.json
+                      the circuit read back from a design's blocks
+  lvs DESIGN.json MAPPED.json [--top NAME]
+                      check a design's blocks against a netlist
+  stress DESIGN.json [--spacing N]
+                      how often a torch turns off when the inputs change every N ticks
+  timing-measure DESIGN.json [--multi N] [--seed S]
+                      check the timing report against the simulator
+  structure TRACE.json OUT.nbt
+                      a trace's first state as a vanilla structure file
+  structure-pattern SX SY SZ OUT.nbt
+                      a test structure of stone and glass
+
+Checks of the simulator and the tile set:
+  check-traces [--mutate NAME] [--verbose] [--no-skips] DIR
+                      replay recorded traces in the simulator
+  list-mutations      the deliberate rule breaks check-traces can apply
+  replay FIXTURE.json TRACE.json [TICKS]
+                      the game's recording beside the simulator's, tick by tick
+  check-fixtures DIR  run fixtures in the simulator and check their expectations
+  tile-adjacency      every pair of tile variants side by side must interact only through ports
+  tile-fixtures DIR [--groups N] [--seed S]
+                      write a fixture for every tile variant, and random groups
+  characterize [DIR] [--shuffles N] [--margin M] [--chosen NAME] [--tables]
+                      setup, hold and clock-to-output of the flip-flop tiles
+  pnr-random [--count N] [--seed S] [--gates N] [--inputs N] [--clocked] [--dump DIR]
+                      random netlists must place, route and compute correctly
+
+  help                this text
+  --version           the version and the Minecraft version it targets
+
+Synthesis runs Yosys under Node: synth/yosys.mjs beside the checkout's node_modules (npm ci),
+found next to the executable, in the checkout, or at $REDFAB_SYNTH.
+";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
@@ -37,7 +84,7 @@ fn main() -> ExitCode {
             }
             Ok(true)
         }
-        Some("--version") | None => {
+        Some("--version") => {
             println!(
                 "redfab {} (Minecraft {}, data version {})",
                 env!("CARGO_PKG_VERSION"),
@@ -46,7 +93,11 @@ fn main() -> ExitCode {
             );
             Ok(true)
         }
-        Some(other) => Err(format!("unknown command {other:?}")),
+        Some("help") | Some("--help") | Some("-h") | None => {
+            print!("{USAGE}");
+            Ok(!args.is_empty())
+        }
+        Some(other) => Err(format!("unknown command {other:?}; run `redfab help`")),
     };
     match result {
         Ok(true) => ExitCode::SUCCESS,
@@ -268,24 +319,35 @@ fn check_fixtures_command(args: &[String]) -> Result<bool, String> {
     Ok(failed == 0 && passed > 0)
 }
 
-/// `redfab pnr-random [--count N] [--seed S] [--dump DIR]`
+/// `redfab pnr-random [--count N] [--seed S] [--gates N] [--inputs N] [--clocked] [--dump DIR]`
 ///
-/// Generates random combinational netlists and builds every one: placement,
-/// routing, the layout-versus-netlist and strength checks, and the simulator
-/// against a direct evaluation of the netlist on up to 16 input vectors. With
-/// `--dump`, the netlists that fail are written there as Yosys JSON.
+/// Generates random netlists and builds every one: placement, routing, the
+/// layout-versus-netlist and strength checks, and the simulator against a
+/// direct evaluation of the netlist on up to 16 input vectors (clock cycles for
+/// a clocked netlist). Without `--gates` the netlists are mostly small, every
+/// fifth one larger; `--gates` and `--inputs` fix the sizes, `--clocked` adds
+/// one to four flip-flops. With `--dump`, the netlists that fail are written
+/// there as Yosys JSON.
 fn pnr_random_command(args: &[String]) -> Result<bool, String> {
     let mut count = 20usize;
     let mut seed = 1u64;
+    let mut gates: Option<usize> = None;
+    let mut inputs: Option<usize> = None;
+    let mut clocked = false;
     let mut dump: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--count" => count = it.next().and_then(|n| n.parse().ok()).ok_or("--count needs a number")?,
             "--seed" => seed = it.next().and_then(|n| n.parse().ok()).ok_or("--seed needs a number")?,
+            "--gates" => gates = Some(it.next().and_then(|n| n.parse().ok()).ok_or("--gates needs a number")?),
+            "--inputs" => inputs = Some(it.next().and_then(|n| n.parse().ok()).ok_or("--inputs needs a number")?),
+            "--clocked" => clocked = true,
             "--dump" => dump = Some(PathBuf::from(it.next().ok_or("--dump needs a directory")?)),
             other => {
-                return Err(format!("usage: redfab pnr-random [--count N] [--seed S] [--dump DIR] (got {other:?})"));
+                return Err(format!(
+                    "usage: redfab pnr-random [--count N] [--seed S] [--gates N] [--inputs N] [--clocked] [--dump DIR] (got {other:?})"
+                ));
             }
         }
     }
@@ -298,19 +360,32 @@ fn pnr_random_command(args: &[String]) -> Result<bool, String> {
     for i in 0..count {
         let mut rng = redfab_core::tiletest::Rng::new(seed * 100_000 + i as u64);
         // Mostly small, every fifth one larger.
-        let gates = if i % 5 == 4 { 20 + rng.below(21) } else { 1 + rng.below(16) };
-        let netlist = redfab_core::pnrtest::random_netlist(&mut rng, gates);
+        let gates = gates.unwrap_or_else(|| if i % 5 == 4 { 20 + rng.below(21) } else { 1 + rng.below(16) });
+        let inputs = inputs.unwrap_or_else(|| 1 + rng.below(6));
+        let flip_flops = if clocked { 1 + rng.below(4) } else { 0 };
+        let netlist = redfab_core::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
         let name = format!("random_{seed}_{i:02}");
+        let started = std::time::Instant::now();
         match redfab_core::pnrtest::build_and_verify(&netlist, &name, 16, &mut rng) {
             Ok(built) => {
                 let line = built.report.lines().find(|l| l.contains("tiles:")).unwrap_or_default().trim().to_string();
-                println!("  ok    {name}: {} cells, {line}", netlist.cells.len());
+                println!(
+                    "  ok    {name}: {} cells, {} inputs, {line}, {:.1} s",
+                    netlist.cells.len(),
+                    netlist.inputs.len(),
+                    started.elapsed().as_secs_f64()
+                );
                 cells += netlist.cells.len();
                 tiles += built.design.blocks.len();
             }
             Err(e) => {
                 failures += 1;
-                println!("  FAIL  {name}: {e}");
+                println!(
+                    "  FAIL  {name}: {} cells, {} inputs, {:.1} s: {e}",
+                    netlist.cells.len(),
+                    netlist.inputs.len(),
+                    started.elapsed().as_secs_f64()
+                );
                 if let Some(dir) = &dump {
                     let path = dir.join(format!("{name}.json"));
                     fs::write(&path, netlist.to_yosys_json("top")).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -340,12 +415,16 @@ fn layout_command(args: &[String]) -> Result<bool, String> {
     match redfab_core::build::place_and_route(&netlist) {
         Ok((routed, cols)) => {
             print!("{}", redfab_core::route::render(&routed.layout));
-            println!("({cols} routing columns between gate columns)");
+            println!(
+                "(routing columns per gap, west to east: {})",
+                cols.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")
+            );
             Ok(true)
         }
         Err(e) => {
             // Show the placement alone, with one routing column.
-            let placement = redfab_core::place::place(&netlist, 1)?;
+            let gaps = redfab_core::place::gap_count(&netlist)?;
+            let placement = redfab_core::place::place(&netlist, &vec![1; gaps])?;
             let mut layout = redfab_core::layout::Layout::default();
             for (c, &cell) in placement.gates.iter().enumerate() {
                 layout.tiles.insert(
@@ -405,33 +484,51 @@ fn build_command(args: &[String]) -> Result<bool, String> {
     let name = out.file_name().and_then(|n| n.to_str()).unwrap_or("design").to_string();
 
     let library = redfab_core::tile::Library::builtin()?;
+    // The source is read before the sweep of stale files: it may be the old
+    // mapped.json of the very directory being built into.
+    let source_text = read(&source)?;
     fs::create_dir_all(&out).map_err(|e| format!("{}: {e}", out.display()))?;
     let write = |file: &str, data: &[u8]| {
         fs::write(out.join(file), data).map_err(|e| format!("{}: {e}", out.join(file).display()))
     };
-    for stale in ["mapped.json", "mapped.v", "design.json", "world.nbt", "report.txt"] {
+    for stale in ["mapped.json", "mapped.v", "pre.json", "gold.json", "design.json", "world.nbt", "report.txt"] {
         let _ = fs::remove_file(out.join(stale));
     }
     // A mapped netlist (as `pnr-random --dump` writes) skips synthesis and the proof.
     // With one, or with a fault built in, the layout is written even when it fails
     // the checks, so it can be examined or run.
     let from_json = source.extension().is_some_and(|e| e == "json");
+    let started = std::time::Instant::now();
+    let mut log = |line: &str| eprintln!("[{:7.1} s] {line}", started.elapsed().as_secs_f64());
     if from_json {
-        write("mapped.json", read(&source)?.as_bytes())?;
+        write("mapped.json", source_text.as_bytes())?;
     } else {
-        write("top.sv", read(&source)?.as_bytes())?;
+        write("top.sv", source_text.as_bytes())?;
         write("cells.lib", library.liberty().as_bytes())?;
         write("cells.v", library.verilog_models().as_bytes())?;
         write("map.ys", redfab_core::synth::MAP_SCRIPT.replace("{top}", &top).as_bytes())?;
         write("equiv.ys", redfab_core::synth::EQUIV_SCRIPT.replace("{top}", &top).as_bytes())?;
-        run_yosys(&out, "map.ys").map_err(|e| format!("synthesis failed: {e}"))?;
+        // Yosys reads the copy top.sv; messages name the user's file.
+        let basename = source.file_name().and_then(|n| n.to_str()).unwrap_or("top.sv").to_string();
+        let named = |e: String| e.replace("top.sv:", &format!("{basename}:"));
+        log("synthesizing");
+        let mapped = run_yosys(&out, "map.ys");
+        // The lint speaks first: it names what the design uses that cannot be
+        // built, which is usually why a later pass of the script failed.
+        if let Ok(pre) = read(&out.join("pre.json")) {
+            redfab_core::lint::lint_pre_netlist(&pre, &top).map_err(named)?;
+        }
+        mapped.map_err(|e| named(format!("synthesis failed: {e}")))?;
+        log("proving the mapped netlist equals the source");
         run_yosys(&out, "equiv.ys")
+            .map_err(|e| named(format!("the mapped netlist is NOT proven equal to the source: {e}")))?;
+        redfab_core::lint::check_inits(&read(&out.join("gold.json"))?, &read(&out.join("mapped.json"))?, &top)
             .map_err(|e| format!("the mapped netlist is NOT proven equal to the source: {e}"))?;
     }
     if from_json || fault != redfab_core::build::Break::None {
         let mapped = read(&out.join("mapped.json"))?;
         let netlist = redfab_core::netlist::Netlist::from_yosys_json(&mapped, &top, &library)?;
-        let (built, problems) = redfab_core::build::build_unchecked(&netlist, &name, fault)?;
+        let (built, problems) = redfab_core::build::build_unchecked_logged(&netlist, &name, fault, &mut log)?;
         write("design.json", built.design.to_json().as_bytes())?;
         write("world.nbt", &built.structure)?;
         print!("{}", built.report);
@@ -441,7 +538,7 @@ fn build_command(args: &[String]) -> Result<bool, String> {
         return Ok(problems.is_empty());
     }
 
-    let built = redfab_core::build::build(&read(&out.join("mapped.json"))?, &top, &name)?;
+    let built = redfab_core::build::build_logged(&read(&out.join("mapped.json"))?, &top, &name, &mut log)?;
     write("design.json", built.design.to_json().as_bytes())?;
     write("world.nbt", &built.structure)?;
     let report = format!("{}  mapped netlist proven equal to the source\n", built.report);
@@ -450,24 +547,53 @@ fn build_command(args: &[String]) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Runs the WebAssembly build of Yosys (under Node) on the files in `dir`.
+/// Where `synth/yosys.mjs`, the Node runner of the WebAssembly Yosys, is: at
+/// `$REDFAB_SYNTH`, in a checkout the executable sits in (`target/release/redfab`),
+/// beside the executable, or in the checkout this binary was built from.
+fn yosys_runner() -> Result<PathBuf, String> {
+    if let Ok(path) = std::env::var("REDFAB_SYNTH") {
+        let path = PathBuf::from(path);
+        return if path.is_file() {
+            Ok(path)
+        } else {
+            Err(format!("REDFAB_SYNTH is set to {}, which is not a file", path.display()))
+        };
+    }
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        for dir in exe.ancestors().skip(1) {
+            candidates.push(dir.join("synth/yosys.mjs"));
+        }
+    }
+    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../synth/yosys.mjs"));
+    candidates.into_iter().find(|p| p.is_file()).ok_or_else(|| {
+        "cannot find synth/yosys.mjs, which runs Yosys under Node: put the binary under the checkout (target/release) or set REDFAB_SYNTH to the file; it needs Node and the checkout's node_modules (npm ci) beside it".to_string()
+    })
+}
+
+/// Runs the WebAssembly build of Yosys (under Node) on the files in `dir`. On
+/// failure the message is the first error of the log, in plain words.
 fn run_yosys(dir: &Path, script: &str) -> Result<(), String> {
-    let runner = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../synth/yosys.mjs");
+    let runner = yosys_runner()?;
     let output = std::process::Command::new("node")
         .arg(&runner)
         .arg(dir)
         .arg(script)
         .output()
-        .map_err(|e| format!("could not run node: {e}"))?;
+        .map_err(|e| format!("could not run node ({e}): synthesis needs Node on the PATH"))?;
     if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "{}\n(full log: {})",
-            String::from_utf8_lossy(&output.stderr).trim(),
-            dir.join(format!("{script}.log")).display()
-        ))
+        return Ok(());
     }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("ERR_MODULE_NOT_FOUND") || stderr.contains("Cannot find package") {
+        return Err(format!(
+            "the Yosys runner {} cannot load @yowasp/yosys: run npm ci in the checkout so that node_modules sits beside synth/",
+            runner.display()
+        ));
+    }
+    let log_path = dir.join(format!("{script}.log"));
+    let log = fs::read_to_string(&log_path).unwrap_or_else(|_| stderr.to_string());
+    Err(format!("{}\n(full log: {})", redfab_core::lint::yosys_failure(&log, script), log_path.display()))
 }
 
 /// `redfab characterize [DIR] [--shuffles N] [--margin M] [--chosen NAME] [--tables]`

@@ -11,8 +11,8 @@ use crate::geom::Pos;
 use crate::layout::{Macro, Placed};
 use crate::lvs::lvs;
 use crate::netlist::{Driver, Netlist};
-use crate::place::place;
-use crate::route::route;
+use crate::place::{estimate_routing, gap_count, place};
+use crate::route::{History, RouteFailure, route};
 use crate::sim::Sim;
 use crate::structure::structure_file;
 use crate::tile::Library;
@@ -20,9 +20,16 @@ use crate::timing::Timing;
 use crate::world::World;
 
 pub const DESIGN_FORMAT: &str = "redfab-design/1";
-/// A lamp goes out this many game ticks after it loses power.
-/// The most routing columns tried between gate columns before giving up.
-const MAX_ROUTING_COLS: i32 = 6;
+/// The most routing columns one gap may grow to before the build gives up.
+const MAX_GAP_COLS: i32 = 64;
+/// The most routing attempts (each widens the congested gaps) before giving up.
+const MAX_ROUTING_ATTEMPTS: usize = 40;
+/// The most design inputs: the timing and burnout walks pack the inputs into one
+/// 64-bit word.
+pub const MAX_INPUTS: usize = 64;
+
+/// Hears what the build is doing, one line at a time.
+pub type Log<'a> = &'a mut dyn FnMut(&str);
 
 /// A built design: its blocks in their settled all-inputs-off state, and how to
 /// drive and read it.
@@ -114,18 +121,44 @@ impl Design {
 /// Places, routes, bakes and checks the design in a Yosys JSON netlist that has
 /// been mapped to the tile library. Fails if the layout does not implement the netlist.
 pub fn build(mapped_json: &str, top: &str, name: &str) -> Result<Built, String> {
+    build_logged(mapped_json, top, name, &mut |_| {})
+}
+
+/// [`build`], telling `log` about each phase.
+pub fn build_logged(mapped_json: &str, top: &str, name: &str, log: Log) -> Result<Built, String> {
     let library = Library::builtin()?;
     let netlist = Netlist::from_yosys_json(mapped_json, top, &library)?;
-    build_netlist(&netlist, name)
+    build_netlist_logged(&netlist, name, log)
 }
 
 /// [`build`] from a netlist that is already in memory.
 pub fn build_netlist(netlist: &Netlist, name: &str) -> Result<Built, String> {
-    let (built, problems) = build_unchecked(netlist, name, Break::None)?;
+    build_netlist_logged(netlist, name, &mut |_| {})
+}
+
+/// [`build_netlist`], telling `log` about each phase.
+pub fn build_netlist_logged(netlist: &Netlist, name: &str, log: Log) -> Result<Built, String> {
+    let (built, problems) = build_unchecked_logged(netlist, name, Break::None, log)?;
     if !problems.is_empty() {
         return Err(format!("the layout does not implement the netlist:\n  - {}", problems.join("\n  - ")));
     }
     Ok(built)
+}
+
+/// What a netlist must satisfy before any placing is worth doing: not too many
+/// inputs for the timing walks, and a clock that comes straight from one input
+/// and feeds nothing else. The message says what to change.
+pub fn check_netlist(netlist: &Netlist) -> Result<(), String> {
+    if netlist.inputs.len() > MAX_INPUTS {
+        return Err(format!(
+            "the design has {} input bits; at most {MAX_INPUTS} are supported (a 32-bit adder with carry in has 65): narrow the inputs or split the design",
+            netlist.inputs.len()
+        ));
+    }
+    if netlist.cells.iter().any(|c| c.is_dff()) {
+        clock_input(netlist)?;
+    }
+    Ok(())
 }
 
 /// A fault to build in on purpose, for the checks that must catch it.
@@ -142,8 +175,20 @@ const HOLD_FIX_ROUNDS: usize = 20;
 /// [`build_netlist`], but a layout that fails the checks is returned along with
 /// the problems instead of being an error, so it can be looked at.
 pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(Built, Vec<String>), String> {
+    build_unchecked_logged(netlist, name, fault, &mut |_| {})
+}
+
+/// [`build_unchecked`], telling `log` about each phase.
+pub fn build_unchecked_logged(
+    netlist: &Netlist,
+    name: &str,
+    fault: Break,
+    log: Log,
+) -> Result<(Built, Vec<String>), String> {
     let library = Library::builtin()?;
-    let (mut routed, routing_cols) = place_and_route(netlist)?;
+    check_netlist(netlist)?;
+    let (mut routed, routing_cols) = place_and_route_logged(netlist, log)?;
+    log("checking the layout against the netlist and timing it");
     let lamp_names: Vec<String> = netlist.outputs.iter().map(|p| p.name.clone()).collect();
 
     // Realize, check and time; lengthen the D path of any flip-flop whose hold is
@@ -175,8 +220,9 @@ pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(B
             break (realized, world, circuit, problems, timing);
         }
         rounds += 1;
+        log(&format!("hold fix round {rounds}: lengthening the D path of {}", violated.join(", ")));
         for cell in &violated {
-            let c = netlist.cells.iter().position(|x| x.name == *cell).expect("a flip-flop of the netlist");
+            let c = netlist.cells.iter().position(|x| x.label == *cell).expect("a flip-flop of the netlist");
             lengthen(&mut routed, netlist, netlist.cells[c].inputs[0], (c, 0))
                 .map_err(|e| format!("flip-flop {cell}: cannot lengthen its D path for hold: {e}"))?;
         }
@@ -267,6 +313,9 @@ pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(B
     // or whether the clock period respects it (clocked ones).
     let design = {
         let mut design = design;
+        if problems.is_empty() {
+            log("measuring the burnout budget");
+        }
         match &timing.sequential {
             None if problems.is_empty() => {
                 timing.input_spacing = crate::timing::input_spacing(&design)?;
@@ -289,38 +338,82 @@ pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(B
     };
     let (cols, rows) = layout.size();
     let timing_line = match &design.timing.sequential {
-        Some(seq) => {
-            let arrivals: Vec<u32> = seq.flip_flops.iter().map(|f| f.clock_arrival).collect();
-            let slack = seq.flip_flops.iter().filter_map(|f| f.hold_slack).min();
-            format!(
-                "  clock: {} ({} edge), period {} game ticks; inputs change {} ticks after the edge; outputs settle within {}\n  flip-flops: {}, clock arriving {} to {} ticks after the edge, hold slack {}\n",
-                seq.clock,
-                seq.active,
-                seq.period,
-                seq.input_change_at,
-                design.settle_ticks,
-                seq.flip_flops.len(),
-                arrivals.iter().min().unwrap_or(&0),
-                arrivals.iter().max().unwrap_or(&0),
-                slack.map_or("-".to_string(), |s| s.to_string()),
-            )
-        }
+        Some(seq) => sequential_report(seq, design.settle_ticks),
+        None if netlist.inputs.is_empty() => "  no inputs: the outputs never change\n".to_string(),
         None => format!(
-            "  outputs settle {} to {} game ticks after an input change; inputs may change every {} ticks\n",
+            "  outputs settle {} to {} game ticks after an input change; inputs may change every {} ticks (found over the stress walks)\n",
             design.timing.outputs.values().map(|t| t.min).min().unwrap_or(0),
             design.settle_ticks,
             design.timing.input_spacing,
         ),
     };
+    let mut positions = String::new();
+    let max_x = design.blocks.keys().filter_map(|k| k.parse::<Pos>().ok()).map(|p| p.x).max().unwrap_or(0);
+    let max_z = design.blocks.keys().filter_map(|k| k.parse::<Pos>().ok()).map(|p| p.z).max().unwrap_or(0);
+    positions += &format!(
+        "  footprint: x 0 to {max_x}, z 0 to {max_z}, {} x {} chunks when placed at the origin (/forceload add 0 0 {max_x} {max_z})\n",
+        max_x / 16 + 1,
+        max_z / 16 + 1
+    );
+    if !design.inputs.is_empty() {
+        positions += "  inputs (the lever stands on the probe block; x runs east, z runs south, y up):\n";
+        for (input, probe) in design.inputs.iter().zip(&realized.probes) {
+            positions += &format!("    {:<16} lever at {},{},{}\n", input.name, probe.x, probe.y + 1, probe.z);
+        }
+    }
+    if !design.outputs.is_empty() {
+        positions += "  outputs:\n";
+        for (output, lamp) in design.outputs.iter().zip(&realized.lamps) {
+            positions += &format!("    {:<16} lamp at {}\n", output.name, lamp);
+        }
+    }
+    let routing_text = match routing_cols.as_slice() {
+        [one] => format!("{one} routing column{}", if *one == 1 { "" } else { "s" }),
+        many => format!(
+            "routing columns {} west to east",
+            many.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")
+        ),
+    };
     let report = format!(
-        "design {name}\n  cells: {}\n  tiles: {} ({cols} columns x {rows} rows, {} routing columns between gate columns)\n  repeaters: {repeater_count}\n  blocks: {} in {sx} x {sy} x {sz}\n{timing_line}{}",
+        "design {name}\n  cells: {}\n  tiles: {} ({cols} columns x {rows} rows, {routing_text})\n  repeaters: {repeater_count}\n  blocks: {} in {sx} x {sy} x {sz}\n{timing_line}{positions}{}",
         netlist.cells.len(),
         layout.tiles.len(),
-        routing_cols,
         design.blocks.len(),
         if problems.is_empty() { "  layout matches the netlist\n" } else { "" },
     );
     Ok((Built { structure: structure_file(&world), design, report }, problems))
+}
+
+/// The clocked design's lines of report.txt: the measured timing, and the rule a
+/// player follows in the world, in game ticks and seconds (20 ticks to a second).
+fn sequential_report(seq: &crate::timing::Sequential, settle_ticks: u32) -> String {
+    let arrivals: Vec<u32> = seq.flip_flops.iter().map(|f| f.clock_arrival).collect();
+    let slack = seq.flip_flops.iter().filter_map(|f| f.hold_slack).min();
+    let seconds = |ticks: u32| format!("{:.1} s", f64::from(ticks) / 20.0);
+    format!(
+        "  clock: {} ({} edge), period {} game ticks; inputs change {} ticks after the edge; outputs settle within {}\n  flip-flops: {}, clock arriving {} to {} ticks after the edge, hold slack {}\n  in the world: give {} a period of at least {} ticks ({}), high for {} ({}); move the other levers {} to {} ticks ({} to {}) after its {} edge, and read the lamps {} ticks ({}) after it\n",
+        seq.clock,
+        seq.active,
+        seq.period,
+        seq.input_change_at,
+        settle_ticks,
+        seq.flip_flops.len(),
+        arrivals.iter().min().unwrap_or(&0),
+        arrivals.iter().max().unwrap_or(&0),
+        slack.map_or("n/a (no flip-flop feeds another)".to_string(), |s| s.to_string()),
+        seq.clock,
+        seq.period,
+        seconds(seq.period),
+        seq.high,
+        seconds(seq.high),
+        seq.input_change_from,
+        seq.input_change_by,
+        seconds(seq.input_change_from),
+        seconds(seq.input_change_by),
+        seq.active,
+        seq.sample_at,
+        seconds(seq.sample_at),
+    )
 }
 
 /// Lengthens the path of `net` to `sink` by two game ticks: the last tile of the
@@ -375,7 +468,7 @@ fn break_layout(
                 .filter(|f| f.hold_slack.is_some())
                 .min_by_key(|f| f.hold_slack)
                 .ok_or("no flip-flop is fed by another")?;
-            let c = netlist.cells.iter().position(|x| x.name == victim.cell).expect("a flip-flop of the netlist");
+            let c = netlist.cells.iter().position(|x| x.label == victim.cell).expect("a flip-flop of the netlist");
             let clock_net = netlist.cells[c].inputs[1];
             // Two ticks per step: past the slack, past the hold time's margin, and
             // two more, so that the new value is captured beyond doubt.
@@ -418,7 +511,7 @@ fn analyze_timing(
     let flip_flops: Vec<crate::timing::FlipFlop> = realized
         .macros
         .iter()
-        .map(|m| crate::timing::FlipFlop { cell: netlist.cells[m.cell].name.clone(), d: m.d, clk: m.clk, q: m.q })
+        .map(|m| crate::timing::FlipFlop { cell: netlist.cells[m.cell].label.clone(), d: m.d, clk: m.clk, q: m.q })
         .collect();
     let t = &library.dff.timing;
     let figure = |key: &str| t.get(key).copied().ok_or_else(|| format!("the flip-flop tile does not state {key}"));
@@ -488,18 +581,94 @@ pub fn clock_input(netlist: &Netlist) -> Result<usize, String> {
     }
 }
 
-/// Places and routes with more routing room each time routing fails. Returns the
-/// routed layout and the number of routing columns it took.
-pub fn place_and_route(netlist: &Netlist) -> Result<(crate::route::Routed, i32), String> {
-    let mut last = String::from("no routing attempt made");
-    for routing_cols in 1..=MAX_ROUTING_COLS {
-        let placement = place(netlist, routing_cols)?;
-        match route(netlist, &placement) {
-            Ok(routed) => return Ok((routed, routing_cols)),
-            Err(e) => last = e,
+/// Places and routes, giving the congested gaps more routing columns each time
+/// routing fails. Returns the routed layout and the routing columns per gap.
+pub fn place_and_route(netlist: &Netlist) -> Result<(crate::route::Routed, Vec<i32>), String> {
+    place_and_route_logged(netlist, &mut |_| {})
+}
+
+/// [`place_and_route`], telling `log` about each attempt.
+pub fn place_and_route_logged(netlist: &Netlist, log: Log) -> Result<(crate::route::Routed, Vec<i32>), String> {
+    let gaps = gap_count(netlist)?;
+    let first = place(netlist, &vec![1; gaps])?;
+    let mut routing = estimate_routing(netlist, &first);
+    log(&format!(
+        "placing {} cells in {} gate columns and {} rows; routing columns estimated at {}",
+        netlist.cells.len(),
+        gaps - 1,
+        first.rows,
+        list(&routing)
+    ));
+    let mut history: Option<History> = None;
+    let mut last = String::new();
+    for attempt in 1..=MAX_ROUTING_ATTEMPTS {
+        let placement = place(netlist, &routing)?;
+        log(&format!(
+            "routing attempt {attempt}: {} columns x {} rows, routing columns {}",
+            placement.cols,
+            placement.rows,
+            list(&routing)
+        ));
+        match route(netlist, &placement, history.as_ref(), log) {
+            Ok(routed) => {
+                log(&format!("routed in {} rounds", routed.rounds));
+                return Ok((routed, routing));
+            }
+            Err(RouteFailure::Congested { tracks, users, rounds, history: learned }) => {
+                // Widen every gap that holds a fair share of the contended tracks.
+                let mut per_gap = vec![0usize; gaps];
+                for (cell, _) in &tracks {
+                    if let Some(g) = placement.gap_of(cell.0) {
+                        per_gap[g] += 1;
+                    }
+                }
+                let most = per_gap.iter().copied().max().unwrap_or(0);
+                let widen: Vec<usize> = (0..gaps).filter(|&g| per_gap[g] > 0 && per_gap[g] * 4 >= most).collect();
+                last = format!(
+                    "after {rounds} rounds {} tracks are still wanted by several nets, {} of them in the gap before stage {}",
+                    tracks.len(),
+                    most,
+                    per_gap.iter().position(|&n| n == most).unwrap_or(0) + 1
+                );
+                if widen.iter().any(|&g| routing[g] >= MAX_GAP_COLS) {
+                    return Err(format!(
+                        "routing failed: {last}, which already has {MAX_GAP_COLS} routing columns (the most a gap may have); the design is too wide for the router"
+                    ));
+                }
+                for &g in &widen {
+                    routing[g] += 1;
+                }
+                let detail = if tracks.len() <= 12 {
+                    tracks
+                        .iter()
+                        .zip(&users)
+                        .map(|(((col, row), track), nets)| {
+                            format!("{:?} row {row} {track:?} wanted by nets {}", placement.column(*col), list(nets))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                } else {
+                    let mut by_row = vec![0usize; (placement.rows as usize).div_ceil(10)];
+                    for ((_, row), _) in &tracks {
+                        by_row[*row as usize / 10] += 1;
+                    }
+                    format!("by rows of ten: {}", list(&by_row))
+                };
+                log(&format!(
+                    "  {last}; widening gap{} {} ({detail})",
+                    if widen.len() == 1 { "" } else { "s" },
+                    list(&widen)
+                ));
+                history = Some(learned);
+            }
+            Err(e) => return Err(e.to_string()),
         }
     }
-    Err(format!("routing failed even with {MAX_ROUTING_COLS} routing columns: {last}"))
+    Err(format!("routing failed after {MAX_ROUTING_ATTEMPTS} attempts: {last}"))
+}
+
+fn list<T: std::fmt::Display>(items: &[T]) -> String {
+    items.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")
 }
 
 /// The layout-versus-netlist check and the signal-strength check on a block world.
@@ -619,6 +788,40 @@ pub fn simulate_with(design_json: &str, vectors_json: &str, shuffle: Option<u64>
 mod tests {
     use super::*;
 
+    /// The in-world rule of report.txt, with every figure in ticks and in seconds
+    /// (20 game ticks to a second), is what README.md quotes to the player.
+    #[test]
+    fn the_report_states_the_in_world_rule_in_ticks_and_seconds() {
+        use crate::timing::{FlipFlopTiming, Sequential};
+        let seq = Sequential {
+            clock: "clk".to_string(),
+            active: "rising".to_string(),
+            period: 92,
+            high: 46,
+            input_change_from: 0,
+            input_change_by: 17,
+            input_change_at: 2,
+            sample_at: 91,
+            flip_flops: vec![
+                FlipFlopTiming { cell: "q0".to_string(), clock_arrival: 4, hold_slack: Some(3), ..Default::default() },
+                FlipFlopTiming { cell: "q1".to_string(), clock_arrival: 7, hold_slack: Some(5), ..Default::default() },
+            ],
+            hold_violations: Vec::new(),
+        };
+        let text = sequential_report(&seq, 60);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "  clock: clk (rising edge), period 92 game ticks; inputs change 2 ticks after the edge; outputs settle within 60",
+                "  flip-flops: 2, clock arriving 4 to 7 ticks after the edge, hold slack 3",
+                "  in the world: give clk a period of at least 92 ticks (4.6 s), high for 46 (2.3 s); move the other levers 0 to 17 ticks (0.0 s to 0.8 s) after its rising edge, and read the lamps 91 ticks (4.5 s) after it",
+            ]
+        );
+        let alone = Sequential { flip_flops: vec![FlipFlopTiming::default()], ..seq };
+        assert!(sequential_report(&alone, 60).contains("hold slack n/a (no flip-flop feeds another)"));
+    }
+
     const NOR2: &str = r#"{"modules":{"top":{
         "ports":{"a":{"direction":"input","bits":[2]},"b":{"direction":"input","bits":[3]},"y":{"direction":"output","bits":[4]}},
         "cells":{"g":{"type":"NOR2","connections":{"A":[2],"B":[3],"Y":[4]}}}}}}"#;
@@ -661,6 +864,9 @@ mod tests {
         );
         let netlist = Netlist::from_yosys_json(&misuse, "top", &library).unwrap();
         assert!(clock_input(&netlist).unwrap_err().contains("also an output"));
+        // The build says so directly, before placing anything.
+        let Err(err) = build(&misuse, "top", "misuse") else { panic!("the misuse built") };
+        assert_eq!(err, "the clock clk is also an output");
     }
 
     #[test]
@@ -671,6 +877,67 @@ mod tests {
         let ff = netlist.cells.iter().position(|c| c.is_dff()).unwrap();
         assert_eq!(levels[ff], 0);
         assert!(levels.iter().enumerate().all(|(c, &l)| c == ff || l == 1));
+    }
+
+    #[test]
+    fn a_malformed_design_file_is_an_error_not_a_panic() {
+        assert!(Design::from_json("not json").unwrap_err().starts_with("design file:"));
+        assert!(Design::from_json(r#"{"format":"redfab-design/1"}"#).unwrap_err().starts_with("design file:"));
+        let other = r#"{"format":"something/9","name":"x","size":[1,1,1],"inputs":[],"outputs":[],"settle_ticks":0,"blocks":{}}"#;
+        assert_eq!(Design::from_json(other).unwrap_err(), "unexpected design format \"something/9\"");
+        // A design without a timing block loads (older files), and measuring it says so.
+        let bare = r#"{"format":"redfab-design/1","name":"x","size":[1,1,1],"inputs":[],"outputs":[{"name":"y","lamp":"0,0,0"}],"settle_ticks":0,"blocks":{"0,0,0":"minecraft:redstone_lamp[lit=false]"}}"#;
+        let design = Design::from_json(bare).unwrap();
+        let Err(err) = crate::timing::measure(&design, 10, 1, 1) else { panic!("measured without a report") };
+        assert!(err.contains("no timing report for output y"), "{err}");
+    }
+
+    /// The estimate under-counts the feedback nets of clocked netlists, so the
+    /// router reports contended tracks and only the gaps holding them are widened,
+    /// until it routes.
+    #[test]
+    fn the_congested_gaps_are_widened_until_routing_succeeds() {
+        let mut widened_runs = 0;
+        for seed in 100..106u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let (gates, inputs, flip_flops) = (2 + rng.below(6), 1 + rng.below(3), 1 + rng.below(3));
+            let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
+            let gaps = gap_count(&netlist).unwrap();
+            let estimate = estimate_routing(&netlist, &place(&netlist, &vec![1; gaps]).unwrap());
+            let mut lines: Vec<String> = Vec::new();
+            let (_, routing) = place_and_route_logged(&netlist, &mut |l| lines.push(l.to_string())).unwrap();
+            assert_eq!(routing.len(), gaps);
+            assert!(routing.iter().zip(&estimate).all(|(r, e)| r >= e), "seed {seed}: {routing:?} < {estimate:?}");
+            // Each widening names the gaps it widens; those gaps end wider than estimated.
+            let mut widened = vec![false; gaps];
+            for line in lines.iter().filter(|l| l.contains("widening gap")) {
+                let after = line.split("widening gap").nth(1).unwrap().trim_start_matches('s').trim();
+                let named = after.split(" (").next().unwrap();
+                for g in named.split(", ") {
+                    widened[g.trim().parse::<usize>().unwrap()] = true;
+                }
+            }
+            for g in 0..gaps {
+                assert_eq!(routing[g] > estimate[g], widened[g], "seed {seed}, gap {g}: {lines:#?}");
+            }
+            if widened.iter().any(|&w| w) {
+                widened_runs += 1;
+            }
+        }
+        assert!(widened_runs >= 2, "only {widened_runs} of the clocked netlists needed a widening");
+    }
+
+    #[test]
+    fn too_many_inputs_are_refused_before_placing() {
+        let mut ports = String::new();
+        for i in 0..65 {
+            ports += &format!(r#""a{i}":{{"direction":"input","bits":[{}]}},"#, i + 2);
+        }
+        let json = format!(
+            r#"{{"modules":{{"top":{{"ports":{{{ports}"y":{{"direction":"output","bits":[2]}}}},"cells":{{}}}}}}}}"#
+        );
+        let Err(err) = build(&json, "top", "wide") else { panic!("65 inputs built") };
+        assert!(err.starts_with("the design has 65 input bits; at most 64 are supported"), "{err}");
     }
 
     #[test]

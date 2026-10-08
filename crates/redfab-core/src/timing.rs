@@ -32,8 +32,10 @@ use crate::world::World;
 
 pub const TORCH_TICKS: u32 = 2;
 pub const LAMP_OFF_TICKS: u32 = 4;
-/// Fewest ticks between two input changes while measuring: a torch that turns
-/// off eight times within sixty ticks burns out, which is not what is measured.
+/// Fewest ticks between two input changes while measuring. A torch that turns
+/// off eight times within sixty ticks burns out, which is not what is measured,
+/// so the walk also waits until no torch has turned off for sixty ticks before
+/// each change, and refuses to go on if one burns out anyway.
 pub const MEASURE_GAP: u32 = 10;
 
 /// Earliest and latest arrival of each edge at a net or a part, in game ticks
@@ -805,11 +807,18 @@ impl Model {
             let mut due: Vec<(u32, i8, u32, usize)> = state.queue.iter().copied().filter(|t| t.0 == next).collect();
             state.queue.retain(|t| t.0 != next);
             due.sort_by_key(|&(_, priority, seq, _)| (priority, seq));
-            let running: Vec<usize> = due.iter().map(|t| t.3).collect();
+            // A part that has already run this tick takes a new tick for a later
+            // change in the same tick (the game drains its running set as it goes).
+            let mut running: Vec<usize> = due.iter().map(|t| t.3).collect();
             for (_, _, _, p) in due {
+                if let Some(i) = running.iter().position(|&r| r == p) {
+                    running.remove(i);
+                }
                 self.fire(state, p, &running);
-                note(state, &mut lamp_was, &mut changes);
             }
+            // Once per tick: a lamp that goes dark and lights again within one
+            // tick has not changed to anyone watching the blocks tick by tick.
+            note(state, &mut lamp_was, &mut changes);
         }
         Ok(changes)
     }
@@ -901,7 +910,7 @@ pub fn simulate_walk(design: &Design, walk: &[u64]) -> Result<Vec<Vec<Vec<u32>>>
     let limit = 4 * design.settle_ticks.max(LAMP_OFF_TICKS) + 20;
     let mut current = 0u64; // the baked world has every input off
     let mut out = Vec::new();
-    for &next in walk {
+    for (step, &next) in walk.iter().enumerate() {
         let mut stimuli: Vec<(Pos, Block)> = (0..n)
             .filter(|&i| (current ^ next) >> i & 1 == 1)
             .map(|i| (probes[i], if next >> i & 1 == 1 { on[i] } else { off[i] }))
@@ -927,6 +936,17 @@ pub fn simulate_walk(design: &Design, walk: &[u64]) -> Result<Vec<Vec<Vec<u32>>>
                     changes[o].push(tick);
                 }
             }
+            if let Some((pos, count)) =
+                sim.torch_turn_offs().into_iter().find(|(_, c)| *c >= crate::sim::BURNOUT_TOGGLES)
+            {
+                return Err(format!(
+                    "the torch at {pos} turned off {count} times within sixty ticks and burned out at step {step} of the walk, {tick} ticks after the change; the measurement cannot go on"
+                ));
+            }
+        }
+        // A clean window for the next change: its torches start from no turn-offs.
+        while !sim.torch_turn_offs().is_empty() {
+            sim.step();
         }
         out.push(changes);
     }
@@ -1169,7 +1189,11 @@ pub fn measure(design: &Design, max_input_bits: usize, multi: usize, seed: u64) 
     }
     let seen = extremes(&by_blocks, lamps.len());
     for ((name, _), seen) in lamps.iter().zip(&seen) {
-        let reported = &design.timing.outputs[name];
+        let reported = design
+            .timing
+            .outputs
+            .get(name)
+            .ok_or_else(|| format!("the design file has no timing report for output {name}; build it again"))?;
         match (seen, reported.exact) {
             (Some((lo, hi)), Some((elo, ehi))) => {
                 if (*lo, *hi) != (elo, ehi) {
@@ -1234,6 +1258,19 @@ mod tests {
             assert!(design.timing.exhaustive);
             assert_eq!(design.timing.outputs["y"].exact, Some((2, 6)));
         }
+    }
+
+    /// The full adder's mapped netlist: glitchy enough that a lamp can go dark and
+    /// relight within one tick, and a torch can be told of a change in the tick it
+    /// has already run in; the model must count neither as the simulator does not.
+    const FA1: &str = r#"{"modules":{"top":{"ports":{"a":{"direction":"input","bits":[2]},"b":{"direction":"input","bits":[3]},"cin":{"direction":"input","bits":[4]},"sum":{"direction":"output","bits":[5]},"cout":{"direction":"output","bits":[6]}},"cells":{"c0":{"type":"NOT","connections":{"A":[4],"Y":[7]}},"c1":{"type":"NOT","connections":{"A":[2],"Y":[8]}},"c2":{"type":"NOT","connections":{"A":[3],"Y":[9]}},"c3":{"type":"NOR2","connections":{"A":[8],"B":[9],"Y":[10]}},"c4":{"type":"NOR2","connections":{"A":[2],"B":[3],"Y":[11]}},"c5":{"type":"NOR2","connections":{"A":[10],"B":[11],"Y":[12]}},"c6":{"type":"NOR3","connections":{"A":[7],"B":[10],"C":[11],"Y":[13]}},"c7":{"type":"NOR2","connections":{"A":[4],"B":[12],"Y":[14]}},"c8":{"type":"NOR2","connections":{"A":[13],"B":[14],"Y":[5]}},"c9":{"type":"NOR2","connections":{"A":[10],"B":[13],"Y":[15]}},"c10":{"type":"NOT","connections":{"A":[15],"Y":[6]}}}}}}"#;
+
+    #[test]
+    fn the_model_agrees_with_the_simulator_on_the_full_adder_over_random_changes() {
+        let design = build(FA1, "top", "fa1").unwrap().design;
+        let measurement = measure(&design, 10, 256, 1).unwrap();
+        assert_eq!(measurement.problems, Vec::<String>::new());
+        assert!(measurement.changes > 256);
     }
 
     #[test]

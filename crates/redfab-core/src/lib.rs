@@ -13,6 +13,7 @@ pub mod dfftest;
 pub mod extract;
 pub mod geom;
 pub mod layout;
+pub mod lint;
 pub mod lvs;
 pub mod nbt;
 pub mod netlist;
