@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 
 use crate::netlist::{Driver, NetId, Netlist};
-use crate::tile::Edge;
+use crate::tile::{Edge, PITCH};
 
 /// A tile position: (column, row). Columns run east, rows run south.
 pub type Cell = (i32, i32);
@@ -49,6 +49,9 @@ pub enum Column {
 pub struct Placement {
     pub cols: i32,
     pub rows: i32,
+    /// Blocks per column and per row: `PITCH` for every one.
+    pub col_width: Vec<i32>,
+    pub row_depth: Vec<i32>,
     /// Per netlist cell: the cell of its first (west) tile.
     pub gates: Vec<Cell>,
     /// Per netlist cell: how many cells wide it is (two for a flip-flop).
@@ -323,6 +326,8 @@ pub fn place(netlist: &Netlist, routing: &[i32]) -> Result<Placement, String> {
     Ok(Placement {
         cols,
         rows,
+        col_width: vec![PITCH; cols as usize],
+        row_depth: vec![PITCH; rows as usize],
         gates,
         widths,
         pin_edges,
@@ -473,6 +478,9 @@ mod tests {
         assert_eq!(p.gates[0].0, 3);
         assert_eq!(p.gates[1].0, 5);
         assert_eq!(p.outputs[0].0, 9);
+        // Every column is a cell wide and every row a cell deep.
+        assert_eq!(p.col_width, vec![PITCH; p.cols as usize]);
+        assert_eq!(p.row_depth, vec![PITCH; p.rows as usize]);
         // Widening the middle gap moves the later columns but keeps their names.
         let q = place(&netlist, &[2, 2, 3]).unwrap();
         assert_eq!(q.column(6), Column::Gates { index: 1, offset: 0 });

@@ -214,7 +214,7 @@ pub fn build_unchecked_logged(
 ) -> Result<(Built, Vec<String>), String> {
     let library = Library::builtin()?;
     check_netlist(netlist)?;
-    let (mut routed, routing_cols) = place_and_route_logged(netlist, log)?;
+    let (mut routed, routing_cols) = place_and_route_logged(&library, netlist, log)?;
     log("checking the layout against the netlist and timing it");
     let lamp_names: Vec<String> = netlist.outputs.iter().map(|p| p.name.clone()).collect();
 
@@ -619,12 +619,16 @@ pub fn clock_input(netlist: &Netlist) -> Result<usize, String> {
 
 /// Places and routes, giving the congested gaps more routing columns each time
 /// routing fails. Returns the routed layout and the routing columns per gap.
-pub fn place_and_route(netlist: &Netlist) -> Result<(crate::route::Routed, Vec<i32>), String> {
-    place_and_route_logged(netlist, &mut |_| {})
+pub fn place_and_route(library: &Library, netlist: &Netlist) -> Result<(crate::route::Routed, Vec<i32>), String> {
+    place_and_route_logged(library, netlist, &mut |_| {})
 }
 
 /// [`place_and_route`], telling `log` about each attempt.
-pub fn place_and_route_logged(netlist: &Netlist, log: Log) -> Result<(crate::route::Routed, Vec<i32>), String> {
+pub fn place_and_route_logged(
+    library: &Library,
+    netlist: &Netlist,
+    log: Log,
+) -> Result<(crate::route::Routed, Vec<i32>), String> {
     let gaps = gap_count(netlist)?;
     let first = place(netlist, &vec![1; gaps])?;
     let mut routing = estimate_routing(netlist, &first);
@@ -645,7 +649,7 @@ pub fn place_and_route_logged(netlist: &Netlist, log: Log) -> Result<(crate::rou
             placement.rows,
             list(&routing)
         ));
-        match route(netlist, &placement, history.as_ref(), log) {
+        match route(library, netlist, &placement, history.as_ref(), log) {
             Ok(routed) => {
                 log(&format!("routed in {} rounds", routed.rounds));
                 return Ok((routed, routing));
@@ -971,7 +975,8 @@ mod tests {
             let gaps = gap_count(&netlist).unwrap();
             let estimate = estimate_routing(&netlist, &place(&netlist, &vec![1; gaps]).unwrap());
             let mut lines: Vec<String> = Vec::new();
-            let (_, routing) = place_and_route_logged(&netlist, &mut |l| lines.push(l.to_string())).unwrap();
+            let library = Library::builtin().unwrap();
+            let (_, routing) = place_and_route_logged(&library, &netlist, &mut |l| lines.push(l.to_string())).unwrap();
             assert_eq!(routing.len(), gaps);
             assert!(routing.iter().zip(&estimate).all(|(r, e)| r >= e), "seed {seed}: {routing:?} < {estimate:?}");
             // Each widening names the gaps it widens; those gaps end wider than estimated.

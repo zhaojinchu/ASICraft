@@ -2,14 +2,19 @@
 //!
 //! See `cells/README.md` for the format and the rules tiles follow.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::block::Block;
 use crate::geom::{Dir, Pos};
+use crate::sim::Sim;
+use crate::world::World;
 
 /// Blocks per tile edge, and the height every tile fits in.
 pub const PITCH: i32 = 5;
 pub const HEIGHT: i32 = 4;
+
+/// The power a torch, a powered repeater or a powered block gives the dust beside it.
+const FULL_POWER: u8 = 15;
 
 /// One of a tile's four edges.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -100,8 +105,10 @@ struct LegendEntry {
 #[derive(Clone, Debug)]
 pub struct Tile {
     pub name: String,
-    /// Width in blocks: a whole number of cells of `PITCH`. Depth is one cell.
+    /// Width and depth in blocks: a whole number of cells of `PITCH` wide, and
+    /// one cell deep.
     pub width: i32,
+    pub depth: i32,
     pub ports: Vec<Port>,
     /// `Some("nor")` for a gate, `None` for wiring and I/O.
     pub function: Option<String>,
@@ -123,6 +130,13 @@ pub struct Tile {
     legend: BTreeMap<char, LegendEntry>,
     /// `layers[y][z][x]`
     layers: Vec<Vec<Vec<char>>>,
+    /// The strength model read off the dust once the file is parsed; see
+    /// [`Tile::dust_steps`], [`Tile::repeater_out`], [`Tile::source_out`] and
+    /// [`Tile::port_needs`].
+    steps: BTreeMap<(Edge, Edge), u8>,
+    repeater_outs: BTreeMap<(Edge, Edge), u8>,
+    source_outs: BTreeMap<Edge, u8>,
+    needs: BTreeMap<Edge, u8>,
 }
 
 impl Tile {
@@ -133,6 +147,38 @@ impl Tile {
     /// How many cells wide the tile is.
     pub fn cells(&self) -> i32 {
         self.width / PITCH
+    }
+
+    /// What a signal loses crossing the tile from the `entry` port to the port of
+    /// the neighbouring tile beyond `exit`: the dust steps from port to port, found
+    /// by breadth-first search over the file's dust with the game's wire adjacency,
+    /// plus the one step across the border. `None` when no dust joins the two ports.
+    pub fn dust_steps(&self, entry: Edge, exit: Edge) -> Option<u8> {
+        self.steps.get(&(entry, exit)).copied()
+    }
+
+    /// The power at the port of the neighbouring tile beyond `exit` when a
+    /// repeater sits in the `entry` arm (in the cell next to the port, as
+    /// [`Variant::blocks`] puts it): full power at the dust in front of the
+    /// repeater, one less per step. `None` when that dust does not reach `exit`.
+    pub fn repeater_out(&self, entry: Edge, exit: Edge) -> Option<u8> {
+        self.repeater_outs.get(&(entry, exit)).copied()
+    }
+
+    /// The power at the port of the neighbouring tile beyond `exit` from the
+    /// tile's own driver (a torch, a repeater or the probe block), when it is on:
+    /// full power at the dust it powers, one less per step. Zero for a tile that
+    /// drives nothing that way.
+    pub fn source_out(&self, exit: Edge) -> u8 {
+        self.source_outs.get(&exit).copied().unwrap_or(0)
+    }
+
+    /// What an input port must carry for every dust behind it to be powered: one
+    /// more than the steps to the farthest dust the port's dust reaches, so that
+    /// the part at the end of the arm sees at least one level. `None` for a port
+    /// that is not an input.
+    pub fn port_needs(&self, entry: Edge) -> Option<u8> {
+        self.needs.get(&entry).copied()
     }
 
     pub fn inputs(&self) -> impl Iterator<Item = &Port> {
@@ -151,7 +197,7 @@ impl Tile {
                     if entry.when.is_some_and(|edge| !used.contains(&edge)) || entry.block.is_air() {
                         continue;
                     }
-                    let pos = rotate_pos_in(Pos::new(x as i32, y as i32, z as i32), rotation, self.width);
+                    let pos = rotate_pos_in(Pos::new(x as i32, y as i32, z as i32), rotation, self.width, self.depth);
                     out.push((pos, entry.block.rotated(rotation)));
                 }
             }
@@ -174,6 +220,7 @@ impl Tile {
         let mut state = Vec::new();
         let mut legend = BTreeMap::new();
         let mut width = PITCH;
+        let mut depth = PITCH;
         let mut layers: Vec<Vec<Vec<char>>> = vec![vec![vec!['.'; PITCH as usize]; PITCH as usize]; HEIGHT as usize];
         let mut section = Section::Header;
 
@@ -206,7 +253,8 @@ impl Tile {
                         )));
                     }
                     width = size.x;
-                    layers = vec![vec![vec!['.'; width as usize]; PITCH as usize]; HEIGHT as usize];
+                    depth = size.z;
+                    layers = vec![vec![vec!['.'; width as usize]; depth as usize]; HEIGHT as usize];
                 }
                 ("timing", _) => {
                     // timing setup 1 hold 0 clk_to_q 8 min_pulse 4
@@ -287,9 +335,10 @@ impl Tile {
             }
         }
 
-        let tile = Tile {
+        let mut tile = Tile {
             name: name.ok_or("missing 'tile <name>'")?,
             width,
+            depth,
             ports,
             function,
             delay,
@@ -301,9 +350,114 @@ impl Tile {
             state,
             legend,
             layers,
+            steps: BTreeMap::new(),
+            repeater_outs: BTreeMap::new(),
+            source_outs: BTreeMap::new(),
+            needs: BTreeMap::new(),
         };
         tile.validate()?;
+        tile.measure();
         Ok(tile)
+    }
+
+    /// The tile's blocks in a world of their own, every port used; with `on`, the
+    /// drivers are on: torches lit, repeaters powered, the probe a redstone block.
+    fn world(&self, on: bool) -> World {
+        let all: Vec<Edge> = self.ports.iter().map(|p| p.edge).collect();
+        let mut world = World::new((self.width, HEIGHT, self.depth));
+        for (pos, block) in self.blocks(&all, 0) {
+            let block = match block {
+                Block::Torch { .. } if on => Block::Torch { lit: true },
+                Block::WallTorch { facing, .. } if on => Block::WallTorch { facing, lit: true },
+                Block::Repeater { facing, delay, locked, .. } if on => {
+                    Block::Repeater { facing, delay, locked, powered: true }
+                }
+                other => other,
+            };
+            world.set(pos, block);
+        }
+        if on && let Some(probe) = self.probe {
+            world.set(probe, Block::RedstoneBlock);
+        }
+        world
+    }
+
+    /// Fills the strength tables from the dust: every number the router needs
+    /// about this tile, read off the file by the simulator's own wire rules.
+    fn measure(&mut self) {
+        let quiet = Sim::new(self.world(false));
+        let wires: Vec<Pos> =
+            quiet.world().iter().filter(|(_, b)| matches!(b, Block::Wire(_))).map(|(p, _)| p).collect();
+        // Per dust, the dust it hands power to.
+        let mut feeds: BTreeMap<Pos, Vec<Pos>> = BTreeMap::new();
+        for &wire in &wires {
+            for from in quiet.wire_neighbors(wire) {
+                feeds.entry(from).or_default().push(wire);
+            }
+        }
+        // Steps from the nearest of `from` to every dust reached, `skip` left out.
+        let distances = |from: &[Pos], skip: Option<Pos>| -> BTreeMap<Pos, u8> {
+            let mut dist: BTreeMap<Pos, u8> = BTreeMap::new();
+            let mut queue: VecDeque<Pos> = VecDeque::new();
+            for &start in from {
+                if wires.contains(&start) && Some(start) != skip && !dist.contains_key(&start) {
+                    dist.insert(start, 0);
+                    queue.push_back(start);
+                }
+            }
+            while let Some(pos) = queue.pop_front() {
+                let d = dist[&pos];
+                for &next in feeds.get(&pos).map_or(&[][..], Vec::as_slice) {
+                    if Some(next) != skip && !dist.contains_key(&next) {
+                        dist.insert(next, d + 1);
+                        queue.push_back(next);
+                    }
+                }
+            }
+            dist
+        };
+        let ports: Vec<(Edge, Pos, PortKind)> = self.ports.iter().map(|p| (p.edge, p.pos, p.kind)).collect();
+        for &(entry, entry_pos, kind) in &ports {
+            let from_port = distances(&[entry_pos], None);
+            // The repeater takes the dust next to the port and powers the dust in
+            // front of it; an arm without those two dust cannot carry one.
+            let inner = entry_pos.offset(entry.dir().opposite());
+            let front = inner.offset(entry.dir().opposite());
+            let from_repeater = if wires.contains(&inner) && wires.contains(&front) {
+                distances(&[front], Some(inner))
+            } else {
+                BTreeMap::new()
+            };
+            for &(exit, exit_pos, _) in ports.iter().filter(|(e, _, _)| *e != entry) {
+                if let Some(&d) = from_port.get(&exit_pos) {
+                    self.steps.insert((entry, exit), d + 1);
+                }
+                if let Some(&d) = from_repeater.get(&exit_pos) {
+                    self.repeater_outs.insert((entry, exit), FULL_POWER.saturating_sub(d + 1));
+                }
+            }
+            if kind == PortKind::In {
+                self.needs.insert(entry, 1 + from_port.values().copied().max().unwrap_or(0));
+            }
+        }
+        // The drivers on: the dust they power at full strength, and what is left
+        // of that at each port.
+        let on = Sim::new(self.world(true));
+        for &(exit, exit_pos, _) in &ports {
+            let mut best = 0u8;
+            for &wire in &wires {
+                let power = on.wire_block_signal(wire);
+                if power == 0 {
+                    continue;
+                }
+                if let Some(&d) = distances(&[wire], None).get(&exit_pos) {
+                    best = best.max(power.saturating_sub(d + 1));
+                }
+            }
+            if best > 0 {
+                self.source_outs.insert(exit, best);
+            }
+        }
     }
 
     /// Checks the rules from `cells/README.md` that can be checked on one tile alone.
@@ -352,13 +506,13 @@ impl Tile {
 
 /// A position inside a one-cell tile, after the tile is turned clockwise about its centre.
 pub fn rotate_pos(pos: Pos, quarter_turns: u8) -> Pos {
-    rotate_pos_in(pos, quarter_turns, PITCH)
+    rotate_pos_in(pos, quarter_turns, PITCH, PITCH)
 }
 
-/// The same for a tile `width` blocks wide and one cell deep: each quarter turn
-/// swaps the footprint's sides, so after one the tile is a cell wide and `width` deep.
-pub fn rotate_pos_in(pos: Pos, quarter_turns: u8, width: i32) -> Pos {
-    let mut depth = PITCH;
+/// The same for a tile `width` blocks wide and `depth` deep: each quarter turn
+/// swaps the footprint's sides, so after one the tile is `depth` wide and `width` deep.
+pub fn rotate_pos_in(pos: Pos, quarter_turns: u8, width: i32, depth: i32) -> Pos {
+    let mut depth = depth;
     let mut width = width;
     (0..quarter_turns % 4).fold(pos, |p, _| {
         let turned = Pos::new(depth - 1 - p.z, p.y, p.x);
@@ -580,7 +734,7 @@ impl Variant {
         let tile = self.tile(library);
         let mut blocks = tile.blocks(&self.edges, self.rotation);
         for (pos, block) in &tile.rest {
-            let turned = rotate_pos_in(*pos, self.rotation, tile.width);
+            let turned = rotate_pos_in(*pos, self.rotation, tile.width, tile.depth);
             for (p, b) in &mut blocks {
                 if *p == turned {
                     *b = block.rotated(self.rotation);
@@ -589,8 +743,8 @@ impl Variant {
         }
         if let Some(entry) = self.repeater_entry {
             // The cell next to the entry port, one step towards the centre.
-            let port = self.tile(library).port(entry).expect("the repeater's entry is a port of the tile");
-            let inner = rotate_pos_in(port.pos.offset(entry.dir().opposite()), self.rotation, self.tile(library).width);
+            let port = tile.port(entry).expect("the repeater's entry is a port of the tile");
+            let inner = rotate_pos_in(port.pos.offset(entry.dir().opposite()), self.rotation, tile.width, tile.depth);
             let facing = entry.rotated(self.rotation).dir();
             for (pos, block) in &mut blocks {
                 if *pos == inner {
@@ -650,7 +804,7 @@ impl Variant {
                 VariantPort {
                     edge: p.edge.rotated(self.rotation),
                     kind,
-                    pos: rotate_pos_in(p.pos, self.rotation, tile.width),
+                    pos: rotate_pos_in(p.pos, self.rotation, tile.width, tile.depth),
                     net,
                 }
             })
@@ -749,6 +903,64 @@ mod tests {
         assert_eq!(turn.blocks(&lib).iter().filter(|(_, b)| matches!(b, Block::Wire(_))).count(), 4);
         // 2 io tiles, 11 wires + 28 repeater placements + 3 more delays, 7 NORs, 3 crossings, 2 ties
         assert_eq!(Variant::all().len(), 2 + 11 + 28 + 3 + 7 + 3 + 2 + 2);
+    }
+
+    #[test]
+    fn the_strengths_read_off_the_dust_are_the_known_ones() {
+        let lib = Library::builtin().unwrap();
+        // A tile is five blocks, so every hop from port to port costs five, straight
+        // or turned, in a wire or along either axis of a crossing; a repeater hands
+        // on 12 from any arm of a wire, and only from the flat arms of a crossing.
+        for entry in Edge::ALL {
+            for exit in Edge::ALL.into_iter().filter(|e| *e != entry) {
+                assert_eq!(lib.wire.dust_steps(entry, exit), Some(5), "wire {entry:?} to {exit:?}");
+                assert_eq!(lib.wire.repeater_out(entry, exit), Some(12), "wire {entry:?} to {exit:?}");
+                let crosses = exit == entry.opposite();
+                let flat = crosses && matches!(entry, Edge::West | Edge::East);
+                assert_eq!(lib.cross.dust_steps(entry, exit), crosses.then_some(5), "cross {entry:?} to {exit:?}");
+                assert_eq!(lib.cross.repeater_out(entry, exit), flat.then_some(12), "cross {entry:?} to {exit:?}");
+            }
+        }
+        // A gate's input dust is not joined to its output.
+        assert_eq!(lib.nor.dust_steps(Edge::West, Edge::East), None);
+        // What each driver hands the next tile's port: the torch gives 15 to the
+        // port dust beside it; the input and the flip-flop lose two more dust; the
+        // constant 1 one; a constant 0 and plain wiring drive nothing.
+        assert_eq!(lib.nor.source_out(Edge::East), 14);
+        assert_eq!(lib.input.source_out(Edge::East), 12);
+        assert_eq!(lib.tie_high.source_out(Edge::East), 13);
+        assert_eq!(lib.dff.source_out(Edge::East), 12);
+        assert_eq!(lib.tie_low.source_out(Edge::East), 0);
+        assert_eq!(lib.wire.source_out(Edge::East), 0);
+        assert_eq!(lib.nor.source_out(Edge::West), 0);
+        // What each input port needs: a gate's dust must reach its block with one
+        // level, a lamp's dust must point into it with one, the flip-flop's D runs
+        // four dust to the master repeater, and its clock port powers the stone
+        // beside it directly.
+        for pin in [Edge::West, Edge::North, Edge::South] {
+            assert_eq!(lib.nor.port_needs(pin), Some(2), "nor {pin:?}");
+        }
+        assert_eq!(lib.output.port_needs(Edge::West), Some(3));
+        assert_eq!(lib.dff.port_needs(Edge::West), Some(5));
+        assert_eq!(lib.dff.port_needs(Edge::North), Some(1));
+        assert_eq!(lib.nor.port_needs(Edge::East), None);
+        assert_eq!(lib.wire.port_needs(Edge::West), None);
+        assert_eq!(lib.input.port_needs(Edge::East), None);
+    }
+
+    #[test]
+    fn every_tile_is_a_cell_deep_and_turns_within_its_footprint() {
+        let lib = Library::builtin().unwrap();
+        for tile in [&lib.input, &lib.output, &lib.wire, &lib.nor, &lib.cross, &lib.tie_high, &lib.tie_low, &lib.dff] {
+            assert_eq!(tile.depth, PITCH, "{}", tile.name);
+            assert_eq!(tile.width % PITCH, 0, "{}", tile.name);
+        }
+        // A quarter turn of a two-cell tile makes it one cell wide and two deep.
+        assert_eq!(rotate_pos_in(Pos::new(0, 1, 0), 1, 10, 5), Pos::new(4, 1, 0));
+        assert_eq!(rotate_pos_in(Pos::new(9, 1, 4), 1, 10, 5), Pos::new(0, 1, 9));
+        assert_eq!(rotate_pos_in(Pos::new(9, 1, 4), 2, 10, 5), Pos::new(0, 1, 0));
+        assert_eq!(rotate_pos_in(Pos::new(1, 1, 2), 4, 10, 5), Pos::new(1, 1, 2));
+        assert_eq!(rotate_pos(Pos::new(0, 1, 2), 1), Pos::new(2, 1, 0));
     }
 
     #[test]

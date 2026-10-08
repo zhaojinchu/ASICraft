@@ -85,10 +85,36 @@ impl Placed {
     }
 }
 
-/// Tiles by (column, row). Columns run east, rows run south.
+/// Tiles by (column, row). Columns run east, rows run south. Each column has a
+/// width and each row a depth in blocks (every one `PITCH` today), and a tile's
+/// blocks start where the columns and rows before it end.
 #[derive(Clone, Debug, Default)]
 pub struct Layout {
     pub tiles: BTreeMap<(i32, i32), Placed>,
+    /// Blocks per column, west to east.
+    pub col_width: Vec<i32>,
+    /// Blocks per row, north to south.
+    pub row_depth: Vec<i32>,
+}
+
+/// Where each of a run of columns (or rows) starts in blocks, and where the last
+/// one ends: the prefix sums of their widths, one entry more than there are widths.
+pub fn origins(widths: &[i32]) -> Vec<i32> {
+    let mut out = Vec::with_capacity(widths.len() + 1);
+    let mut at = 0;
+    out.push(at);
+    for &w in widths {
+        at += w;
+        out.push(at);
+    }
+    out
+}
+
+/// The column (or row) whose span in an `origins` table holds the block
+/// coordinate `at`; `None` before the first or beyond the last.
+pub fn index_at(origins: &[i32], at: i32) -> Option<i32> {
+    let n = origins.len().checked_sub(1)?;
+    (0..n).map(|i| i as i32).find(|&i| origins[i as usize] <= at && at < origins[i as usize + 1])
 }
 
 /// A layout turned into blocks, with where to drive and read it.
@@ -110,7 +136,10 @@ pub struct Realized {
 pub struct Macro {
     pub cell: usize,
     pub origin: Pos,
+    /// Cells wide.
     pub width: i32,
+    /// Blocks along x and z from the origin: the cells it covers.
+    pub extent: (i32, i32),
     pub d: Pos,
     pub clk: Pos,
     pub q: Pos,
@@ -120,17 +149,37 @@ pub struct Macro {
 impl Macro {
     pub fn contains(&self, pos: Pos) -> bool {
         pos.x >= self.origin.x
-            && pos.x < self.origin.x + self.width * PITCH
+            && pos.x < self.origin.x + self.extent.0
             && pos.z >= self.origin.z
-            && pos.z < self.origin.z + PITCH
+            && pos.z < self.origin.z + self.extent.1
     }
 }
 
 impl Layout {
+    /// An empty layout whose columns are all `PITCH` wide and rows all `PITCH` deep.
+    pub fn uniform(cols: i32, rows: i32) -> Layout {
+        Layout { tiles: BTreeMap::new(), col_width: vec![PITCH; cols as usize], row_depth: vec![PITCH; rows as usize] }
+    }
+
     pub fn size(&self) -> (i32, i32) {
         let cols = self.tiles.iter().map(|(k, p)| k.0 + p.width()).max().unwrap_or(0);
         let rows = self.tiles.keys().map(|k| k.1).max().map_or(0, |m| m + 1);
         (cols, rows)
+    }
+
+    /// Where the tiles start in blocks, by column and by row: the prefix sums of
+    /// the widths and depths, one entry past the last column and row. Fails when
+    /// the tables do not cover every column or row that holds a tile.
+    pub fn block_origins(&self) -> Result<(Vec<i32>, Vec<i32>), String> {
+        let (cols, rows) = self.size();
+        if self.col_width.len() < cols as usize || self.row_depth.len() < rows as usize {
+            return Err(format!(
+                "the layout has {cols} columns and {rows} rows but widths for {} and depths for {}",
+                self.col_width.len(),
+                self.row_depth.len()
+            ));
+        }
+        Ok((origins(&self.col_width[..cols as usize]), origins(&self.row_depth[..rows as usize])))
     }
 
     /// The tile at `cell`, counting a wide tile's further cells.
@@ -167,13 +216,14 @@ impl Layout {
         if cols == 0 || rows == 0 {
             return Err("the layout is empty".into());
         }
-        let mut world = World::new((cols * PITCH, HEIGHT, rows * PITCH));
+        let (xs, zs) = self.block_origins()?;
+        let mut world = World::new((xs[cols as usize], HEIGHT, zs[rows as usize]));
         let mut probes = vec![None; netlist.inputs.len()];
         let mut lamps = vec![None; netlist.outputs.len()];
         let mut ties = Vec::new();
         let mut macros = Vec::new();
         for (&(col, row), placed) in &self.tiles {
-            let origin = Pos::new(col * PITCH, 0, row * PITCH);
+            let origin = Pos::new(xs[col as usize], 0, zs[row as usize]);
             let at = |p: Pos| Pos::new(origin.x + p.x, origin.y + p.y, origin.z + p.z);
             let variant = placed.variant();
             let tile = variant.tile(library);
@@ -202,10 +252,12 @@ impl Layout {
                             .map(|p| at(p.pos))
                             .ok_or_else(|| format!("the flip-flop has no {} port", edge.letter()))
                     };
+                    let (end_col, end_row) = ((col + tile.cells()) as usize, (row + 1) as usize);
                     macros.push(Macro {
                         cell: *cell,
                         origin,
                         width: tile.cells(),
+                        extent: (xs[end_col] - origin.x, zs[end_row] - origin.z),
                         d: port(Edge::West)?,
                         clk: port(Edge::North)?,
                         q: port(Edge::East)?,
@@ -219,5 +271,64 @@ impl Layout {
             found.into_iter().enumerate().map(|(i, p)| p.ok_or_else(|| format!("{what} {i} was not placed"))).collect()
         };
         Ok(Realized { world, probes: all(probes, "input")?, lamps: all(lamps, "output")?, ties, macros })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build::place_and_route;
+
+    /// A toggle flip-flop: one flip-flop, two inverters.
+    const TOGGLE: &str = r#"{"modules":{"top":{
+        "ports":{"clk":{"direction":"input","bits":[2]},"q":{"direction":"output","bits":[3]}},
+        "netnames":{"q":{"bits":[3],"attributes":{"init":"1"}}},
+        "cells":{"inv":{"type":"NOT","connections":{"A":[3],"Y":[4]}},
+                 "nclk":{"type":"NOT","connections":{"A":[2],"Y":[5]}},
+                 "ff":{"type":"DFF","connections":{"D":[4],"CLK":[5],"Q":[3]}}}}}}"#;
+
+    #[test]
+    fn origins_are_prefix_sums_and_index_at_finds_the_span() {
+        assert_eq!(origins(&[]), vec![0]);
+        assert_eq!(origins(&[5, 5, 5]), vec![0, 5, 10, 15]);
+        assert_eq!(origins(&[3, 5, 3]), vec![0, 3, 8, 11]);
+        let table = origins(&[3, 5, 3]);
+        assert_eq!(index_at(&table, 0), Some(0));
+        assert_eq!(index_at(&table, 2), Some(0));
+        assert_eq!(index_at(&table, 3), Some(1));
+        assert_eq!(index_at(&table, 7), Some(1));
+        assert_eq!(index_at(&table, 10), Some(2));
+        assert_eq!(index_at(&table, 11), None);
+        assert_eq!(index_at(&table, -1), None);
+        assert_eq!(index_at(&[0], 0), None);
+        assert_eq!(index_at(&[], 0), None);
+    }
+
+    #[test]
+    fn tiles_are_realized_where_the_tables_put_them() {
+        let library = Library::builtin().unwrap();
+        let netlist = Netlist::from_yosys_json(TOGGLE, "top", &library).unwrap();
+        let (routed, _) = place_and_route(&library, &netlist).unwrap();
+        let layout = &routed.layout;
+        let (cols, rows) = layout.size();
+        assert_eq!(layout.col_width, vec![PITCH; layout.col_width.len()]);
+        assert!(layout.col_width.len() >= cols as usize && layout.row_depth.len() >= rows as usize);
+        let realized = layout.realize(&library, &netlist).unwrap();
+        assert_eq!(realized.world.size(), (cols * PITCH, HEIGHT, rows * PITCH));
+        // The flip-flop sits at its cell's corner and covers two cells by one.
+        let (&(col, row), _) = layout.tiles.iter().find(|(_, p)| matches!(p, Placed::Dff { .. })).unwrap();
+        let [m] = realized.macros.as_slice() else { panic!("one flip-flop") };
+        assert_eq!(m.origin, Pos::new(col * PITCH, 0, row * PITCH));
+        assert_eq!((m.width, m.extent), (2, (2 * PITCH, PITCH)));
+        assert!(m.contains(m.origin) && m.contains(Pos::new(m.origin.x + 9, 3, m.origin.z + 4)));
+        assert!(
+            !m.contains(Pos::new(m.origin.x + 10, 0, m.origin.z))
+                && !m.contains(Pos::new(m.origin.x, 0, m.origin.z + 5))
+        );
+        assert!(m.blocks.iter().all(|(p, _)| m.contains(*p)));
+        // A layout whose tables do not cover its tiles cannot be realized.
+        let short = Layout { tiles: layout.tiles.clone(), ..Layout::uniform(1, 1) };
+        let Err(err) = short.realize(&library, &netlist) else { panic!("a short table must be refused") };
+        assert!(err.contains("widths for 1"), "{err}");
     }
 }
