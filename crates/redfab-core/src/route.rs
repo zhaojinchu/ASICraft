@@ -11,16 +11,17 @@
 //! the history costs it built up carry over to the next attempt.
 //!
 //! Signal strength is exact on the tile grid: dust loses one level per block,
-//! every tile hop costs five, and each tile's ports are at fixed cells. From
-//! that, repeaters are inserted into straight tiles wherever a signal would
-//! arrive too weak.
+//! and each tile says what a hop through it costs, what its own driver hands
+//! on and what its pins need ([`Tile::dust_steps`] and the methods beside it,
+//! read off the tile files). From that, repeaters are inserted into straight
+//! tiles wherever a signal would arrive too weak.
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::layout::{Layout, Placed};
 use crate::netlist::{Driver, NetId, Netlist};
 use crate::place::{Cell, Column, Placement};
-use crate::tile::Edge;
+use crate::tile::{Edge, Library, Tile};
 
 /// A track in a routing tile.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -47,25 +48,9 @@ struct Sink {
     needed_after: u8,
 }
 
-/// Power a gate's output puts on the next tile's entry port: the torch gives 15
-/// to the port dust beside it, one less at the neighbour.
-const GATE_OUT: u8 = 14;
-/// The input tile and the repeater tile hand 12 to the next tile; the constant-1 tile 13.
-const INPUT_OUT: u8 = 12;
-const REPEATER_OUT: u8 = 12;
-const TIE_HIGH_OUT: u8 = 13;
-/// A tile is five blocks, so the entry port of the next tile is five levels lower.
-const HOP: u8 = 5;
-/// What the pins need at their own port cell: a gate's dust must still reach its
-/// block with one level, a lamp needs its dust to point into it with one.
-const GATE_IN_NEEDS: u8 = 2;
-/// A flip-flop's D runs four dust from its port to the master repeater; the
-/// clock port's dust powers the stone beside it directly.
-const DFF_D_NEEDS: u8 = 5;
-const DFF_CLK_NEEDS: u8 = 1;
-/// A flip-flop's Q leaves its slave repeater two dust before the port.
-const DFF_OUT: u8 = 12;
-const LAMP_NEEDS: u8 = 3;
+/// What a repeater needs at the port it sits behind: it reads that port's own
+/// dust (the repeater takes the cell next to the port, see `Variant::blocks`),
+/// so any power there is enough.
 const REPEATER_NEEDS: u8 = 1;
 
 /// The most rounds of negotiation in one run.
@@ -123,12 +108,18 @@ impl std::fmt::Display for RouteFailure {
 /// a signal cannot be kept alive with repeaters. `history` seeds the negotiation
 /// with what an earlier attempt learned; `log` hears about progress.
 pub fn route(
+    library: &Library,
     netlist: &Netlist,
     placement: &Placement,
     history: Option<&History>,
     log: &mut dyn FnMut(&str),
 ) -> Result<Routed, RouteFailure> {
     let drivers = netlist.drivers().map_err(RouteFailure::Other)?;
+    // What a pin needs at the port of the tile in front of it.
+    let needs = |tile: &Tile, pin: Edge| -> Result<u8, RouteFailure> {
+        tile.port_needs(pin)
+            .ok_or_else(|| RouteFailure::Other(format!("the {} tile has no {} input", tile.name, pin.letter())))
+    };
     let mut nets: Vec<(NetId, Source, Vec<Sink>)> = Vec::new();
     for (net, &driver) in drivers.iter().enumerate() {
         let sinks = netlist.sinks_of(net);
@@ -138,16 +129,20 @@ pub fn route(
         let source = match driver {
             Driver::Cell(c) => {
                 let (col, row) = placement.gates[c];
-                let dff = netlist.cells[c].is_dff();
+                let tile = if netlist.cells[c].is_dff() { &library.dff } else { &library.nor };
                 Source {
                     node: ((col + placement.widths[c], row), Track::X),
                     entry: Edge::West,
-                    strength: if dff { DFF_OUT } else { GATE_OUT },
+                    strength: tile.source_out(Edge::East),
                 }
             }
             Driver::Input(i) => {
                 let (col, row) = placement.inputs[i];
-                Source { node: ((col + 1, row), Track::X), entry: Edge::West, strength: INPUT_OUT }
+                Source {
+                    node: ((col + 1, row), Track::X),
+                    entry: Edge::West,
+                    strength: library.input.source_out(Edge::East),
+                }
             }
             Driver::Const(v) => {
                 let (_, _, (col, row)) = *placement
@@ -155,41 +150,33 @@ pub fn route(
                     .iter()
                     .find(|t| t.0 == net)
                     .ok_or_else(|| RouteFailure::Other("constant without a tie".to_string()))?;
-                Source {
-                    node: ((col + 1, row), Track::X),
-                    entry: Edge::West,
-                    strength: if v { TIE_HIGH_OUT } else { 0 },
-                }
+                let tile = if v { &library.tie_high } else { &library.tie_low };
+                Source { node: ((col + 1, row), Track::X), entry: Edge::West, strength: tile.source_out(Edge::East) }
             }
         };
-        let sink_list = sinks
-            .iter()
-            .map(|&(c, pin)| {
-                if c == usize::MAX {
-                    let (col, row) = placement.outputs[pin];
-                    Sink { node: ((col - 1, row), Track::X), exit: Edge::East, needed_after: LAMP_NEEDS }
-                } else {
-                    let (col, row) = placement.gates[c];
-                    let dff = netlist.cells[c].is_dff();
-                    match placement.pin_edges[c][pin] {
-                        Edge::West => Sink {
-                            node: ((col - 1, row), Track::X),
-                            exit: Edge::East,
-                            needed_after: if dff { DFF_D_NEEDS } else { GATE_IN_NEEDS },
-                        },
-                        Edge::North => Sink {
-                            node: ((col, row - 1), Track::Z),
-                            exit: Edge::South,
-                            needed_after: if dff { DFF_CLK_NEEDS } else { GATE_IN_NEEDS },
-                        },
-                        Edge::South => {
-                            Sink { node: ((col, row + 1), Track::Z), exit: Edge::North, needed_after: GATE_IN_NEEDS }
-                        }
-                        Edge::East => unreachable!("gates never take input on the east"),
-                    }
+        let mut sink_list = Vec::with_capacity(sinks.len());
+        for &(c, pin) in &sinks {
+            let sink = if c == usize::MAX {
+                let (col, row) = placement.outputs[pin];
+                Sink {
+                    node: ((col - 1, row), Track::X),
+                    exit: Edge::East,
+                    needed_after: needs(&library.output, Edge::West)?,
                 }
-            })
-            .collect();
+            } else {
+                let (col, row) = placement.gates[c];
+                let tile = if netlist.cells[c].is_dff() { &library.dff } else { &library.nor };
+                let edge = placement.pin_edges[c][pin];
+                let needed_after = needs(tile, edge)?;
+                match edge {
+                    Edge::West => Sink { node: ((col - 1, row), Track::X), exit: Edge::East, needed_after },
+                    Edge::North => Sink { node: ((col, row - 1), Track::Z), exit: Edge::South, needed_after },
+                    Edge::South => Sink { node: ((col, row + 1), Track::Z), exit: Edge::North, needed_after },
+                    Edge::East => unreachable!("gates never take input on the east"),
+                }
+            };
+            sink_list.push(sink);
+        }
         nets.push((net, source, sink_list));
     }
 
@@ -232,7 +219,7 @@ pub fn route(
                 return Err(RouteFailure::Congested { tracks, users, rounds, history });
             }
         };
-        match realize_trees(netlist, placement, &nets, &trees) {
+        match realize_trees(library, netlist, placement, &nets, &trees) {
             Ok(mut routed) => {
                 routed.rounds = rounds;
                 return Ok(routed);
@@ -275,6 +262,7 @@ enum Failure {
 
 /// Turns routed trees into tiles and inserts repeaters.
 fn realize_trees(
+    library: &Library,
     netlist: &Netlist,
     placement: &Placement,
     nets: &[(NetId, Source, Vec<Sink>)],
@@ -322,7 +310,11 @@ fn realize_trees(
         }
     }
 
-    let mut layout = Layout::default();
+    let mut layout = Layout {
+        tiles: BTreeMap::new(),
+        col_width: placement.col_width.clone(),
+        row_depth: placement.row_depth.clone(),
+    };
     for (c, cell) in netlist.cells.iter().enumerate() {
         let placed = if cell.is_dff() {
             Placed::Dff { cell: c, init: cell.init }
@@ -369,7 +361,7 @@ fn realize_trees(
         let counts = if source.strength == 0 {
             vec![0; sinks.len()]
         } else {
-            match insert_repeaters(&mut layout, &tiles, *net, source, sinks, tree) {
+            match insert_repeaters(library, &mut layout, &tiles, *net, source, sinks, tree) {
                 Ok(counts) => counts,
                 Err(Dies { path }) => {
                     let crossings = path
@@ -748,6 +740,7 @@ fn shortest_path(graph: &Graph, tree: &[usize], target: usize, cost: impl Fn(usi
 /// where the signal would arrive too weak. Returns the repeater count on the path
 /// to each sink.
 fn insert_repeaters(
+    library: &Library,
     layout: &mut Layout,
     tiles: &Tiles,
     net: NetId,
@@ -787,14 +780,24 @@ fn insert_repeaters(
             // The repeater goes in the flat west-east arm: turn the tile when this
             // net runs north-south, and name the entry before the turn.
             Some(Placed::Cross { .. }) => {
-                let rotation = if matches!(entry, Edge::West | Edge::East) { 0 } else { 1 };
-                let local = Edge::ALL
-                    .into_iter()
-                    .find(|e| e.rotated(rotation) == *entry)
-                    .expect("an edge turns onto the entry");
-                Placed::Cross { rotation, repeater_entry: Some(local), delay: 1 }
+                let rotation = cross_turn_for(*entry);
+                Placed::Cross { rotation, repeater_entry: Some(unturned(*entry, rotation)), delay: 1 }
             }
             _ => Placed::Repeater { edges: edges.iter().copied().collect(), entry: *entry, delay: 1 },
+        }
+    };
+    // The tile at a cell of this net's as the file describes it (a wire or a
+    // crossing), and how it is turned: a crossing is turned a quarter when the
+    // repeater it carries, or is about to carry, belongs to a net running
+    // north-south. Repeaters of this net are placed after the walk, so the one
+    // it is about to carry is read from `repeaters`.
+    let tile_at = |cell: Cell, at_repeater: bool, layout: &Layout| -> (&Tile, u8) {
+        match layout.tiles.get(&cell) {
+            Some(Placed::Cross { rotation, repeater_entry, .. }) => match (at_repeater, repeater_entry) {
+                (true, None) => (&library.cross, cross_turn_for(cells[&cell].1)),
+                _ => (&library.cross, *rotation),
+            },
+            _ => (&library.wire, 0),
         }
     };
     let parent_cell = |cell: Cell| -> Option<Cell> {
@@ -811,18 +814,37 @@ fn insert_repeaters(
         let mut sink_counts = vec![0u32; sinks.len()];
         while let Some((cell, v)) = stack.pop() {
             let at_repeater = repeaters.contains(&cell);
-            let out = if at_repeater { REPEATER_OUT } else { v.saturating_sub(HOP) };
+            let (tile, rotation) = tile_at(cell, at_repeater, layout);
+            // The edges in the tile's own frame.
+            let entry = unturned(cells[&cell].1, rotation);
+            // What the tile costs from its entry to the port beyond `exit`, and what
+            // reaches that port.
+            let steps = |exit: Edge| {
+                tile.dust_steps(entry, unturned(exit, rotation))
+                    .expect("the tile's dust joins the entry to every edge the net leaves by")
+            };
+            let out = |exit: Edge| {
+                if at_repeater {
+                    tile.repeater_out(entry, unturned(exit, rotation))
+                        .expect("a repeater in the entry arm reaches every exit")
+                } else {
+                    v.saturating_sub(steps(exit))
+                }
+            };
             let mut needed = if at_repeater { REPEATER_NEEDS } else { 1 };
             let children = child_cells(cell);
-            if !children.is_empty() && !at_repeater {
-                needed = needed.max(1 + HOP);
+            if !at_repeater {
+                // Every child's port must still see one level.
+                for child in &children {
+                    needed = needed.max(1 + steps(edge_between(cell, *child)));
+                }
             }
             for (i, sink) in sinks.iter().enumerate() {
                 if sink.node.0 == cell {
                     if at_repeater {
                         // The pin reads the repeater's own output dust: always strong enough.
                     } else {
-                        needed = needed.max(sink.needed_after + HOP);
+                        needed = needed.max(sink.needed_after + steps(sink.exit));
                     }
                     // Count repeaters on the path to this sink.
                     let mut c = Some(cell);
@@ -839,7 +861,7 @@ fn insert_repeaters(
                 break;
             }
             for child in children {
-                stack.push((child, out));
+                stack.push((child, out(edge_between(cell, child))));
             }
         }
         let Some(bad) = violation else {
@@ -894,6 +916,18 @@ fn insert_repeaters(
             }
         }
     }
+}
+
+/// How a crossing is turned to carry a repeater for a net entering it by `entry`:
+/// the repeater fits only the flat west-east arm, so a quarter turn when the net
+/// runs north-south.
+fn cross_turn_for(entry: Edge) -> u8 {
+    u8::from(matches!(entry, Edge::North | Edge::South))
+}
+
+/// A world edge of a tile turned `rotation` quarters, named as the tile file names it.
+fn unturned(edge: Edge, rotation: u8) -> Edge {
+    edge.rotated((4 - rotation % 4) % 4)
 }
 
 #[cfg(test)]
@@ -952,8 +986,10 @@ mod tests {
         let narrow = place(&netlist, &vec![1; gaps]).unwrap();
         let estimate = estimate_routing(&netlist, &narrow);
         assert!(estimate[0] > 1, "the first gap must need more than one column: {estimate:?}");
+        let library = Library::builtin().unwrap();
         let mut log = |_: &str| {};
-        let Err(RouteFailure::Congested { tracks, users, rounds, history }) = route(&netlist, &narrow, None, &mut log)
+        let Err(RouteFailure::Congested { tracks, users, rounds, history }) =
+            route(&library, &netlist, &narrow, None, &mut log)
         else {
             panic!("one routing column in front of the gates must be congested");
         };
@@ -977,8 +1013,8 @@ mod tests {
         assert!(history.costs.keys().any(|(column, _, _)| matches!(column, Column::Routing { gap: 0, .. })));
         // Widened to the estimate, the placement routes, cold and from the history.
         let wide = place(&netlist, &estimate).unwrap();
-        let cold = route(&netlist, &wide, None, &mut log).unwrap();
-        let warm = route(&netlist, &wide, Some(&history), &mut log).unwrap();
+        let cold = route(&library, &netlist, &wide, None, &mut log).unwrap();
+        let warm = route(&library, &netlist, &wide, Some(&history), &mut log).unwrap();
         assert!(cold.rounds > 0 && warm.rounds > 0);
         assert_eq!(cold.layout.size(), warm.layout.size());
     }
@@ -990,8 +1026,9 @@ mod tests {
         let narrow = place(&netlist, &vec![1; gaps]).unwrap();
         let wide = place(&netlist, &estimate_routing(&netlist, &narrow)).unwrap();
         let first = first_routing_column(&wide);
+        let library = Library::builtin().unwrap();
         let mut log = |_: &str| {};
-        let cold = route(&netlist, &wide, None, &mut log).unwrap();
+        let cold = route(&library, &netlist, &wide, None, &mut log).unwrap();
         assert!(runs_north_south_in(&cold.layout, first), "cold:\n{}", render(&cold.layout));
         // A history that makes the north-south track of that column prohibitive
         // moves every row change to the other columns.
@@ -999,7 +1036,7 @@ mod tests {
         for row in 0..wide.rows {
             steer.costs.insert((Column::Routing { gap: 0, offset: 0 }, row, Track::Z), 1e6);
         }
-        let steered = route(&netlist, &wide, Some(&steer), &mut log).unwrap();
+        let steered = route(&library, &netlist, &wide, Some(&steer), &mut log).unwrap();
         assert!(!runs_north_south_in(&steered.layout, first), "steered:\n{}", render(&steered.layout));
     }
 }

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use crate::block::Block;
 use crate::extract::extract;
 use crate::geom::Pos;
+use crate::layout::{index_at, origins};
 use crate::tile::{Edge, HEIGHT, Kind, Library, PITCH, PortKind, Variant, VariantPort};
 use crate::world::World;
 
@@ -270,22 +271,23 @@ pub fn group_fixture(name: &str, cols: i32, rows: i32, rng: &mut Rng, library: &
         (0..rows).map(|_| (0..cols).map(|_| variants[rng.below(variants.len())].clone()).collect()).collect();
     let placed = lay_out(&grid, library);
     let width = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
+    let (xs, zs) = grid_origins(width, rows);
     let margin = 2;
-    let size = [width * PITCH + 2 * margin, HEIGHT, rows * PITCH + 2 * margin];
+    let size = [xs[width as usize] + 2 * margin, HEIGHT, zs[rows as usize] + 2 * margin];
     let mut fx = Fixture::new(name.to_string(), format!("{cols}x{rows} random tiles"), size);
     let mut drivers = Vec::new();
     let covered = |cell: (i32, i32)| {
         placed.iter().any(|(v, (c, r))| *r == cell.1 && (*c..c + v.cells(library)).contains(&cell.0))
     };
     for (variant, (c, r)) in &placed {
-        let origin = Pos::new(margin + c * PITCH, 0, margin + r * PITCH);
+        let origin = Pos::new(margin + xs[*c as usize], 0, margin + zs[*r as usize]);
         for (pos, block) in variant.blocks(library) {
             fx.put(Pos::new(origin.x + pos.x, pos.y, origin.z + pos.z), block);
         }
         for port in variant.ports(library) {
             let (dc, dr) = port.edge.step();
             // The cell beyond the port: on a wide tile the east port is on its last cell.
-            let port_cell = (c + port.pos.x / PITCH, *r);
+            let port_cell = (c + index_at(&xs, port.pos.x).expect("a port is inside its tile"), *r);
             if covered((port_cell.0 + dc, port_cell.1 + dr)) {
                 continue; // whatever is there is part of the test
             }
@@ -324,6 +326,13 @@ pub fn group_fixture(name: &str, cols: i32, rows: i32, rng: &mut Rng, library: &
     fx.finish(12 + stretch)
 }
 
+/// Where the cells of a `cols` x `rows` grid of fixture tiles start in blocks:
+/// every column a cell wide and every row a cell deep, as the layout's own table
+/// says it (`layout::origins`).
+fn grid_origins(cols: i32, rows: i32) -> (Vec<i32>, Vec<i32>) {
+    (origins(&vec![PITCH; cols as usize]), origins(&vec![PITCH; rows as usize]))
+}
+
 /// Each variant of a grid with the cell it starts at: a row's tiles follow one
 /// another, each as wide as it is.
 pub fn lay_out(grid: &[Vec<Variant>], library: &Library) -> Vec<(Variant, (i32, i32))> {
@@ -344,10 +353,11 @@ pub fn adjacency_problems(grid: &[Vec<Variant>], library: &Library) -> Vec<Strin
     let placed = lay_out(grid, library);
     let rows = grid.len() as i32;
     let cols = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
-    let mut world = World::new((cols * PITCH, HEIGHT, rows * PITCH));
+    let (xs, zs) = grid_origins(cols, rows);
+    let mut world = World::new((xs[cols as usize], HEIGHT, zs[rows as usize]));
     let mut probes = Vec::new();
     for (variant, (c, r)) in &placed {
-        let origin = Pos::new(c * PITCH, 0, r * PITCH);
+        let origin = Pos::new(xs[*c as usize], 0, zs[*r as usize]);
         for (pos, block) in variant.blocks(library) {
             world.set(Pos::new(origin.x + pos.x, pos.y, origin.z + pos.z), block);
         }
@@ -361,9 +371,13 @@ pub fn adjacency_problems(grid: &[Vec<Variant>], library: &Library) -> Vec<Strin
 /// The check behind [`adjacency_problems`], on a world that may have been tampered with.
 pub fn problems_in(world: &World, placed: &[(Variant, (i32, i32))], probes: &[Pos], library: &Library) -> Vec<String> {
     let circuit = extract(world, probes);
-    // Which placed tile a position belongs to, by index.
+    // Which placed tile a position belongs to, by index: its cell by the grid's
+    // origin table, then the tile covering that cell.
+    let rows = placed.iter().map(|(_, (_, r))| r + 1).max().unwrap_or(0);
+    let cols = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
+    let (xs, zs) = grid_origins(cols, rows);
     let tile_of = |pos: Pos| -> usize {
-        let (c, r) = (pos.x.div_euclid(PITCH), pos.z.div_euclid(PITCH));
+        let (Some(c), Some(r)) = (index_at(&xs, pos.x), index_at(&zs, pos.z)) else { return usize::MAX };
         placed
             .iter()
             .position(|(v, (vc, vr))| *vr == r && (*vc..vc + v.cells(library)).contains(&c))
