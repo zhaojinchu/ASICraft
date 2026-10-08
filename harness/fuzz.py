@@ -20,16 +20,18 @@ import random
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from .mechanics import AIR, D, G, L, MODES, RB, S, T, Build, source_for
 from .runner import Runner, layout
-from .server import ROOT, VanillaServer, cargo
+from .server import ROOT, VanillaServer, cargo, seed_argument
 from .session import Session
 from .trace import Fixture, Trace, first_trace_difference
 
 CORPUS_DIR = ROOT / "fixtures" / "fuzz"
+# The gate's `verify` seed is fixed so a run tests the same circuits as the last one;
+# 1 and 2 made the committed corpora, so this draws fresh ones.
+VERIFY_SEED = 3
 FUZZ_TICKS = 60
 LONG_TICKS = 230   # long enough to see a burned-out torch relight (160 ticks later)
 FULL = (S, G, L)
@@ -216,11 +218,26 @@ def random_fixture(rng: random.Random, name: str, ticks: int = FUZZ_TICKS) -> Fi
     return b.build()
 
 
+def consistent_traces(mode: str, fxs: list[Fixture], traces: dict[tuple[str, str], Trace],
+                      log=print) -> tuple[dict[str, Trace], dict[str, int]]:
+    """The aligned trace of every fixture whose rotated placement gave the same trace.
+    A fixture the game ran differently at the two placements is placement-dependent:
+    it is dropped, counted, and named in the log so the arrangement can be looked at."""
+    stats = {"placement_dependent": 0}
+    keep: dict[str, Trace] = {}
+    for fx in fxs:
+        a, r = traces[(fx.name, "aligned")], traces[(fx.name, "rotated")]
+        if (diff := first_trace_difference(a, r)) is not None:
+            stats["placement_dependent"] += 1
+            log(f"[{mode}] {fx.name}: placement-dependent, dropped ({diff})")
+            continue
+        keep[fx.name] = a
+    return keep, stats
+
+
 def run_mode(mode: str, fxs: list[Fixture], log=print) -> tuple[dict[str, Trace], dict[str, int]]:
     """Record every fixture at two placements. Returns the traces the game was
     consistent about, and counts of what was dropped."""
-    stats = {"placement_dependent": 0}
-    keep: dict[str, Trace] = {}
     with VanillaServer(f"fuzz-{mode}", redstone_experiments=MODES[mode]) as server:
         session = Session(server)
         session.prepare()
@@ -230,13 +247,7 @@ def run_mode(mode: str, fxs: list[Fixture], log=print) -> tuple[dict[str, Trace]
         # (no burnout history to guess).
         traces = runner.run(layout(fxs, variants=("aligned", "rotated")), log=lambda m: log(f"[{mode}] {m}"),
                             settle_ticks=0, allow_pending_at_start=True)
-        for fx in fxs:
-            a, r = traces[(fx.name, "aligned")], traces[(fx.name, "rotated")]
-            if first_trace_difference(a, r) is not None:
-                stats["placement_dependent"] += 1
-                continue
-            keep[fx.name] = a
-    return keep, stats
+    return consistent_traces(mode, fxs, traces, log)
 
 
 def record(fxs: list[Fixture], out: Path, log=print) -> dict:
@@ -263,21 +274,30 @@ def record(fxs: list[Fixture], out: Path, log=print) -> dict:
     }
 
 
-def main(argv: list[str] | None = None) -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """The command line, with `seed` resolved: a fixed one unless `--seed` says otherwise,
+    so a gate run tests what the last one did."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("action", choices=["record", "verify", "show"])
-    ap.add_argument("--seed", type=int, help="random seed (default: from the clock for verify, 1 for record)")
+    ap.add_argument("--seed", type=seed_argument,
+                    help=f"an integer, or `random` for one from the clock (default: {VERIFY_SEED} for verify, 1 otherwise)")
     ap.add_argument("--count", type=int, default=40)
     ap.add_argument("--long", type=int, default=0, help="how many of the fixtures run for 230 ticks instead of 60")
     ap.add_argument("--out", type=Path, help="where `record` writes the corpus (default: fixtures/fuzz)")
     args = ap.parse_args(argv)
+    if args.seed is None:
+        args.seed = VERIFY_SEED if args.action == "verify" else 1
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    seed = args.seed
 
     if args.action == "show":
-        rng = random.Random(args.seed or 1)
-        print(json.dumps(random_fixture(rng, "fz_show").to_json(), indent=1))
+        print(json.dumps(random_fixture(random.Random(seed), "fz_show").to_json(), indent=1))
         return 0
 
-    seed = args.seed if args.seed is not None else (1 if args.action == "record" else int(time.time()))
     rng = random.Random(seed)
     fxs = [random_fixture(rng, f"fz_{seed}_{i:03d}", LONG_TICKS if i < args.long else FUZZ_TICKS) for i in range(args.count)]
     out = (args.out or CORPUS_DIR) if args.action == "record" else ROOT / "build" / "fuzz" / str(seed)

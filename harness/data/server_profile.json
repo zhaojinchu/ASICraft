@@ -1,0 +1,35 @@
+{
+  "doc": "The Minecraft server as both runners prepare it: the harness (harness/server.py writes the properties, harness/session.py sets the gamerules) and the live backend (server/minecraft.mjs). Each adds this run's ports and password and its own differences explicitly on top; a test on each side (harness/tests/test_server_profile.py, tools/live_test.mjs) holds what it writes to this file.",
+  "gamerules": {
+    "random_tick_speed": "0",
+    "advance_time": "false",
+    "advance_weather": "false",
+    "spawn_mobs": "false",
+    "spawn_monsters": "false",
+    "spawn_phantoms": "false",
+    "spawn_patrols": "false",
+    "spawn_wandering_traders": "false",
+    "spawn_wardens": "false",
+    "mob_griefing": "false",
+    "block_drops": "false",
+    "entity_drops": "false",
+    "log_admin_commands": "false",
+    "fire_spread_radius_around_player": "0"
+  },
+  "max_block_modifications": 1000000,
+  "properties": {
+    "server-ip": "127.0.0.1",
+    "enable-rcon": "true",
+    "broadcast-rcon-to-ops": "false",
+    "level-type": "minecraft\\:flat",
+    "generator-settings": "{\"layers\"\\:[],\"biome\"\\:\"minecraft\\:the_void\"}",
+    "generate-structures": "false",
+    "pause-when-empty-seconds": "-1",
+    "spawn-protection": "0",
+    "view-distance": "4",
+    "simulation-distance": "4",
+    "max-tick-time": "-1",
+    "difficulty": "peaceful"
+  },
+  "jvm_args": ["-Xms512M", "-Xmx2G"]
+}

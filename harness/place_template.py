@@ -11,12 +11,10 @@ Run with: uv run python -m harness.place_template
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
-from pathlib import Path
 
 from .blockstate import BlockState, format_pos
-from .server import ROOT, VanillaServer, cargo
+from .server import ROOT, VanillaServer, redfab
 from .session import Session
 
 TRACES = [
@@ -28,10 +26,6 @@ TRACES = [
 ]
 BIG = (70, 2, 70)
 Y = 64
-
-
-def redfab(*args: str) -> None:
-    subprocess.run([cargo(), "run", "-q", "-p", "redfab-cli", "--", *args], cwd=ROOT, check=True)
 
 
 def read_box(session: Session, origin: tuple[int, int, int], size: tuple[int, int, int]) -> dict[str, str]:

@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # Runs every acceptance check for every stage completed so far.
-#   ./check            fast checks (no Minecraft server)
-#   ./check --vanilla  also runs the checks that need the vanilla server
+#   ./check              fast checks (no Minecraft server), about five minutes
+#   ./check --vanilla    also runs the checks that need the vanilla server, about an hour
+#   ./check --only NAME  runs just that check (any name a run prints, vanilla ones included)
+#   ./check --clean      removes build/mc (old server run directories) and build/check first
 # A stage is done only when this passes. Checks are added before the code they test.
+# Every run writes build/check/SUMMARY: when it ran, each check's verdict and seconds,
+# and the verdict of the whole run, so a passing gate is recorded, not inferred.
+# REDFAB_CHECK_SUMMARY names another file for it (the gate's own test runs this script).
 
 set -u
 cd "$(dirname "$0")"
@@ -15,47 +20,149 @@ fi
 ROOT=$PWD
 source ./versions.env
 
-export PATH="$HOME/.cargo/bin:$ROOT/.tools/jdk/Contents/Home/bin:$PATH"
-export JAVA_HOME="$ROOT/.tools/jdk/Contents/Home"
+# tools/setup.sh links .tools/java to the JDK's java binary (the JDK's layout differs
+# between macOS and Linux); the harness and the mod build use the link too.
+JAVA="$ROOT/.tools/java"
+export PATH="$HOME/.cargo/bin:$PATH"
+if [ -L "$JAVA" ]; then
+    JAVA_BIN=$(cd "$ROOT/.tools" && cd "$(dirname "$(readlink java)")" && pwd)
+    export JAVA_HOME="$(dirname "$JAVA_BIN")"
+    export PATH="$JAVA_BIN:$PATH"
+fi
 
 VANILLA=0
-for arg in "$@"; do
-    case "$arg" in
+ONLY=""
+CLEAN=0
+ARGS="$*"
+while [ $# -gt 0 ]; do
+    case "$1" in
         --vanilla) VANILLA=1 ;;
-        *) echo "unknown argument: $arg" >&2; exit 2 ;;
+        # A single check runs whether or not it needs the server.
+        --only) [ $# -ge 2 ] || { echo "--only needs a check name" >&2; exit 2; }; ONLY=$2; VANILLA=1; shift ;;
+        --clean) CLEAN=1 ;;
+        *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
+    shift
 done
 
+if [ $CLEAN = 1 ]; then
+    echo "removing build/mc and build/check"
+    rm -rf build/mc build/check
+fi
 mkdir -p build/check
 FAILED=()
 PASSED=0
+SUMMARY=${REDFAB_CHECK_SUMMARY:-build/check/SUMMARY}
+mkdir -p "$(dirname "$SUMMARY")"
+STARTED=$(date +%s)
+printf 'redfab check %s started %s at %s\n' "${ARGS:-(fast)}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(git rev-parse --short HEAD 2>/dev/null || echo 'no git')" > "$SUMMARY"
 
-# run <name> <command...>: runs the command, logs to build/check/<name>.log
+# stage <text>: a heading, left out when running a single check.
+stage() {
+    [ -n "$ONLY" ] || echo "$1"
+}
+
+# run <name> <command...>: runs the command, logs to build/check/<name>.log, times it.
 run() {
     local name=$1; shift
+    if [ -n "$ONLY" ] && [ "$name" != "$ONLY" ]; then
+        return 0
+    fi
     local log="build/check/$name.log"
+    local t0
+    t0=$(date +%s)
     if "$@" >"$log" 2>&1; then
-        printf '  PASS  %s\n' "$name"
+        local secs=$(( $(date +%s) - t0 ))
+        printf '  PASS  %-26s %5d s\n' "$name" "$secs"
+        printf 'PASS %s %d\n' "$name" "$secs" >> "$SUMMARY"
         PASSED=$((PASSED + 1))
     else
-        printf '  FAIL  %s   (see %s)\n' "$name" "$log"
+        local secs=$(( $(date +%s) - t0 ))
+        printf '  FAIL  %-26s %5d s   (see %s)\n' "$name" "$secs" "$log"
+        printf 'FAIL %s %d\n' "$name" "$secs" >> "$SUMMARY"
         tail -n 15 "$log" | sed 's/^/        | /'
         FAILED+=("$name")
     fi
 }
 
+# refused_with <message> <command...>: a negative control. The command must fail AND
+# say why with the expected message; a crash for another reason is not a pass.
+refused_with() {
+    local message=$1; shift
+    local out status
+    out=$("$@" 2>&1)
+    status=$?
+    printf '%s\n' "$out"
+    if [ $status -eq 0 ]; then
+        echo "NOT refused: the command succeeded"; return 1
+    fi
+    if ! printf '%s\n' "$out" | grep -qF -- "$message"; then
+        echo "refused, but not for the expected reason: no '$message' in the output"; return 1
+    fi
+    echo "refused as expected: '$message'"
+}
+
 # ---------------------------------------------------------------- stage 0
 
+# The negative-control helper itself: a crash without the message, a success, and the
+# message with a success must all fail it; only the message with a failure passes.
+negatives_can_fail() {
+    ! refused_with "the message" sh -c 'echo something else; exit 1' >/dev/null &&
+    ! refused_with "the message" sh -c 'exit 0' >/dev/null &&
+    ! refused_with "the message" sh -c 'echo the message; exit 0' >/dev/null &&
+    ! refused_with "the message" /nonexistent/program >/dev/null 2>&1 &&
+    refused_with "the message" sh -c 'echo the message; exit 1'
+}
+
+# Every place a version is written must agree with versions.env (Python with
+# .python-version, which uv reads), the lock files must match the manifests, and
+# every committed game recording must come from the pinned jar.
 pins_agree() {
     grep -q "\"@yowasp/yosys\": \"$YOWASP_NPM\"" package.json &&
     grep -q "yowasp-yosys==$YOWASP_PYPI" pyproject.toml &&
-    cargo run -q -p redfab-cli -- --version | grep -q "(Minecraft $MC_VERSION, data version $MC_DATA_VERSION)" &&
-    grep -q "\"mc_version\": \"$MC_VERSION\"" harness/data/block_defaults.json
+    grep -q "\"node\": \">=$NODE_MAJOR\"" package.json &&
+    [ "$(uv run --frozen python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" = "$(cat .python-version)" ] &&
+    grep -q "\"minecraft\": \"$MC_VERSION\"" mod/resources/fabric.mod.json &&
+    cargo run -q --locked -p redfab-cli -- --version | grep -q "(Minecraft $MC_VERSION, data version $MC_DATA_VERSION)" &&
+    grep -q "\"mc_version\": \"$MC_VERSION\"" harness/data/block_defaults.json &&
+    uv lock --check &&
+    uv run --frozen python -m harness.pins
 }
 
+# The installed tools are the pinned ones: hashes where setup.sh downloads (the Fabric
+# libraries Maven served are digested as a tree, the same way setup.sh pins them),
+# versions where the system provides (Node, Verilator).
+fabric_libraries_sha256() {
+    (cd .tools/fabric && find libraries -type f | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | cut -d' ' -f1)
+}
 tool_hashes() {
     [ "$(shasum -a 1 .tools/mc/server-$MC_VERSION.jar | cut -d' ' -f1)" = "$MC_SERVER_SHA1" ] &&
-    java -version 2>&1 | grep -q 'version "25\.'
+    [ "$(shasum -a 256 .tools/fabric/fabric-server-launch.jar | cut -d' ' -f1)" = "$FABRIC_LAUNCHER_SHA256" ] &&
+    [ "$(fabric_libraries_sha256)" = "$FABRIC_LIBRARIES_SHA256" ] &&
+    "$JAVA" -version 2>&1 | grep -q "version \"${JDK_VERSION%%+*}\"" &&
+    node --version | grep -q "^v$NODE_MAJOR\." &&
+    verilator --version | grep -q "^Verilator $VERILATOR_VERSION "
+}
+
+# Python: undefined names, unused imports and variables, syntax errors (rules in pyproject.toml).
+python_lint() {
+    uv run --frozen ruff check harness tools
+}
+
+# Every JavaScript file Node runs or the page loads must parse (there is no JS linter).
+js_syntax() {
+    local f
+    for f in tools/*.mjs server/*.mjs synth/*.mjs playground/*.js; do
+        node --check "$f" || return 1
+    done
+}
+
+# README.md, LICENSE and docs/ agree with the tree: the versions, the refusal messages,
+# the design list, the paths, the limits, the burnout budget and the fixture counts
+# they quote are read from where they come from (harness/docs_check.py says where).
+docs_agree() {
+    uv run --frozen python -m harness.docs_check
 }
 
 # The core must stay free of files, threads, clocks and subprocesses so it runs in a browser.
@@ -83,7 +190,7 @@ yosys_same() {
 # A file that only the slang frontend rejects correctly: if this "passes", read_slang is not really running.
 yosys_negative() {
     printf 'module bad(input logic a, output logic y); assign y = a +; endmodule\n' > build/check/bad.sv
-    ! uv run --frozen python tools/yosys_py.py build/check/bad.sv bad build/check/bad.json
+    refused_with "Design elaboration failed" uv run --frozen python tools/yosys_py.py build/check/bad.sv bad build/check/bad.json
 }
 
 verilator_smoke() {
@@ -97,11 +204,15 @@ server_smoke() {
     uv run --frozen python -m harness.smoke
 }
 
-echo "stage 0: setup"
+stage "stage 0: setup"
+run negatives-can-fail negatives_can_fail
 run pins-agree        pins_agree
 run tool-hashes       tool_hashes
+run python-lint       python_lint
+run js-syntax         js_syntax
+run docs-agree        docs_agree
 run rust-lint         rust_lint
-run rust-test         cargo test --workspace
+run rust-test         cargo test --workspace --locked
 run rust-wasm         rust_wasm
 run yosys-slang-py    yosys_py
 run yosys-slang-node  yosys_node
@@ -121,12 +232,13 @@ mechanics_verify() {
     uv run --frozen python -m harness.mechanics verify
 }
 
-# A deliberately wrong expectation must be reported as a failure.
+# A deliberately wrong expectation must be reported as a failure, naming the block.
 mechanics_negative() {
-    ! uv run --frozen python -m harness.mechanics verify --only torch_delay --break-expectation
+    refused_with "expected minecraft:redstone_torch[lit=false]" \
+        uv run --frozen python -m harness.mechanics verify --only torch_delay --break-expectation
 }
 
-echo "stage 1: vanilla harness"
+stage "stage 1: vanilla harness"
 run harness-unit        uv run --frozen pytest -q
 if [ $VANILLA = 1 ]; then
     run mechanics-verify    mechanics_verify
@@ -135,7 +247,7 @@ fi
 
 # ---------------------------------------------------------------- stage 2
 
-REDFAB="cargo run -q -p redfab-cli --"
+REDFAB="cargo run -q --locked -p redfab-cli --"
 
 # The simulator must reproduce every recorded mechanics fixture tick for tick,
 # block states and pending ticks, in both redstone modes.
@@ -148,9 +260,18 @@ sim_corpus() {
     $REDFAB check-traces fixtures/fuzz
 }
 
-# Each deliberately wrong rule must make the corpus check fail.
+# Each deliberately wrong rule must make the corpus check fail. The list of rules is
+# the simulator's; it must not shrink, or this check would prove less than it did.
+MUTATIONS_EXPECTED=15
 sim_mutations() {
-    for m in $($REDFAB list-mutations); do
+    local mutations count
+    mutations=$($REDFAB list-mutations) || { echo "list-mutations failed"; return 1; }
+    count=$(printf '%s\n' "$mutations" | grep -c .)
+    if [ "$count" -lt "$MUTATIONS_EXPECTED" ]; then
+        echo "list-mutations names $count mutations; the simulator had $MUTATIONS_EXPECTED (update MUTATIONS_EXPECTED if one was merged on purpose)"
+        return 1
+    fi
+    for m in $mutations; do
         if $REDFAB check-traces --mutate "$m" fixtures/fuzz >/dev/null 2>&1 &&
            $REDFAB check-traces --mutate "$m" fixtures/fuzz-repeaters >/dev/null 2>&1 &&
            $REDFAB check-traces --mutate "$m" fixtures/mechanics >/dev/null 2>&1; then
@@ -165,16 +286,17 @@ nbt_roundtrip() {
     uv run --frozen python tools/nbt_roundtrip.py
 }
 
-# Fresh random arrangements recorded from the game and simulated; and structure files
-# placed with /place template (strict and normal, including one larger than 48 blocks).
+# Fresh random arrangements recorded from the game and simulated (a fixed seed, so a run
+# tests what the last one did; `--seed random` explores); and structure files placed
+# with /place template (strict and normal, including one larger than 48 blocks).
 fuzz_vanilla() {
-    uv run --frozen python -m harness.fuzz verify --count 40
+    uv run --frozen python -m harness.fuzz verify --count 40 --seed 3
 }
 place_template() {
     uv run --frozen python -m harness.place_template
 }
 
-echo "stage 2: simulator, part 1"
+stage "stage 2: simulator, part 1"
 run sim-fixtures      sim_fixtures
 run sim-corpus        sim_corpus
 run sim-mutations     sim_mutations
@@ -186,30 +308,46 @@ fi
 
 # ---------------------------------------------------------------- stage 3
 
-DESIGNS="not1 nor2 nor3 consts fa1 adder4"
+# The combinational designs: the first six from the stages, then the subset pinned by
+# the 2026-10-07 review (arithmetic, a mux by index, always_comb with case, signed
+# values, division, parameters, hierarchy, a constant array through the memory pass).
+DESIGNS="not1 nor2 nor3 consts fa1 adder4 mul2 mux4 prio3 cmp4 param_add signed_sub divmod hier rom4"
+# The capacity target: an 8-bit adder with carry (102 cells, 17 inputs), whose input
+# gap needs more routing columns than the six the router gave up at before the
+# 2026-10-07 review. Built here so that the ceiling cannot fall back without the gate
+# noticing; harness.design sim drives it with a fixed sample of input combinations,
+# since 17 bits are too many to enumerate.
+CAPACITY_DESIGNS="adder8"
 
 # SystemVerilog to a baked block world: synthesis to the tile library's cells, a proof
 # that the mapped netlist equals the source, placement, and the layout-versus-netlist
 # check. Any of those failing fails the build.
 build_designs() {
-    for d in $DESIGNS; do
+    for d in $DESIGNS $CAPACITY_DESIGNS; do
         $REDFAB build designs/$d/top.sv --top top -o build/designs/$d || return 1
     done
+    # The capacity target must be the size it claims and must have needed a gap wider
+    # than six routing columns, or it no longer guards what it is here for.
+    grep -q "cells: 102" build/designs/adder8/report.txt || { echo "adder8 is not 102 cells"; return 1; }
+    grep -o "routing columns [0-9, ]*" build/designs/adder8/report.txt | grep -Ewq "[7-9]|[1-9][0-9]+" ||
+        { echo "adder8 no longer needs a gap wider than six routing columns"; return 1; }
 }
 
 # The equivalence proof must be able to fail: swap the inverter for a buffer in a
 # copy of the mapped netlist and the proof has to reject it.
 equiv_negative() {
-    rm -rf build/designs/_tampered && cp -r build/designs/not1 build/designs/_tampered &&
-    grep -q "NOT " build/designs/_tampered/mapped.v &&
-    sed -i '' 's/NOT /BUF /' build/designs/_tampered/mapped.v &&
-    ! node synth/yosys.mjs build/designs/_tampered equiv.ys
+    local tampered=build/designs/_tampered
+    rm -rf $tampered && cp -r build/designs/not1 $tampered &&
+    grep -q "NOT " $tampered/mapped.v &&
+    sed 's/NOT /BUF /' $tampered/mapped.v > $tampered/mapped.v.tmp && mv $tampered/mapped.v.tmp $tampered/mapped.v &&
+    refused_with 'unproven $equiv' node synth/yosys.mjs $tampered equiv.ys
 }
 
 # Every input combination: Verilator on the source vs the block simulator on the layout
-# (512 combinations for the 4-bit adder).
+# (512 combinations for the 4-bit adder, 256 for the comparator); a fixed sample of 256
+# for the capacity target, whose 17 input bits are too many to enumerate.
 sim_vs_verilator() {
-    uv run --frozen python -m harness.design sim $DESIGNS
+    uv run --frozen python -m harness.design sim $DESIGNS $CAPACITY_DESIGNS
 }
 
 # Broken copies of the layout (a cut wire, two wires shorted, a missing torch) must
@@ -241,7 +379,7 @@ design_live() {
     uv run --frozen python -m harness.show nor2 --self-test
 }
 
-echo "stage 3: first circuit"
+stage "stage 3: first circuit"
 run build-designs       build_designs
 run equiv-negative      equiv_negative
 run sim-vs-verilator    sim_vs_verilator
@@ -266,7 +404,7 @@ sim_corpus_repeaters() {
     $REDFAB check-traces --no-skips fixtures/fuzz-repeaters
 }
 
-echo "stage 4: simulator, part 2"
+stage "stage 4: simulator, part 2"
 run sim-fixtures-complete   sim_fixtures_complete
 run sim-corpus-repeaters    sim_corpus_repeaters
 
@@ -287,14 +425,15 @@ tile_fixtures() {
     rm -rf build/tiles && $REDFAB tile-fixtures build/tiles && $REDFAB check-fixtures build/tiles
 }
 
-# In the game, at three placements and in both modes: every tile variant meets its
-# expectations, and the recorded traces equal the simulator's. Plus a random sample of
-# tile pairs and 2x2 groups, replayed in the simulator.
+# In the game, at three placements and in both modes (the two modes run at once, each
+# on its own server): every tile variant meets its expectations, and the recorded
+# traces equal the simulator's. Plus a random sample of tile pairs and 2x2 groups (a
+# fixed seed), replayed in the simulator.
 tiles_vanilla() {
-    uv run --frozen python -m harness.tiles verify
+    uv run --frozen python -m harness.tiles verify --seed 1
 }
 
-echo "stage 5: tile set"
+stage "stage 5: tile set"
 run tile-adjacency      tile_adjacency
 run tile-fixtures       tile_fixtures
 if [ $VANILLA = 1 ]; then
@@ -306,7 +445,14 @@ fi
 # Random combinational netlists (NOT/NOR2/NOR3 with constants and fan-out) must
 # always place, route and pass the layout-versus-netlist and signal-strength checks.
 pnr_random() {
-    $REDFAB pnr-random --count 60 --seed 1
+    $REDFAB pnr-random --count 60 --seed 1 &&
+    # Clocked netlists (feedback nets across every column) and wide ones (every input
+    # in one gap in front of the gates).
+    $REDFAB pnr-random --count 20 --seed 2 --clocked &&
+    $REDFAB pnr-random --count 10 --seed 3 --inputs 16 --gates 8 &&
+    # One netlist of the capacity target's size (gaps up to nine routing columns);
+    # a second would put this check over a minute with the gate's binary.
+    $REDFAB pnr-random --count 1 --seed 7 --gates 100 --inputs 16
 }
 
 # The 4-bit adder on every one of its 512 input combinations in the game, in both
@@ -315,7 +461,7 @@ design_exhaustive_vanilla() {
     uv run --frozen python -m harness.design exhaustive adder4
 }
 
-echo "stage 6: placement and routing"
+stage "stage 6: placement and routing"
 run pnr-random          pnr_random
 if [ $VANILLA = 1 ]; then
     run adder4-exhaustive   design_exhaustive_vanilla
@@ -350,7 +496,7 @@ timing_traces() {
     uv run --frozen python -m harness.design timing-traces $DESIGNS
 }
 
-echo "stage 7: timing analysis"
+stage "stage 7: timing analysis"
 run timing-tight        timing_tight
 run build-deterministic build_deterministic
 if [ $VANILLA = 1 ]; then
@@ -376,13 +522,15 @@ dff_margin() {
     $REDFAB characterize build/tiles --shuffles 20 --margin 2 --chosen dff
 }
 
-echo "stage 8: flip-flop characterization"
+stage "stage 8: flip-flop characterization"
 run dff-characterized   dff_characterized
 run dff-margin          dff_margin
 
 # ---------------------------------------------------------------- stage 9
 
-CLOCKED="counter4 fsm shift2"
+# The clocked designs: the three from the stage, then the subset pinned by the review
+# (an LFSR with a synchronous reset, a falling-edge clock, an initial value, a memory).
+CLOCKED="counter4 fsm shift2 lfsr3 negedge init_reg mem2"
 
 # Clocked designs build like the others: flip-flops mapped in synthesis, the
 # sequential proof, a register column, hold and skew analysis with repeater delays
@@ -396,7 +544,9 @@ build_clocked() {
 
 # For 64 clock cycles of random inputs at the reported period: the block simulator's
 # outputs equal Verilator's every cycle, and stay equal when the ticks that fall due
-# together are run in shuffled orders.
+# together are run in shuffled orders. Verilator is driven on the design's active
+# edge (negedge clocks a falling-edge counter whose flag toggles on every edge, which
+# a rising-edge testbench gets wrong from the first cycle).
 cycles_sim() {
     uv run --frozen python -m harness.design cycles $CLOCKED
 }
@@ -415,18 +565,19 @@ burnout_negative() {
     uv run --frozen python -m harness.design burnout-negative not1
 }
 
-# In the game, at three placements and in both modes: 64 cycles of the counter and
-# the state machine equal Verilator; the hold-broken shift register fails; the
-# inverter driven faster than its budget burns out.
+# In the game, at three placements and in both modes: 64 cycles of the counter, the
+# state machine and the falling-edge counter (the one in-game exercise of a falling
+# active edge) equal Verilator; the hold-broken shift register fails; the inverter
+# driven faster than its budget burns out.
 cycles_vanilla() {
-    uv run --frozen python -m harness.design cycles-vanilla counter4 fsm
+    uv run --frozen python -m harness.design cycles-vanilla counter4 fsm negedge
 }
 negatives_vanilla() {
     uv run --frozen python -m harness.design hold-negative-vanilla shift2 &&
     uv run --frozen python -m harness.design burnout-negative-vanilla not1
 }
 
-echo "stage 9: counter and state machine"
+stage "stage 9: counter and state machine"
 run build-clocked       build_clocked
 run cycles-sim          cycles_sim
 run hold-negative       hold_negative
@@ -456,7 +607,7 @@ playground_headless() {
     node tools/playground_check.mjs
 }
 
-echo "stage 10: browser playground"
+stage "stage 10: browser playground"
 run playground-pipeline playground_pipeline
 run playground-headless playground_headless
 
@@ -475,7 +626,7 @@ mechanics_modded() {
     uv run --frozen python -m harness.mechanics verify --modded
 }
 
-echo "stage 11: server mod and live stream"
+stage "stage 11: server mod and live stream"
 run mod-builds          mod_builds
 if [ $VANILLA = 1 ]; then
     run mechanics-modded    mechanics_modded
@@ -503,7 +654,7 @@ live_check() {
     node tools/live_check.mjs
 }
 
-echo "stage 12: live playground"
+stage "stage 12: live playground"
 run live-test          live_test
 if [ $VANILLA = 1 ]; then
     run live-vanilla       live_check
@@ -511,11 +662,19 @@ fi
 
 # ---------------------------------------------------------------- summary
 
+ELAPSED=$(( $(date +%s) - STARTED ))
 echo
+if [ -n "$ONLY" ] && [ $PASSED -eq 0 ] && [ ${#FAILED[@]} -eq 0 ]; then
+    echo "no check named '$ONLY'; the names are what a run prints"
+    printf 'no check named %s\n' "$ONLY" >> "$SUMMARY"
+    exit 2
+fi
 if [ ${#FAILED[@]} -eq 0 ]; then
-    echo "all $PASSED checks passed"
+    echo "all $PASSED checks passed in $ELAPSED s"
+    printf 'all %d checks passed in %d s\n' "$PASSED" "$ELAPSED" >> "$SUMMARY"
     [ $VANILLA = 1 ] || echo "(vanilla-server checks skipped; run ./check --vanilla)"
 else
-    echo "${#FAILED[@]} failed: ${FAILED[*]}"
+    echo "${#FAILED[@]} failed: ${FAILED[*]} ($PASSED passed, $ELAPSED s)"
+    printf '%d failed: %s (%d passed, %d s)\n' "${#FAILED[@]}" "${FAILED[*]}" "$PASSED" "$ELAPSED" >> "$SUMMARY"
     exit 1
 fi

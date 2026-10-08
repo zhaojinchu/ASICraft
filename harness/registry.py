@@ -20,10 +20,6 @@ def _load() -> dict:
     return json.loads(_PATH.read_text())
 
 
-def registry_version() -> str:
-    return _load()["mc_version"]
-
-
 def complete(state: BlockState) -> BlockState:
     """Fill in every property the block has but the state omits, with its default.
     Raises for blocks or properties the registry does not know, so a new block
