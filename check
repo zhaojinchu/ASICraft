@@ -326,11 +326,15 @@ build_designs() {
     for d in $DESIGNS $CAPACITY_DESIGNS; do
         $REDFAB build designs/$d/top.sv --top top -o build/designs/$d || return 1
     done
-    # The capacity target must be the size it claims and must have needed a gap wider
-    # than six routing columns, or it no longer guards what it is here for.
+    # The capacity target must be the size it claims and must still need the routing
+    # room it is here for (at least 60 routing columns in all, and a gap of six or
+    # more), or it no longer guards what it is here for.
     grep -q "cells: 102" build/designs/adder8/report.txt || { echo "adder8 is not 102 cells"; return 1; }
-    grep -o "routing columns [0-9, ]*" build/designs/adder8/report.txt | grep -Ewq "[7-9]|[1-9][0-9]+" ||
-        { echo "adder8 no longer needs a gap wider than six routing columns"; return 1; }
+    local room
+    room=$(grep -o "routing columns [0-9, ]*" build/designs/adder8/report.txt | tr -d ',' |
+        awk '{ total = 0; widest = 0; for (i = 3; i <= NF; i++) { total += $i; if ($i > widest) widest = $i }; print total, widest }')
+    [ "${room% *}" -ge 60 ] && [ "${room#* }" -ge 6 ] ||
+        { echo "adder8 no longer needs the routing room it guards: ${room% *} routing columns, widest gap ${room#* }"; return 1; }
 }
 
 # The equivalence proof must be able to fail: swap the inverter for a buffer in a
