@@ -288,6 +288,10 @@ Both are flip-flops. The master/slave is better on every figure, so it is `dff`.
 
 **Gate:** `./check` (41 checks, 474 s on 2026-10-08) passes; `node tools/live_check.mjs` passes on the real modded server (tick time P95 10.5 ms with 6 counters, budget 45); the headless playground check passed three times in a row; `harness.mechanics verify --modded` passed on the real server before this round.
 
+### Compaction, step 0 (2026-10-08)
+
+The compaction stage (packing the rows, choosing a placement style per design) starts with a baseline, so that every later step is measured and a silent regression is impossible. `design.json` now carries the counts of the routed layout (`placement`, `tiles`, `grid {cols, rows, routing}`, `repeaters`, `hold_fix_rounds`; older files read them as zero) and `report.txt` prints those fields instead of recomputing them. `tests/baselines/area.json` holds one row per shipped design, recorded by `harness.area_check --update` in its one canonical form, and the gate's `area-period` (after `wasm-identical`) and `area-period-clocked` (after `build-clocked`) compare every build to its row: tiles, footprint x by z, chunks, routing columns, repeaters, settle, hold fix rounds, tiles per cell and repeaters per torch on the worst path, plus input spacing for combinational designs and period, skew, input window and least hold slack for clocked ones (the slack may fall but not below zero). Every number may only stay or improve; a deliberate regression is an edit of the baseline in the same commit, named in its message. Each check has a negative control: a copy of the baseline claiming one repeater fewer must fail naming the design. Recorded today: adder8 3,031 tiles, 94 x 98, 1,162 repeaters, 470 x 490 blocks, settle 176; adder4 921, 50 x 50, 347, 250 x 250, settle 102; fa1 101, 16 x 14, 28, 80 x 70, settle 30; counter4 682, 36 x 38, 288, 180 x 190, period 92, skew 16, hold slack 51; mem2 889, 34 x 35, 388, 170 x 175, period 116; fsm 207, 18 x 22, 74, 90 x 110, period 56. No layout changed in this step.
+
 ---
 
 
@@ -427,7 +431,7 @@ Your disk had 28 GB free (94% full) at the start. Disk use at stage 12: `target/
 - `fixtures/`: committed game recordings (`mechanics/`, `fuzz/`, `fuzz-repeaters/`)
 - `designs/`: `not1`, `nor2`, `nor3`, `consts`, `fa1`, `adder4`, `adder8`, `mul2`, `mux4`, `prio3`, `cmp4`, `param_add`, `signed_sub`, `divmod`, `hier`, `rom4` and the clocked `counter4`, `fsm`, `shift2`, `lfsr3`, `negedge`, `init_reg`, `mem2`
 - `tests/smoke/`: one source per refusal and per report feature, built by `crates/redfab-cli/tests/smoke.rs` with the expected lines in each file's header
-- `tests/`: smoke sources and data for stage 0 and the CLI test; `tools/`: setup and the check drivers
+- `tests/`: smoke sources and data for stage 0 and the CLI test, and `tests/baselines/area.json`, the area-period baseline every shipped layout is held to; `tools/`: setup and the check drivers
 - `playground/` (Stage 10), `mod/` (Stage 11), `server/` (Stage 12)
 - `docs/`: `DESIGN.md`, `PLAN.md`, `trace-format.md`, `mechanics.md`, the dated reviews
 
