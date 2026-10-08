@@ -137,3 +137,7 @@ Both candidate tiles were swept in the game and in the simulator (`redfab charac
 
 - A lever flipped by a player. Every input in the harness, the page and the live backend is driven by placing a `redstone_block` at the probe position, because `setblock` of a powered lever updates nothing (`lever_setblock`). `lever_mount` shows a powered lever strongly powering its mounting block (dust beside it reads 15) and its removal updating the neighbours; the flip itself, which in the game's code does the same neighbour update as the removal, has no recording.
 - Litematica paste of `world.nbt`. No Minecraft client has run in this project; see README.
+
+## Legacy wire order and lamp ticks (2026-10-08)
+
+In the default redstone mode the wire algorithm's update order depends on world position. A lit, powered lamp whose feed dropped for exactly 4 game ticks and came back in the tick its turn-off fired can be handed a second turn-off tick, which fires with no effect. Seen on adder4 and divmod at two of three placements; never in the Experiments mode. The checks compare block states exactly in both modes and count such lamp ticks instead of failing on them (see DESIGN.md Appendix A).

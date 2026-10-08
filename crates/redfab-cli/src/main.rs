@@ -141,6 +141,7 @@ fn check_traces(args: &[String]) -> Result<bool, String> {
     fixtures.sort();
 
     let (mut matched, mut mismatched, mut unsupported, mut racy) = (0, 0, 0, 0);
+    let mut legacy_lamps = 0;
     for fixture_path in &fixtures {
         let name =
             fixture_path.file_name().and_then(|n| n.to_str()).unwrap_or_default().trim_end_matches(".fixture.json");
@@ -151,12 +152,17 @@ fn check_traces(args: &[String]) -> Result<bool, String> {
                 continue;
             }
             match replay(&fixture_json, &read(&trace_path)?, mutation).map_err(|e| format!("{name} [{mode}]: {e}"))? {
-                Replay::Match { reordered_ticks } => {
+                Replay::Match { reordered_ticks, legacy_lamp_ticks } => {
                     matched += 1;
                     if reordered_ticks > 0 {
                         racy += 1;
                     }
-                    if verbose {
+                    if legacy_lamp_ticks > 0 {
+                        legacy_lamps += 1;
+                        println!(
+                            "  ok           {name} [{mode}] (the legacy order scheduled a lamp tick with no effect in {legacy_lamp_ticks} tick(s))"
+                        );
+                    } else if verbose {
                         let note = if reordered_ticks > 0 {
                             format!(" (race: {reordered_ticks} tick(s) needed another order)")
                         } else {
@@ -178,8 +184,13 @@ fn check_traces(args: &[String]) -> Result<bool, String> {
             }
         }
     }
+    let legacy_note = if legacy_lamps > 0 {
+        format!("; in {legacy_lamps} the legacy order scheduled a lamp tick with no effect")
+    } else {
+        String::new()
+    };
     println!(
-        "{}: {matched} matched ({racy} of them only with a different order of same-tick events), {mismatched} mismatched, {unsupported} skipped (unsupported blocks)",
+        "{}: {matched} matched ({racy} of them only with a different order of same-tick events), {mismatched} mismatched, {unsupported} skipped (unsupported blocks){legacy_note}",
         dir.display()
     );
     Ok(mismatched == 0 && matched > 0 && !(no_skips && unsupported > 0))

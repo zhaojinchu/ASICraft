@@ -32,10 +32,19 @@ pub struct EventFile {
     pub set: BTreeMap<String, String>,
 }
 
+/// Where a trace came from; only the redstone mode matters to the replay.
+#[derive(Deserialize, Default)]
+pub struct SourceFile {
+    #[serde(default)]
+    pub redstone_experiments: Option<bool>,
+}
+
 #[derive(Deserialize)]
 pub struct TraceFile {
     pub format: String,
     pub fixture: String,
+    #[serde(default)]
+    pub source: Option<SourceFile>,
     pub size: [i32; 3],
     pub initial: BTreeMap<String, String>,
     #[serde(default)]
@@ -70,8 +79,13 @@ pub enum Replay {
     /// exactly: either another order of the scheduled ticks due together, or
     /// another order of delivering one update to several neighbours. That marks a
     /// race in the circuit (the game does not record its order, and in experiments
-    /// mode picks part of it at random), not a wrong rule.
-    Match { reordered_ticks: u32 },
+    /// mode picks part of it at random), not a wrong rule. `legacy_lamp_ticks`
+    /// counts the ticks where a recording made in the default redstone mode held
+    /// a scheduled lamp tick the simulator did not: the legacy wire algorithm
+    /// updates in an order that depends on world position and can hand a lit,
+    /// powered lamp an extra turn-off tick, which fires with no effect (measured
+    /// 2026-10-08 on adder4 and divmod). Block states still matched every tick.
+    Match { reordered_ticks: u32, legacy_lamp_ticks: u32 },
     /// The simulator disagreed with the recording; the text says where.
     Mismatch(String),
     /// The fixture uses a block the simulator does not model yet.
@@ -124,6 +138,8 @@ pub fn replay(fixture_json: &str, trace_json: &str, mutation: Option<Mutation>) 
         return Ok(Replay::Unsupported(e));
     }
     let compare_pending = trace.pending0.is_some();
+    let legacy_order = trace.source.as_ref().and_then(|s| s.redstone_experiments) == Some(false);
+    let legacy_lamp_ticks = std::cell::Cell::new(0u32);
     for p in trace.pending0.iter().flatten() {
         sim.seed_pending(p.pos.parse()?, p.delay, p.priority)?;
     }
@@ -168,7 +184,14 @@ pub fn replay(fixture_json: &str, trace_json: &str, mutation: Option<Mutation>) 
                 return Some(diff);
             }
             let got = sim.pending();
-            (compare_pending && got != want).then(|| format!("pending ticks: game {want:?}, simulator {got:?}"))
+            if !compare_pending || got == want {
+                return None;
+            }
+            if legacy_order && only_lamp_ticks_differ(&got, &want) {
+                legacy_lamp_ticks.set(legacy_lamp_ticks.get() + 1);
+                return None;
+            }
+            Some(format!("pending ticks: game {want:?}, simulator {got:?}"))
         };
 
         // One attempt at this tick: a tick order (empty = default) and a delivery
@@ -224,7 +247,16 @@ pub fn replay(fixture_json: &str, trace_json: &str, mutation: Option<Mutation>) 
             None => return Ok(Replay::Mismatch(format!("tick {tick}: {default_diff}"))),
         }
     }
-    Ok(Replay::Match { reordered_ticks })
+    Ok(Replay::Match { reordered_ticks, legacy_lamp_ticks: legacy_lamp_ticks.get() })
+}
+
+/// True when two pending lists differ only by lamp ticks: the entries present
+/// in one list and not the other are all `minecraft:redstone_lamp`.
+fn only_lamp_ticks_differ(a: &[Pending], b: &[Pending]) -> bool {
+    let odd = |xs: &[Pending], ys: &[Pending]| {
+        xs.iter().filter(|x| !ys.contains(x)).all(|x| x.block == "minecraft:redstone_lamp")
+    };
+    odd(a, b) && odd(b, a)
 }
 
 /// Limits on the search for an order that explains a disagreement.
@@ -633,6 +665,28 @@ fn first_block_difference(world: &World, expected: &BTreeMap<Pos, String>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lone unlit lamp with nothing to do, recorded with an extra scheduled
+    /// lamp tick: the default redstone mode may do that, experiments mode may not,
+    /// and a repeater tick is never excused.
+    #[test]
+    fn a_lamp_tick_the_legacy_order_scheduled_is_counted_not_failed() {
+        let fixture = r#"{"format":"redfab-fixture/1","name":"lamp","doc":"","size":[1,1,1],"placement":"strict",
+            "blocks":{"0,0,0":"minecraft:redstone_lamp[lit=false]"},"events":[],"ticks":2,"expect":[]}"#;
+        let trace = |experiments: bool, block: &str| {
+            format!(
+                r#"{{"format":"redfab-trace/1","fixture":"lamp","source":{{"kind":"vanilla","redstone_experiments":{experiments}}},
+                "size":[1,1,1],"initial":{{"0,0,0":"minecraft:redstone_lamp[lit=false]"}},"pending0":[],
+                "ticks":[{{"tick":1,"changes":{{}},"pending":[{{"pos":"0,0,0","block":"{block}","delay":4,"priority":0}}]}}]}}"#
+            )
+        };
+        assert_eq!(
+            replay(fixture, &trace(false, "minecraft:redstone_lamp"), None).unwrap(),
+            Replay::Match { reordered_ticks: 0, legacy_lamp_ticks: 1 }
+        );
+        assert!(matches!(replay(fixture, &trace(true, "minecraft:redstone_lamp"), None).unwrap(), Replay::Mismatch(_)));
+        assert!(matches!(replay(fixture, &trace(false, "minecraft:repeater"), None).unwrap(), Replay::Mismatch(_)));
+    }
 
     #[test]
     fn orders_start_with_identity_and_stay_inside_groups() {

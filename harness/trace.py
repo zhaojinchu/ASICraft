@@ -228,7 +228,15 @@ class Trace:
         return self.pending0 is not None
 
 
-def first_trace_difference(a: Trace, b: Trace, compare_pending: bool = True) -> str | None:
+def first_trace_difference(a: Trace, b: Trace, compare_pending: bool = True, *,
+                           lamp_ticks_may_differ: bool = False, artifacts: list[str] | None = None) -> str | None:
+    """The first tick where two traces disagree, as text, or None. With
+    `lamp_ticks_may_differ`, a difference made only of scheduled lamp ticks is not
+    a disagreement but an artifact, appended to `artifacts`: in the default
+    redstone mode the legacy wire algorithm updates in an order that depends on
+    world position and can hand a lit, powered lamp an extra turn-off tick, which
+    fires with no effect (measured 2026-10-08 on adder4 and divmod). Block states
+    are always compared."""
     if a.initial != b.initial:
         return "initial state differs: " + _describe_diff(a.initial, b.initial)
     ticks = max(a.ticks, b.ticks)
@@ -238,7 +246,14 @@ def first_trace_difference(a: Trace, b: Trace, compare_pending: bool = True) -> 
         if sa != sb:
             return f"tick {t}: " + _describe_diff(sa, sb)
         if compare_pending and a.has_pending_info() and b.has_pending_info():
-            if sorted(p.to_json().items() for p in a.pending_at(t)) != sorted(p.to_json().items() for p in b.pending_at(t)):
+            pa = sorted(p.to_json().items() for p in a.pending_at(t))
+            pb = sorted(p.to_json().items() for p in b.pending_at(t))
+            if pa != pb:
+                odd = [dict(p) for p in pa if p not in pb] + [dict(p) for p in pb if p not in pa]
+                if lamp_ticks_may_differ and all(p["block"] == "minecraft:redstone_lamp" for p in odd):
+                    if artifacts is not None:
+                        artifacts.append(f"tick {t}: a scheduled lamp tick differs with no effect on the blocks")
+                    continue
                 return f"tick {t}: pending ticks differ: {[p.to_json() for p in a.pending_at(t)]} vs {[p.to_json() for p in b.pending_at(t)]}"
     return None
 
