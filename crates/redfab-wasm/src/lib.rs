@@ -7,13 +7,21 @@
 //! returns a pointer to the reply, four bytes of little-endian length then
 //! that many bytes of JSON. Memory for the request comes from
 //! `redfab_alloc(len)`; both buffers go back through `redfab_free(ptr, len)`.
-//! A failure is `{"ok": false, "error": ...}`; `redfab_build` is the old name
-//! of the `build` operation.
+//! A failure is `{"ok": false, "error": ...}`.
 //!
 //! Operations:
 //!
-//! - `build` `{mapped, top, name}`: a Yosys JSON netlist to a design: `{ok,
-//!   design, structure (hex .nbt), report}`.
+//! - `build` `{mapped, top, name, pre?, gold?}`: a Yosys JSON netlist to a
+//!   design: `{ok, design, structure (hex .nbt), report, log}`. With `pre` (the
+//!   `pre.json` the map script writes) the netlist is linted first; with `gold`
+//!   (the `gold.json` the equivalence script writes) the flip-flop initial
+//!   values are compared first.
+//! - `lint` `{pre?, mapped?, top}`: the lint alone: `{ok}` or the refusal as
+//!   `error`. `pre` is checked for latches, asynchronous resets, tristates,
+//!   `$display`, assertions, memories and clock misuse; `mapped` for the input
+//!   count and the clock shape.
+//! - `check_inits` `{gold, mapped, top}`: the initial-value comparison alone.
+//! - `yosys_error` `{log, script}`: one plain line for a failed Yosys script: `{message}`.
 //! - `library`: what synthesis needs: `{liberty, models, map, equiv}`.
 //! - `sim_new` `{design}`: a simulator on a design file: `{handle}`.
 //! - `sim_set` `{handle, input, on}`: flips input number `input`, as the last
@@ -61,12 +69,53 @@ fn handle(request: &Value) -> Result<Value, String> {
     let text = |key: &str| request[key].as_str().ok_or_else(|| format!("request is missing {key:?}"));
     match request["op"].as_str().unwrap_or("build") {
         "build" => {
-            let built = redfab_core::build::build(text("mapped")?, text("top")?, text("name")?)?;
+            let top = text("top")?;
+            if let Some(pre) = request["pre"].as_str() {
+                redfab_core::lint::lint_pre_netlist(pre, top)?;
+            }
+            if let Some(gold) = request["gold"].as_str() {
+                redfab_core::lint::check_inits(gold, text("mapped")?, top)
+                    .map_err(|e| format!("the mapped netlist is NOT proven equal to the source: {e}"))?;
+            }
+            let mut log = String::new();
+            let built = redfab_core::build::build_logged(text("mapped")?, top, text("name")?, &mut |line| {
+                log.push_str(line);
+                log.push('\n');
+            })?;
             let mut hex = String::with_capacity(built.structure.len() * 2);
             for byte in &built.structure {
                 write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
             }
-            Ok(json!({"ok": true, "design": built.design.to_json(), "structure": hex, "report": built.report}))
+            Ok(
+                json!({"ok": true, "design": built.design.to_json(), "structure": hex, "report": built.report, "log": log}),
+            )
+        }
+        "lint" => {
+            // `pre` (the map script's pre.json) gets the full lint; `mapped` the
+            // checks the mapped netlist allows: the input count and the clock shape.
+            let top = text("top")?;
+            let (pre, mapped) = (request["pre"].as_str(), request["mapped"].as_str());
+            if pre.is_none() && mapped.is_none() {
+                return Err("request is missing \"pre\" or \"mapped\"".to_string());
+            }
+            if let Some(pre) = pre {
+                redfab_core::lint::lint_pre_netlist(pre, top)?;
+            }
+            if let Some(mapped) = mapped {
+                let library = Library::builtin()?;
+                let netlist = redfab_core::netlist::Netlist::from_yosys_json(mapped, top, &library)?;
+                redfab_core::build::check_netlist(&netlist)?;
+            }
+            Ok(json!({"ok": true}))
+        }
+        "check_inits" => {
+            redfab_core::lint::check_inits(text("gold")?, text("mapped")?, text("top")?)
+                .map_err(|e| format!("the mapped netlist is NOT proven equal to the source: {e}"))?;
+            Ok(json!({"ok": true}))
+        }
+        "yosys_error" => {
+            let message = redfab_core::lint::yosys_failure(text("log")?, request["script"].as_str().unwrap_or("yosys"));
+            Ok(json!({"ok": true, "message": message}))
         }
         "library" => {
             let library = Library::builtin()?;
@@ -185,13 +234,4 @@ pub unsafe extern "C" fn redfab_call(ptr: *const u8, len: usize) -> *mut u8 {
     let ptr = out.as_mut_ptr();
     std::mem::forget(out);
     ptr
-}
-
-/// The `build` operation under its old name.
-///
-/// # Safety
-/// As for [`redfab_call`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn redfab_build(ptr: *const u8, len: usize) -> *mut u8 {
-    unsafe { redfab_call(ptr, len) }
 }

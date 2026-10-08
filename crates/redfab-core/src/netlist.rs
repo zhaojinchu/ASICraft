@@ -11,7 +11,8 @@ pub type NetId = usize;
 
 #[derive(Clone, Debug)]
 pub struct PortBit {
-    /// `name` for a one-bit port, `name[i]` for bit i of a wider one.
+    /// `name` for a one-bit port, `name[i]` for bit i of a wider one, with `i`
+    /// the index the source declares (`[7:4]` gives `a[4]` to `a[7]`).
     pub name: String,
     pub net: NetId,
 }
@@ -19,6 +20,9 @@ pub struct PortBit {
 #[derive(Clone, Debug)]
 pub struct Cell {
     pub name: String,
+    /// How the user knows the cell: for a flip-flop the register bit its output
+    /// is named after in the source (`count[2]`), otherwise the cell's name.
+    pub label: String,
     /// Library cell name: `NOT`, `NOR2`, `NOR3`, `DFF`.
     pub kind: String,
     /// Input nets, in the library's pin order (`D`, `CLK` for a flip-flop).
@@ -42,6 +46,19 @@ pub struct Netlist {
     pub net_count: usize,
     /// Nets that are constant 0 or 1 (at most one of each).
     pub constants: Vec<(NetId, bool)>,
+}
+
+/// The name of bit `i` (counting from the least significant) of a port or net
+/// of `width` bits, by the index the source declares: Yosys records the lowest
+/// index as `offset` and `upto` when the range is written low to high.
+pub fn bit_name(name: &str, entry: &Value, i: usize, width: usize) -> String {
+    if width == 1 {
+        return name.to_string();
+    }
+    let offset = entry["offset"].as_i64().unwrap_or(0);
+    let upto = entry["upto"].as_i64().unwrap_or(0) != 0;
+    let index = if upto { offset + width as i64 - 1 - i as i64 } else { offset + i as i64 };
+    format!("{name}[{index}]")
 }
 
 /// What drives a net.
@@ -70,6 +87,9 @@ impl Netlist {
                 (Some(n), _) => Ok(n),
                 (_, Some("0")) => Ok(0),
                 (_, Some("1")) => Ok(1),
+                (_, Some("x")) => Err(format!(
+                    "{what} is undefined (x): synthesis found nothing drives it, usually a register that is never assigned or a signal left unset; give it a value, a reset or an initial value"
+                )),
                 _ => Err(format!("{what} is tied to {value}, which the tile library cannot build")),
             }
         };
@@ -114,7 +134,7 @@ impl Netlist {
         for (name, port) in module["ports"].as_object().unwrap_or(&empty) {
             let bits = port["bits"].as_array().ok_or_else(|| format!("port {name} has no bits"))?;
             for (i, value) in bits.iter().enumerate() {
-                let bit_name = if bits.len() == 1 { name.clone() } else { format!("{name}[{i}]") };
+                let bit_name = bit_name(name, port, i, bits.len());
                 let entry = PortBit { net: net(bit(value, &format!("port {bit_name}"))?), name: bit_name };
                 match port["direction"].as_str() {
                     Some("input") => inputs.push(entry),
@@ -127,29 +147,50 @@ impl Netlist {
                 }
             }
         }
-        // A flip-flop's initial value is an `init` attribute on a net name of its output.
+        // A flip-flop's initial value is an `init` attribute on a net name of its
+        // output, and a public net name there (not hidden, not generated) is how the
+        // user knows the flip-flop.
         let mut inits: BTreeMap<u64, bool> = BTreeMap::new();
-        for (_, entry) in module["netnames"].as_object().unwrap_or(&empty) {
+        let mut public: BTreeMap<u64, String> = BTreeMap::new();
+        for (name, entry) in module["netnames"].as_object().unwrap_or(&empty) {
             let init = entry["attributes"]["init"].as_str().unwrap_or_default();
             let bits = entry["bits"].as_array().cloned().unwrap_or_default();
+            let hidden = entry["hide_name"].as_u64().unwrap_or(0) != 0 || name.starts_with('$');
             // Init strings are written most significant bit first.
             for (i, value) in bits.iter().enumerate() {
-                if let Some(raw) = value.as_u64()
-                    && let Some(c) = init.chars().rev().nth(i)
-                    && (c == '0' || c == '1')
-                {
-                    inits.insert(raw, c == '1');
+                if let Some(raw) = value.as_u64() {
+                    if let Some(c) = init.chars().rev().nth(i)
+                        && (c == '0' || c == '1')
+                    {
+                        inits.insert(raw, c == '1');
+                    }
+                    if !hidden {
+                        let label = bit_name(name, entry, i, bits.len());
+                        let slot = public.entry(raw).or_insert_with(|| label.clone());
+                        if label < *slot {
+                            *slot = label;
+                        }
+                    }
                 }
             }
         }
+        let mut labels: BTreeMap<String, usize> = BTreeMap::new();
         let cells: Vec<Cell> = raw_cells
             .into_iter()
-            .map(|(name, kind, ins, out)| Cell {
-                name,
-                kind,
-                inputs: ins.into_iter().map(&mut net).collect(),
-                output: net(out),
-                init: inits.get(&out).copied().unwrap_or(false),
+            .map(|(name, kind, ins, out)| {
+                let label = match public.get(&out) {
+                    Some(l) if kind == "DFF" && !labels.contains_key(l) => l.clone(),
+                    _ => name.clone(),
+                };
+                *labels.entry(label.clone()).or_default() += 1;
+                Cell {
+                    name,
+                    label,
+                    kind,
+                    inputs: ins.into_iter().map(&mut net).collect(),
+                    output: net(out),
+                    init: inits.get(&out).copied().unwrap_or(false),
+                }
             })
             .collect();
 
@@ -237,6 +278,47 @@ mod tests {
         let n = Netlist::from_yosys_json(&constant, "top", &Library::builtin().unwrap()).unwrap();
         assert_eq!(n.constants.len(), 1);
         assert_eq!(n.driver_of(n.cells[0].inputs[1]).unwrap(), Driver::Const(false));
+    }
+
+    #[test]
+    fn port_bits_are_named_by_the_declared_index() {
+        // `input [7:4] a` and `output [0:3] y` with `assign y = a`: Yosys lists bits
+        // least significant first, so a[4] is the first bit and y[3] is.
+        let json = r#"{"modules":{"top":{
+            "ports":{"a":{"direction":"input","offset":4,"bits":[2,3,4,5]},
+                     "y":{"direction":"output","upto":1,"bits":[2,3,4,5]},
+                     "s":{"direction":"input","bits":[6]}},
+            "cells":{}}}}"#;
+        let n = Netlist::from_yosys_json(json, "top", &Library::builtin().unwrap()).unwrap();
+        let names = |ports: &[PortBit]| ports.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&n.inputs), vec!["a[4]", "a[5]", "a[6]", "a[7]", "s"]);
+        assert_eq!(names(&n.outputs), vec!["y[3]", "y[2]", "y[1]", "y[0]"]);
+        // a[4] and y[3] are the same net: the least significant bit of each.
+        assert_eq!(n.inputs[0].net, n.outputs[0].net);
+    }
+
+    #[test]
+    fn flip_flops_are_labelled_by_their_register_bit() {
+        let json = r#"{"modules":{"top":{
+            "ports":{"clk":{"direction":"input","bits":[2]},"q":{"direction":"output","bits":[3,5]}},
+            "netnames":{"count":{"hide_name":0,"bits":[3,5],"attributes":{"init":"10"}},
+                        "$abc$9$x":{"hide_name":1,"bits":[5],"attributes":{}}},
+            "cells":{"$auto$ff.cc:337:slice$85":{"type":"DFF","connections":{"D":[5],"CLK":[2],"Q":[3]}},
+                     "$auto$ff.cc:337:slice$86":{"type":"DFF","connections":{"D":[3],"CLK":[2],"Q":[5]}},
+                     "g":{"type":"NOT","connections":{"A":[3],"Y":[4]}}}}}}"#;
+        let n = Netlist::from_yosys_json(json, "top", &Library::builtin().unwrap()).unwrap();
+        let labels: Vec<&str> = n.cells.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, vec!["count[0]", "count[1]", "g"]);
+        assert_eq!(n.cells.iter().map(|c| c.init).collect::<Vec<_>>(), vec![false, true, false]);
+    }
+
+    #[test]
+    fn an_undefined_port_bit_says_what_to_do() {
+        let undefined =
+            NOR2.replace(r#""y":{"direction":"output","bits":[4]}"#, r#""y":{"direction":"output","bits":["x"]}"#);
+        let err = Netlist::from_yosys_json(&undefined, "top", &Library::builtin().unwrap()).unwrap_err();
+        assert!(err.starts_with("port y is undefined (x)"), "{err}");
+        assert!(err.contains("initial value"), "{err}");
     }
 
     #[test]

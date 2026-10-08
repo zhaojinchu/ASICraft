@@ -1,5 +1,5 @@
 //! Writes a world as a vanilla structure file (`.nbt`), the format `/place template`
-//! and structure blocks load. Litematica reads it too.
+//! and structure blocks load. Whether other tools (Litematica) read it is untested.
 
 use std::io::Write;
 

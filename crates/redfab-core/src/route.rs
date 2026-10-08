@@ -5,7 +5,10 @@
 //! wire uses one track; a turn or a fan-out uses both; two straight wires on
 //! different tracks share the tile as a crossing. The router is PathFinder:
 //! each net is routed by shortest path, and tracks that several nets want
-//! become more expensive each round until every track has one net.
+//! become more expensive each round until every track has one net. A run
+//! whose count of contended tracks stops falling is given up, and reports
+//! which tracks are still wanted so that the gap they lie in can be widened;
+//! the history costs it built up carry over to the next attempt.
 //!
 //! Signal strength is exact on the tile grid: dust loses one level per block,
 //! every tile hop costs five, and each tile's ports are at fixed cells. From
@@ -16,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::layout::{Layout, Placed};
 use crate::netlist::{Driver, NetId, Netlist};
-use crate::place::{Cell, Placement};
+use crate::place::{Cell, Column, Placement};
 use crate::tile::Edge;
 
 /// A track in a routing tile.
@@ -65,9 +68,13 @@ const DFF_OUT: u8 = 12;
 const LAMP_NEEDS: u8 = 3;
 const REPEATER_NEEDS: u8 = 1;
 
-const MAX_ITERATIONS: usize = 80;
+/// The most rounds of negotiation in one run.
+const MAX_ITERATIONS: usize = 200;
+/// Rounds without the number of contended tracks falling below its best so far
+/// before a run is given up as stuck.
+const STALL_ROUNDS: usize = 12;
 /// How many times routing is redone after a signal could not be kept alive.
-const MAX_STRENGTH_RETRIES: usize = 30;
+const MAX_STRENGTH_RETRIES: usize = 100;
 
 /// The routed design.
 #[derive(Clone)]
@@ -78,12 +85,50 @@ pub struct Routed {
     /// Per net, per sink: the tiles from the driver to the sink, each with the
     /// edge the signal enters it by. The timing fixes lengthen a path here.
     pub branches: BTreeMap<NetId, Vec<Vec<(Cell, Edge)>>>,
+    /// How many rounds of negotiation the final run took.
+    pub rounds: usize,
+}
+
+/// PathFinder's history costs, named by column kind, row and track so that they
+/// survive a gap being widened (the tiles keep their names).
+#[derive(Clone, Debug, Default)]
+pub struct History {
+    pub costs: BTreeMap<(Column, i32, Track), f64>,
+}
+
+/// Why routing failed.
+#[derive(Debug)]
+pub enum RouteFailure {
+    /// The negotiation got stuck: these tracks are still wanted by several nets
+    /// (`users[i]` names the nets at `tracks[i]`).
+    Congested { tracks: Vec<Node>, users: Vec<Vec<NetId>>, rounds: usize, history: History },
+    /// A signal could not be kept alive, or the placement cannot be routed at all.
+    Other(String),
+}
+
+impl std::fmt::Display for RouteFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RouteFailure::Congested { tracks, rounds, .. } => write!(
+                f,
+                "routing did not converge: after {rounds} rounds {} tracks are still wanted by several nets",
+                tracks.len()
+            ),
+            RouteFailure::Other(e) => write!(f, "{e}"),
+        }
+    }
 }
 
 /// Routes every net of the placement. Fails if some net cannot be routed, or
-/// a signal cannot be kept alive with repeaters.
-pub fn route(netlist: &Netlist, placement: &Placement) -> Result<Routed, String> {
-    let drivers = netlist.drivers()?;
+/// a signal cannot be kept alive with repeaters. `history` seeds the negotiation
+/// with what an earlier attempt learned; `log` hears about progress.
+pub fn route(
+    netlist: &Netlist,
+    placement: &Placement,
+    history: Option<&History>,
+    log: &mut dyn FnMut(&str),
+) -> Result<Routed, RouteFailure> {
+    let drivers = netlist.drivers().map_err(RouteFailure::Other)?;
     let mut nets: Vec<(NetId, Source, Vec<Sink>)> = Vec::new();
     for (net, &driver) in drivers.iter().enumerate() {
         let sinks = netlist.sinks_of(net);
@@ -105,7 +150,11 @@ pub fn route(netlist: &Netlist, placement: &Placement) -> Result<Routed, String>
                 Source { node: ((col + 1, row), Track::X), entry: Edge::West, strength: INPUT_OUT }
             }
             Driver::Const(v) => {
-                let (_, _, (col, row)) = *placement.ties.iter().find(|t| t.0 == net).ok_or("constant without a tie")?;
+                let (_, _, (col, row)) = *placement
+                    .ties
+                    .iter()
+                    .find(|t| t.0 == net)
+                    .ok_or_else(|| RouteFailure::Other("constant without a tie".to_string()))?;
                 Source {
                     node: ((col + 1, row), Track::X),
                     entry: Edge::West,
@@ -145,27 +194,70 @@ pub fn route(netlist: &Netlist, placement: &Placement) -> Result<Routed, String>
     }
 
     let graph = Graph::new(placement);
+    let key = |node: Node| (placement.column(node.0.0), node.0.1, node.1);
+    let seed: Vec<f64> =
+        graph.nodes.iter().map(|&n| history.and_then(|h| h.costs.get(&key(n)).copied()).unwrap_or(0.0)).collect();
+    let mut negotiation = Negotiation::new(&graph, &nets, seed);
     // Tracks that a net could not get a repeater past (crossings) get more expensive
-    // for that net each time, until every signal survives.
-    let mut penalties: Vec<BTreeMap<usize, f64>> = vec![BTreeMap::new(); nets.len()];
+    // for that net each time, until every signal survives. The negotiation picks
+    // up where it was: only that net has to move, and whatever it then collides with.
     let mut retries = 0;
     loop {
-        let trees = pathfinder(&graph, &nets, &penalties)?;
+        let (trees, rounds) = match negotiation.run(log) {
+            Ok(done) => done,
+            Err(Stuck::Unroutable(e)) => return Err(RouteFailure::Other(e)),
+            Err(Stuck::Congested { overused, rounds }) => {
+                let history = History {
+                    costs: graph
+                        .nodes
+                        .iter()
+                        .zip(&negotiation.history)
+                        .filter(|(_, c)| **c > 0.0)
+                        .map(|(&n, &c)| (key(n), c))
+                        .collect(),
+                };
+                let tracks = overused.iter().map(|&i| graph.nodes[i]).collect();
+                let users = overused
+                    .iter()
+                    .map(|&i| {
+                        negotiation
+                            .trees
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, t)| t.contains(&i))
+                            .map(|(k, _)| nets[k].0)
+                            .collect()
+                    })
+                    .collect();
+                return Err(RouteFailure::Congested { tracks, users, rounds, history });
+            }
+        };
         match realize_trees(netlist, placement, &nets, &trees) {
-            Ok(routed) => return Ok(routed),
-            Err(Failure::Strength { net_index, crossings }) if retries < MAX_STRENGTH_RETRIES => {
+            Ok(mut routed) => {
+                routed.rounds = rounds;
+                return Ok(routed);
+            }
+            Err(Failure::Strength(failed)) if retries < MAX_STRENGTH_RETRIES => {
                 retries += 1;
-                for node in crossings {
-                    let index = graph.index[&node];
-                    *penalties[net_index].entry(index).or_insert(0.0) += 4.0;
+                // Heavier each time, so that the nets leave their runs of crossings
+                // rather than shuffle along them.
+                let weight = 4.0 * f64::from(retries.min(16) as u8);
+                for (net_index, crossings) in failed {
+                    for node in crossings {
+                        let index = graph.index[&node];
+                        *negotiation.penalties[net_index].entry(index).or_insert(0.0) += weight;
+                    }
+                    negotiation.dirty.push(net_index);
                 }
+                // Let the nets push others aside again rather than keep their paths.
+                negotiation.present_factor = 0.5;
             }
-            Err(Failure::Strength { .. }) => {
-                return Err(
-                    "a signal cannot be kept alive: every path it finds runs through too many crossings".to_string()
-                );
+            Err(Failure::Strength(_)) => {
+                return Err(RouteFailure::Other(
+                    "a signal cannot be kept alive: every path it finds runs through too many crossings".to_string(),
+                ));
             }
-            Err(Failure::Other(e)) => return Err(e),
+            Err(Failure::Other(e)) => return Err(RouteFailure::Other(e)),
         }
     }
 }
@@ -175,12 +267,9 @@ type Tiles = BTreeMap<Cell, Vec<(NetId, BTreeSet<Edge>, Option<Edge>)>>;
 
 /// Why a routing attempt could not be turned into tiles.
 enum Failure {
-    /// Repeater insertion failed for net `net_index`; `crossings` are the nodes it
-    /// used in crossing tiles on the failing path.
-    Strength {
-        net_index: usize,
-        crossings: Vec<Node>,
-    },
+    /// Repeater insertion failed for these nets (by index into the net list);
+    /// with each, the nodes it used in crossing tiles on the failing path.
+    Strength(Vec<(usize, Vec<Node>)>),
     Other(String),
 }
 
@@ -270,9 +359,11 @@ fn realize_trees(
         layout.tiles.insert(*cell, placed);
     }
 
-    // Repeaters: walk each net from its source with exact strengths.
+    // Repeaters: walk each net from its source with exact strengths. Every net
+    // whose signal dies is reported, so that one re-route moves them all.
     let mut repeater_counts: BTreeMap<NetId, Vec<u32>> = BTreeMap::new();
     let mut branches: BTreeMap<NetId, Vec<Vec<(Cell, Edge)>>> = BTreeMap::new();
+    let mut died: Vec<(usize, Vec<Node>)> = Vec::new();
     for (net_index, ((net, source, sinks), tree)) in nets.iter().zip(trees).enumerate() {
         // A constant 0 carries no signal, so nothing can die on the way.
         let counts = if source.strength == 0 {
@@ -286,7 +377,8 @@ fn realize_trees(
                         .filter(|cell| tiles[*cell].len() > 1)
                         .flat_map(|cell| tree.parent.keys().filter(|n| n.0 == *cell).copied().collect::<Vec<_>>())
                         .collect();
-                    return Err(Failure::Strength { net_index, crossings });
+                    died.push((net_index, crossings));
+                    continue;
                 }
             }
         };
@@ -311,7 +403,10 @@ fn realize_trees(
         }
         branches.insert(*net, per_sink);
     }
-    Ok(Routed { layout, repeaters: repeater_counts, branches })
+    if !died.is_empty() {
+        return Err(Failure::Strength(died));
+    }
+    Ok(Routed { layout, repeaters: repeater_counts, branches, rounds: 0 })
 }
 
 /// A signal that could not be kept alive: the tiles from the source to where it died.
@@ -432,86 +527,160 @@ impl Tree {
     }
 }
 
-/// Negotiated-congestion routing of all nets. `penalties` adds a per-net cost to
-/// particular nodes.
-fn pathfinder(
-    graph: &Graph,
-    nets: &[(NetId, Source, Vec<Sink>)],
-    penalties: &[BTreeMap<usize, f64>],
-) -> Result<Vec<Tree>, String> {
-    let n = graph.nodes.len();
-    let mut history = vec![0.0f64; n];
-    let mut occupancy = vec![0u32; n];
-    let mut trees: Vec<Vec<usize>> = vec![Vec::new(); nets.len()];
-    let mut parents: Vec<BTreeMap<usize, Option<usize>>> = vec![BTreeMap::new(); nets.len()];
-    let mut present_factor = 0.5;
-
-    let lookup = |node: Node| -> Result<usize, String> {
-        graph.index.get(&node).copied().ok_or_else(|| format!("no routing tile at {:?}", node.0))
-    };
-
-    for iteration in 0..MAX_ITERATIONS {
-        for (k, (_, source, sinks)) in nets.iter().enumerate() {
-            for &node in &trees[k] {
-                occupancy[node] -= 1;
-            }
-            let start = lookup(source.node)?;
-            let mut tree = vec![start];
-            let mut parent: BTreeMap<usize, Option<usize>> = BTreeMap::from([(start, None)]);
-            let mut targets: Vec<usize> = sinks.iter().map(|s| lookup(s.node)).collect::<Result<_, _>>()?;
-            // Nearest sinks first.
-            let dist = |a: usize, b: usize| {
-                let (ca, cb) = (graph.nodes[a].0, graph.nodes[b].0);
-                (ca.0 - cb.0).abs() + (ca.1 - cb.1).abs()
-            };
-            targets.sort_by_key(|&t| dist(start, t));
-            for target in targets {
-                if tree.contains(&target) {
-                    continue;
-                }
-                let path = shortest_path(graph, &tree, target, |node| {
-                    let overuse = occupancy[node] as f64; // this net's own nodes are not in occupancy now
-                    let penalty = penalties[k].get(&node).copied().unwrap_or(0.0);
-                    (1.0 + history[node] + penalty) * (1.0 + present_factor * overuse)
-                })
-                .ok_or_else(|| format!("net cannot reach the tile at {:?}", graph.nodes[target].0))?;
-                for window in path.windows(2) {
-                    if let std::collections::btree_map::Entry::Vacant(slot) = parent.entry(window[1]) {
-                        slot.insert(Some(window[0]));
-                        tree.push(window[1]);
-                    }
-                }
-            }
-            for &node in &tree {
-                occupancy[node] += 1;
-            }
-            trees[k] = tree;
-            parents[k] = parent;
-        }
-        let overused: Vec<usize> = (0..n).filter(|&i| occupancy[i] > 1).collect();
-        if overused.is_empty() {
-            return Ok(parents
-                .iter()
-                .map(|p| Tree {
-                    parent: p.iter().map(|(&node, &par)| (graph.nodes[node], par.map(|q| graph.nodes[q]))).collect(),
-                })
-                .collect());
-        }
-        for &i in &overused {
-            history[i] += f64::from(occupancy[i] - 1);
-        }
-        present_factor = (present_factor * 1.6).min(1e6);
-        if iteration + 1 == MAX_ITERATIONS {
-            return Err(format!(
-                "routing did not converge: {} tracks are still wanted by several nets",
-                overused.len()
-            ));
-        }
-    }
-    unreachable!()
+/// Why a negotiation did not finish.
+enum Stuck {
+    /// Stuck: the nodes still overused, and the rounds it ran.
+    Congested { overused: Vec<usize>, rounds: usize },
+    /// A pin faces no free tile, or a sink cannot be reached at all.
+    Unroutable(String),
 }
 
-/// Dijkstra from every node of `tree` (cost 0) to `target`. Returns the path
+/// Negotiated-congestion routing of all nets, resumable: after a run ends with
+/// every track to one net, the caller may penalise nodes for a net and run
+/// again, and only that net and whatever it then collides with move.
+struct Negotiation<'a> {
+    graph: &'a Graph,
+    nets: &'a [(NetId, Source, Vec<Sink>)],
+    /// Per node: how many nets use it.
+    occupancy: Vec<u32>,
+    /// Per net: its nodes, and each node's parent.
+    trees: Vec<Vec<usize>>,
+    parents: Vec<BTreeMap<usize, Option<usize>>>,
+    /// Per node: the history cost, seeded by the caller.
+    history: Vec<f64>,
+    /// Per net: extra cost on particular nodes.
+    penalties: Vec<BTreeMap<usize, f64>>,
+    /// Nets that must be routed again whatever their congestion.
+    dirty: Vec<usize>,
+    present_factor: f64,
+    rounds: usize,
+}
+
+impl<'a> Negotiation<'a> {
+    fn new(graph: &'a Graph, nets: &'a [(NetId, Source, Vec<Sink>)], history: Vec<f64>) -> Negotiation<'a> {
+        Negotiation {
+            graph,
+            nets,
+            occupancy: vec![0; graph.nodes.len()],
+            trees: vec![Vec::new(); nets.len()],
+            parents: vec![BTreeMap::new(); nets.len()],
+            history,
+            penalties: vec![BTreeMap::new(); nets.len()],
+            dirty: (0..nets.len()).collect(),
+            present_factor: 0.5,
+            rounds: 0,
+        }
+    }
+
+    /// Rounds of rip-up and re-route until no node is overused. Each round
+    /// re-routes the nets that run through an overused node (and the dirty
+    /// ones); the first round routes everything.
+    fn run(&mut self, log: &mut dyn FnMut(&str)) -> Result<(Vec<Tree>, usize), Stuck> {
+        let graph = self.graph;
+        let n = graph.nodes.len();
+        let mut best = usize::MAX;
+        let mut stalled = 0;
+        let lookup = |node: Node| -> Result<usize, Stuck> {
+            graph.index.get(&node).copied().ok_or_else(|| Stuck::Unroutable(format!("no routing tile at {:?}", node.0)))
+        };
+        for round in 0..MAX_ITERATIONS {
+            let mut to_route: Vec<usize> = std::mem::take(&mut self.dirty);
+            to_route
+                .extend((0..self.nets.len()).filter(|&k| self.trees[k].iter().any(|&node| self.occupancy[node] > 1)));
+            to_route.sort_unstable();
+            to_route.dedup();
+            for k in to_route {
+                let (_, source, sinks) = &self.nets[k];
+                for &node in &self.trees[k] {
+                    self.occupancy[node] -= 1;
+                }
+                let start = lookup(source.node)?;
+                let mut tree = vec![start];
+                let mut parent: BTreeMap<usize, Option<usize>> = BTreeMap::from([(start, None)]);
+                let mut targets: Vec<usize> = sinks.iter().map(|s| lookup(s.node)).collect::<Result<_, _>>()?;
+                // Nearest sinks first.
+                let dist = |a: usize, b: usize| {
+                    let (ca, cb) = (graph.nodes[a].0, graph.nodes[b].0);
+                    (ca.0 - cb.0).abs() + (ca.1 - cb.1).abs()
+                };
+                targets.sort_by_key(|&t| dist(start, t));
+                for target in targets {
+                    if tree.contains(&target) {
+                        continue;
+                    }
+                    let (occupancy, history, penalties, present_factor) =
+                        (&self.occupancy, &self.history, &self.penalties[k], self.present_factor);
+                    let path = shortest_path(graph, &tree, target, |node| {
+                        let overuse = occupancy[node] as f64; // this net's own nodes are not in occupancy now
+                        let penalty = penalties.get(&node).copied().unwrap_or(0.0);
+                        (1.0 + history[node] + penalty + jitter(k, node)) * (1.0 + present_factor * overuse)
+                    })
+                    .ok_or_else(|| {
+                        Stuck::Unroutable(format!("net cannot reach the tile at {:?}", graph.nodes[target].0))
+                    })?;
+                    for window in path.windows(2) {
+                        if let std::collections::btree_map::Entry::Vacant(slot) = parent.entry(window[1]) {
+                            slot.insert(Some(window[0]));
+                            tree.push(window[1]);
+                        }
+                    }
+                }
+                for &node in &tree {
+                    self.occupancy[node] += 1;
+                }
+                self.trees[k] = tree;
+                self.parents[k] = parent;
+            }
+            self.rounds += 1;
+            let overused: Vec<usize> = (0..n).filter(|&i| self.occupancy[i] > 1).collect();
+            if overused.is_empty() {
+                return Ok((
+                    self.parents
+                        .iter()
+                        .map(|p| Tree {
+                            parent: p
+                                .iter()
+                                .map(|(&node, &par)| (graph.nodes[node], par.map(|q| graph.nodes[q])))
+                                .collect(),
+                        })
+                        .collect(),
+                    self.rounds,
+                ));
+            }
+            for &i in &overused {
+                self.history[i] += f64::from(self.occupancy[i] - 1);
+            }
+            self.present_factor = (self.present_factor * 1.6).min(1e6);
+            if overused.len() < best {
+                best = overused.len();
+                stalled = 0;
+            } else {
+                stalled += 1;
+            }
+            if self.rounds.is_multiple_of(10) {
+                log(&format!("  round {}: {} tracks wanted by several nets", self.rounds, overused.len()));
+            }
+            if stalled >= STALL_ROUNDS || round + 1 == MAX_ITERATIONS {
+                return Err(Stuck::Congested { overused, rounds: self.rounds });
+            }
+        }
+        unreachable!()
+    }
+}
+
+/// A tiny cost that differs per net and node, so that nets with several
+/// equally short paths (every staircase between two rows is one) do not all
+/// pick the same one and then have to be pried apart. Deterministic, so the
+/// same netlist always routes the same way.
+fn jitter(net: usize, node: usize) -> f64 {
+    let mut h = (net as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (node as u64).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h >> 31;
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+    (h >> 40) as f64 / (1u64 << 24) as f64 * 1e-3
+}
+
+/// A* from every node of `tree` (cost 0) to `target`, with the distance in
+/// tiles as the estimate (every node costs at least one). Returns the path
 /// from the tree to the target, starting with a tree node.
 ///
 /// A net may use both tracks of a tile only as a turn or fan-out, where the
@@ -532,15 +701,21 @@ fn shortest_path(graph: &Graph, tree: &[usize], target: usize, cost: impl Fn(usi
         }
     }
     let n = graph.nodes.len();
+    let goal = graph.nodes[target].0;
+    let estimate = |node: usize| {
+        let cell = graph.nodes[node].0;
+        f64::from((cell.0 - goal.0).abs() + (cell.1 - goal.1).abs())
+    };
     let mut best = vec![f64::INFINITY; n];
     let mut from: Vec<Option<usize>> = vec![None; n];
     let mut heap = BinaryHeap::new();
     for &node in tree {
         best[node] = 0.0;
-        heap.push(Item(0.0, node));
+        heap.push(Item(estimate(node), node));
     }
-    while let Some(Item(d, node)) = heap.pop() {
-        if d > best[node] {
+    while let Some(Item(f, node)) = heap.pop() {
+        let d = best[node];
+        if f > d + estimate(node) {
             continue;
         }
         if node == target {
@@ -562,7 +737,7 @@ fn shortest_path(graph: &Graph, tree: &[usize], target: usize, cost: impl Fn(usi
             if nd < best[next] {
                 best[next] = nd;
                 from[next] = Some(node);
-                heap.push(Item(nd, next));
+                heap.push(Item(nd + estimate(next), next));
             }
         }
     }
@@ -675,14 +850,36 @@ fn insert_repeaters(
             return Ok(sink_counts);
         };
         // Place a repeater at the latest tile on the way here that can take one and
-        // is not one already, including this tile itself.
+        // is not one already, including this tile itself; but a tile of this net's
+        // own before a crossing, so that the crossing's one slot stays free for the
+        // net that has no other choice there.
         let mut candidate = Some(bad);
+        let mut crossing: Option<Cell> = None;
+        let mut chosen: Option<Cell> = None;
         while let Some(cell) = candidate {
-            if can_repeat(cell, layout) && !repeaters.contains(&cell) {
+            if repeaters.contains(&cell) {
                 break;
+            }
+            if can_repeat(cell, layout) {
+                if tiles[&cell].len() == 1 {
+                    chosen = Some(cell);
+                    break;
+                }
+                crossing.get_or_insert(cell);
             }
             candidate = parent_cell(cell);
         }
+        let candidate = chosen.or(crossing).or_else(|| {
+            // Nothing since the last repeater: anywhere earlier that can take one.
+            let mut candidate = Some(bad);
+            while let Some(cell) = candidate {
+                if can_repeat(cell, layout) && !repeaters.contains(&cell) {
+                    break;
+                }
+                candidate = parent_cell(cell);
+            }
+            candidate
+        });
         match candidate {
             Some(cell) => {
                 repeaters.insert(cell);
@@ -696,5 +893,113 @@ fn insert_repeaters(
                 return Err(Dies { path });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::place::{estimate_routing, gap_count, place};
+    use crate::tile::Library;
+
+    /// `n` inputs and `n` NOR3 gates, gate k reading inputs k, k+1 and k+3 (mod n):
+    /// every input feeds three gates spread over the column, whatever order the
+    /// gates are placed in, so the gap in front of the gates needs several routing
+    /// columns.
+    fn braid(n: usize) -> Netlist {
+        let mut ports = Vec::new();
+        let mut cells = Vec::new();
+        for k in 0..n {
+            ports.push(format!(r#""i{k}":{{"direction":"input","bits":[{}]}}"#, 2 + k));
+            ports.push(format!(r#""o{k}":{{"direction":"output","bits":[{}]}}"#, 2 + n + k));
+            cells.push(format!(
+                r#""g{k}":{{"type":"NOR3","connections":{{"A":[{}],"B":[{}],"C":[{}],"Y":[{}]}}}}"#,
+                2 + k,
+                2 + (k + 1) % n,
+                2 + (k + 3) % n,
+                2 + n + k
+            ));
+        }
+        let json =
+            format!(r#"{{"modules":{{"top":{{"ports":{{{}}},"cells":{{{}}}}}}}}}"#, ports.join(","), cells.join(","));
+        Netlist::from_yosys_json(&json, "top", &Library::builtin().unwrap()).unwrap()
+    }
+
+    /// The column index of the first routing column of the first gap.
+    fn first_routing_column(placement: &Placement) -> i32 {
+        placement.columns.iter().position(|c| *c == Column::Routing { gap: 0, offset: 0 }).unwrap() as i32
+    }
+
+    /// Whether any tile of column `col` carries a north-south wire (a turn, a
+    /// vertical run or a crossing).
+    fn runs_north_south_in(layout: &Layout, col: i32) -> bool {
+        layout.tiles.iter().any(|(&(c, _), placed)| {
+            c == col
+                && match placed {
+                    Placed::Wire { edges } | Placed::Repeater { edges, .. } => {
+                        edges.iter().any(|e| matches!(e, Edge::North | Edge::South))
+                    }
+                    Placed::Cross { .. } => true,
+                    _ => false,
+                }
+        })
+    }
+
+    #[test]
+    fn a_gap_too_narrow_is_given_up_after_stalling_and_named() {
+        let netlist = braid(5);
+        let gaps = gap_count(&netlist).unwrap();
+        let narrow = place(&netlist, &vec![1; gaps]).unwrap();
+        let estimate = estimate_routing(&netlist, &narrow);
+        assert!(estimate[0] > 1, "the first gap must need more than one column: {estimate:?}");
+        let mut log = |_: &str| {};
+        let Err(RouteFailure::Congested { tracks, users, rounds, history }) = route(&netlist, &narrow, None, &mut log)
+        else {
+            panic!("one routing column in front of the gates must be congested");
+        };
+        // Given up by the stall rule, well before the round limit.
+        assert!(rounds > STALL_ROUNDS, "the stall rule needs {STALL_ROUNDS} rounds without progress, got {rounds}");
+        assert!(rounds <= 3 * STALL_ROUNDS, "gave up only after {rounds} rounds");
+        assert!(rounds < MAX_ITERATIONS);
+        // Every contended track names the nets that want it, and most of the
+        // tracks lie in the gap that is too narrow.
+        assert!(!tracks.is_empty());
+        assert_eq!(tracks.len(), users.len());
+        assert!(users.iter().all(|u| u.len() >= 2), "{users:?}");
+        let mut per_gap = vec![0usize; gaps];
+        for (cell, _) in &tracks {
+            per_gap[narrow.gap_of(cell.0).expect("contended tracks are not in the output column")] += 1;
+        }
+        assert_eq!(per_gap.iter().position(|&n| n == *per_gap.iter().max().unwrap()), Some(0), "{per_gap:?}");
+        // The history carries what was learned, named by column so that it
+        // survives the widening, and only where there was contention.
+        assert!(history.costs.values().all(|&c| c > 0.0));
+        assert!(history.costs.keys().any(|(column, _, _)| matches!(column, Column::Routing { gap: 0, .. })));
+        // Widened to the estimate, the placement routes, cold and from the history.
+        let wide = place(&netlist, &estimate).unwrap();
+        let cold = route(&netlist, &wide, None, &mut log).unwrap();
+        let warm = route(&netlist, &wide, Some(&history), &mut log).unwrap();
+        assert!(cold.rounds > 0 && warm.rounds > 0);
+        assert_eq!(cold.layout.size(), warm.layout.size());
+    }
+
+    #[test]
+    fn a_seeded_history_steers_nets_off_the_costly_tracks() {
+        let netlist = braid(5);
+        let gaps = gap_count(&netlist).unwrap();
+        let narrow = place(&netlist, &vec![1; gaps]).unwrap();
+        let wide = place(&netlist, &estimate_routing(&netlist, &narrow)).unwrap();
+        let first = first_routing_column(&wide);
+        let mut log = |_: &str| {};
+        let cold = route(&netlist, &wide, None, &mut log).unwrap();
+        assert!(runs_north_south_in(&cold.layout, first), "cold:\n{}", render(&cold.layout));
+        // A history that makes the north-south track of that column prohibitive
+        // moves every row change to the other columns.
+        let mut steer = History::default();
+        for row in 0..wide.rows {
+            steer.costs.insert((Column::Routing { gap: 0, offset: 0 }, row, Track::Z), 1e6);
+        }
+        let steered = route(&netlist, &wide, Some(&steer), &mut log).unwrap();
+        assert!(!runs_north_south_in(&steered.layout, first), "steered:\n{}", render(&steered.layout));
     }
 }
