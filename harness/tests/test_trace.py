@@ -54,6 +54,19 @@ def test_trace_difference_ignores_pending_when_asked_and_reports_a_changed_block
     assert first_trace_difference(Trace.from_json(a, ticks=2), Trace.from_json(c, ticks=2)).startswith("tick 1:")
 
 
+def test_a_lamp_tick_may_differ_only_when_allowed_and_only_for_lamps():
+    a = {"format": "redfab-trace/1", "fixture": "t", "source": {"kind": "vanilla"}, "size": [1, 1, 1],
+         "initial": {"0,0,0": "minecraft:redstone_lamp"}, "pending0": [], "ticks": []}
+    lamp = dict(a, ticks=[{"tick": 1, "changes": {}, "pending": [{"pos": "0,0,0", "block": "minecraft:redstone_lamp", "delay": 4, "priority": 0}]}])
+    repeater = dict(a, ticks=[{"tick": 1, "changes": {}, "pending": [{"pos": "0,0,0", "block": "minecraft:repeater", "delay": 2, "priority": -1}]}])
+    t = lambda d: Trace.from_json(d, ticks=2)  # noqa: E731
+    assert "pending" in first_trace_difference(t(a), t(lamp))
+    seen: list[str] = []
+    assert first_trace_difference(t(a), t(lamp), lamp_ticks_may_differ=True, artifacts=seen) is None
+    assert seen == ["tick 1: a scheduled lamp tick differs with no effect on the blocks"]
+    assert "pending" in first_trace_difference(t(a), t(repeater), lamp_ticks_may_differ=True)
+
+
 def test_replay_summary_is_parsed_and_its_absence_is_an_error():
     line = "build/tiles: 180 matched (2 of them only with a different order of same-tick events), 0 mismatched, 1 skipped (unsupported blocks)\n"
     assert parse_replay_summary("noise\n" + line) == ReplaySummary(matched=180, racy=2, mismatched=0, skipped=1)

@@ -310,8 +310,15 @@ def run_function(fixtures: list[Fixture], mode: str, out: Path | None) -> tuple[
     for fx in fixtures:
         base = traces[(fx.name, "aligned")]
         for variant in ("straddle", "rotated"):
-            if (diff := first_trace_difference(base, traces[(fx.name, variant)])) is not None:
+            # The default mode's legacy wire order depends on world position; a lamp
+            # tick it schedules with no effect is reported, not counted against the design.
+            artifacts: list[str] = []
+            diff = first_trace_difference(base, traces[(fx.name, variant)],
+                                          lamp_ticks_may_differ=not MODES[mode], artifacts=artifacts)
+            if diff is not None:
                 problems[fx.name].append(f"[{mode}] '{variant}' placement differs: {diff}")
+            elif artifacts:
+                print(f"[{mode}] {fx.name} '{variant}': {len(artifacts)} tick(s) with a lamp tick the legacy order scheduled with no effect")
         problems[fx.name] += [f"[{mode}] {failure}" for e in fx.expect if (failure := e.check(base)) is not None]
         if out is not None:
             out.mkdir(parents=True, exist_ok=True)
