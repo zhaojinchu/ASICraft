@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from harness.area_check import (BASELINE, FORMAT, Stale, compare, control, format_baseline, load_baseline, measure,
-                                read_row)
+from harness.area_check import (BASELINE, FORMAT, STYLES, Stale, compare, control, format_baseline, load_baseline,
+                                measure, read_row)
 from harness.server import ROOT
 
 MODULE = {"cells": {"g1": {}, "g2": {}, "g3": {}, "g4": {}}}
@@ -133,7 +133,9 @@ def test_the_committed_baseline_is_canonical_and_lists_exactly_the_shipped_desig
     shipped = sorted(p.name for p in (ROOT / "designs").iterdir() if p.is_dir())
     assert sorted(rows) == shipped
     for name, row in rows.items():
-        assert row["placement"] == "pitch4", name
+        assert row["placement"] in STYLES, name
+        if "period" in row:
+            assert row["placement"] == "pitch4", f"{name}: clocked designs keep the four-row pitch until step 3"
         assert row["cells"] >= 1 and row["tiles"] >= row["cells"], name
         assert ("period" in row) != ("input_spacing" in row), name
         assert row["area"] == row["footprint"][0] * row["footprint"][1], name
