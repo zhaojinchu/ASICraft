@@ -24,15 +24,20 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .blockstate import BlockState, format_pos, parse_pos
 from .mechanics import MODES, source_for
 from .place_template import place, read_box
 from .runner import Runner, layout
-from .server import ROOT, VanillaServer, cargo
+from .server import ROOT, VanillaServer, redfab
 from .session import Session
-from .trace import Expectation, Fixture, Trace, first_trace_difference
+from .trace import Expectation, Fixture, Trace, first_trace_difference, parse_replay_summary
+
+if TYPE_CHECKING:
+    from .runner import Placement
 
 DESIGNS = ROOT / "build" / "designs"
 MAX_INPUT_BITS = 10  # all combinations are tried up to this many input bits
@@ -48,14 +53,25 @@ TEMPLATE_Z = 8192  # where the template checks place their copies, clear of the 
 DUST_NS = "minecraft:redstone_wire[east=none,north=side,power=0,south=side,west=none]"
 
 
-def redfab(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return subprocess.run([cargo(), "run", "-q", "-p", "redfab-cli", "--", *args], cwd=ROOT, check=check,
-                          capture_output=True, text=True)
+def design_dir(name: str) -> Path:
+    """Where a built design lives: `build/designs/<name>` for a name, or the directory
+    itself when given a path (one `redfab build -o DIR` wrote anywhere)."""
+    path = Path(name)
+    if "/" in name or path.is_dir():
+        return path.resolve()
+    return DESIGNS / name
+
+
+def design_name(name: str) -> str:
+    """A name for a design given by name or by path, fit for a structure template id
+    (`redfab:<name>`): lowercase letters, digits, underscores, dots and hyphens."""
+    base = design_dir(name).name if ("/" in name or Path(name).is_dir()) else name
+    return re.sub(r"[^a-z0-9_.-]", "_", base.lower()) or "design"
 
 
 def load(name: str) -> tuple[dict, dict]:
     """The built design file and the top module of its mapped netlist."""
-    directory = DESIGNS / name
+    directory = design_dir(name)
     if not (directory / "design.json").exists():
         raise SystemExit(f"{directory} has no design.json; run `redfab build` first")
     design = json.loads((directory / "design.json").read_text())
@@ -72,16 +88,47 @@ def ports(module: dict) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
     return ins, outs
 
 
-def bit_names(name: str, width: int) -> list[str]:
-    return [name] if width == 1 else [f"{name}[{i}]" for i in range(width)]
+def bit_names(module: dict, name: str) -> list[str]:
+    """The names of a port's bits, least significant first, by the declared index,
+    the way the core names levers and lamps (crates/redfab-core/src/netlist.rs
+    bit_name): `[7:4] a` is a[4]..a[7], `[0:3] y` has y[3] first (Yosys's `offset`
+    and `upto`)."""
+    port = module["ports"][name]
+    width = len(port["bits"])
+    if width == 1:
+        return [name]
+    offset = int(port.get("offset", 0))
+    if port.get("upto", 0):
+        return [f"{name}[{offset + width - 1 - i}]" for i in range(width)]
+    return [f"{name}[{offset + i}]" for i in range(width)]
 
 
 def all_vectors(module: dict) -> list[dict[str, int]]:
     ins, _ = ports(module)
-    names = [bit for name, width in ins for bit in bit_names(name, width)]
+    names = [bit for name, _ in ins for bit in bit_names(module, name)]
     if len(names) > MAX_INPUT_BITS:
         raise SystemExit(f"{len(names)} input bits: too many to try every combination")
     return [dict(zip(names, values)) for values in itertools.product((0, 1), repeat=len(names))]
+
+
+# Beyond MAX_INPUT_BITS the `sim` check takes this many vectors instead of every
+# combination: all off, all on, each bit alone, and the rest at random from a fixed seed.
+SIM_SAMPLE = 256
+
+
+def sim_vectors(module: dict) -> tuple[list[dict[str, int]], bool]:
+    """The vectors the `sim` check drives: every combination up to MAX_INPUT_BITS,
+    otherwise a fixed sample of SIM_SAMPLE (the second value says which)."""
+    ins, _ = ports(module)
+    names = [bit for name, _ in ins for bit in bit_names(module, name)]
+    if len(names) <= MAX_INPUT_BITS:
+        return all_vectors(module), False
+    rows = [[0] * len(names), [1] * len(names)]
+    rows += [[int(i == j) for j in range(len(names))] for i in range(len(names))]
+    rng = random.Random(1)
+    while len(rows) < SIM_SAMPLE:
+        rows.append([rng.randint(0, 1) for _ in names])
+    return [dict(zip(names, row)) for row in rows[:SIM_SAMPLE]], True
 
 
 def sampled_vectors(module: dict, limit: int) -> list[dict[str, int]]:
@@ -93,10 +140,36 @@ def sampled_vectors(module: dict, limit: int) -> list[dict[str, int]]:
     return [vectors[round(i * (len(vectors) - 1) / (limit - 1))] for i in range(limit)]
 
 
+def run_verilator(directory: Path, top: Path) -> str:
+    """Builds `directory/tb.sv`, which instantiates `top` from the source `top`, with
+    Verilator and returns what it prints. GNU Make refuses a build directory whose path
+    has a space in it (Verilator's verilated.mk stops with "Unsupported"), so such a
+    build goes to a temporary directory instead; tb.sv stays in `directory` to read.
+    A failure says what Verilator said, not a bare CalledProcessError."""
+    workdir = directory if " " not in str(directory) else Path(tempfile.mkdtemp(prefix="redfab-verilator-"))
+    try:
+        shutil.copy(top, workdir / "top.sv")
+        if workdir != directory:
+            shutil.copy(directory / "tb.sv", workdir / "tb.sv")
+        build = subprocess.run(
+            ["verilator", "--binary", "--timing", "-Wno-fatal", "--Mdir", "obj", "--top-module", "tb", "top.sv", "tb.sv"],
+            cwd=workdir, capture_output=True, text=True,
+        )
+        if build.returncode != 0:
+            raise RuntimeError(f"Verilator failed on {directory / 'tb.sv'}:\n{build.stderr.strip() or build.stdout.strip()}")
+        run = subprocess.run(["./obj/Vtb"], cwd=workdir, capture_output=True, text=True)
+        if run.returncode != 0:
+            raise RuntimeError(f"the Verilator model of {directory / 'tb.sv'} failed:\n{run.stderr.strip() or run.stdout.strip()}")
+        return run.stdout
+    finally:
+        if workdir != directory:
+            shutil.rmtree(workdir, ignore_errors=True)
+
+
 def verilator_outputs(name: str, module: dict, vectors: list[dict[str, int]]) -> list[dict[str, int]]:
     """What the source design computes for each vector, according to Verilator."""
     ins, outs = ports(module)
-    directory = DESIGNS / name / "verilator"
+    directory = design_dir(name) / "verilator"
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True)
     lines = ["module tb;"]
@@ -105,26 +178,20 @@ def verilator_outputs(name: str, module: dict, vectors: list[dict[str, int]]) ->
     lines.append("  initial begin")
     for vector in vectors:
         for port, width in ins:
-            value = sum(vector[bit] << i for i, bit in enumerate(bit_names(port, width)))
+            value = sum(vector[bit] << i for i, bit in enumerate(bit_names(module, port)))
             lines.append(f"    {port} = {width}'d{value};")
         shown = " ".join(f"{port}=%b" for port, _ in outs)
         lines.append(f'    #1; $display("OUT {shown}", {", ".join(port for port, _ in outs)});')
     lines += ["    $finish;", "  end", "endmodule"]
     (directory / "tb.sv").write_text("\n".join(lines) + "\n")
-    subprocess.run(
-        ["verilator", "--binary", "--timing", "-Wno-fatal", "--Mdir", str(directory / "obj"), "--top-module", "tb",
-         str(DESIGNS / name / "top.sv"), str(directory / "tb.sv")],
-        check=True, capture_output=True, text=True,
-    )
-    output = subprocess.run([str(directory / "obj" / "Vtb")], check=True, capture_output=True, text=True).stdout
+    output = run_verilator(directory, design_dir(name) / "top.sv")
     results = []
     for line in output.splitlines():
         if not line.startswith("OUT "):
             continue
         row = {}
         for port, bits in re.findall(r"(\w+)=([01xz]+)", line):
-            width = dict(outs)[port]
-            for i, bit in enumerate(bit_names(port, width)):
+            for i, bit in enumerate(bit_names(module, port)):
                 row[bit] = int(bits[len(bits) - 1 - i])
         results.append(row)
     if len(results) != len(vectors):
@@ -138,15 +205,16 @@ def cmd_sim(names: list[str]) -> int:
     failures = []
     for name in names:
         design, module = load(name)
-        vectors = all_vectors(module)
+        vectors, sampled = sim_vectors(module)
         expected = verilator_outputs(name, module, vectors)
-        vectors_file = DESIGNS / name / "vectors.json"
+        vectors_file = design_dir(name) / "vectors.json"
         vectors_file.write_text(json.dumps(vectors))
-        got = json.loads(redfab("simulate", str(DESIGNS / name / "design.json"), str(vectors_file)).stdout)
+        got = json.loads(redfab("simulate", str(design_dir(name) / "design.json"), str(vectors_file)).stdout)
         wrong = [(v, e, g) for v, e, g in zip(vectors, expected, got) if e != g]
         for vector, want, have in wrong:
             failures.append(f"{name}: inputs {vector}: Verilator says {want}, the block simulator says {have}")
-        print(f"{name}: {len(vectors) - len(wrong)} of {len(vectors)} input combinations agree with Verilator")
+        what = "sampled input combinations" if sampled else "input combinations"
+        print(f"{name}: {len(vectors) - len(wrong)} of {len(vectors)} {what} agree with Verilator")
     for failure in failures:
         print("FAIL: " + failure)
     return 1 if failures else 0
@@ -190,12 +258,12 @@ def broken_copies(design: dict) -> dict[str, dict]:
 
 def cmd_lvs_negative(name: str) -> int:
     design, _ = load(name)
-    directory = DESIGNS / name / "broken"
+    directory = design_dir(name) / "broken"
     shutil.rmtree(directory, ignore_errors=True)
     directory.mkdir(parents=True)
-    mapped = str(DESIGNS / name / "mapped.json")
+    mapped = str(design_dir(name) / "mapped.json")
     ok = True
-    good = redfab("lvs", str(DESIGNS / name / "design.json"), mapped, check=False)
+    good = redfab("lvs", str(design_dir(name) / "design.json"), mapped, check=False)
     print(f"unbroken layout: {'accepted' if good.returncode == 0 else 'REJECTED: ' + good.stdout.strip()}")
     ok &= good.returncode == 0
     for kind, broken in broken_copies(design).items():
@@ -274,11 +342,16 @@ def cmd_vanilla(names: list[str]) -> int:
         finally:
             server.stop()
 
-    # The simulator must reproduce each recorded trace.
+    # The simulator must reproduce each recorded trace, in its default order of
+    # same-tick events: a trace it matches only in another order is a race in the
+    # design, which is a bug here (the random corpora are the only place races are allowed).
     replay = redfab("check-traces", str(game_dir), check=False)
     print(replay.stdout.strip())
-    if replay.returncode != 0 or " 0 skipped" not in replay.stdout:
+    summary = parse_replay_summary(replay.stdout)
+    if replay.returncode != 0 or summary.skipped != 0:
         failures.append("the simulator does not reproduce the game's traces of the designs")
+    if summary.racy != 0:
+        failures.append(f"{summary.racy} design trace(s) match the simulator only with another order of same-tick events")
 
     for failure in failures:
         print("FAIL: " + failure)
@@ -296,7 +369,7 @@ def template_checks(server: VanillaServer, designs: dict[str, dict]) -> list[str
     # Well south of the plots the traced run left in this world.
     x, z = 0, TEMPLATE_Z
     for name, design in designs.items():
-        shutil.copy(DESIGNS / name / "world.nbt", structures / f"{name}.nbt")
+        shutil.copy(design_dir(name) / "world.nbt", structures / f"{name}.nbt")
         size = tuple(design["size"])
         strict_origin, normal_origin = (x, 64, z), (x, 64, z + size[2] + 16)
         x += size[0] + 16
@@ -354,7 +427,7 @@ def cmd_exhaustive(name: str) -> int:
             session.prepare()
             structures = server.run_dir / "world" / "generated" / "redfab" / "structure"
             structures.mkdir(parents=True, exist_ok=True)
-            shutil.copy(DESIGNS / name / "world.nbt", structures / f"{name}.nbt")
+            shutil.copy(design_dir(name) / "world.nbt", structures / f"{name}.nbt")
             session.forceload((origin, (origin[0] + size[0], 0, origin[2] + size[2])))
             place(session, name, origin, strict=True)
             if read_box(session, origin, size) != design["blocks"]:
@@ -456,43 +529,46 @@ def clocked_vectors(design: dict, cycles: int, seed: int) -> list[dict[str, int]
     return vectors
 
 
-def verilator_cycles(name: str, module: dict, clock: str, vectors: list[dict[str, int]]) -> list[dict[str, int]]:
-    """What the source design's outputs are at the end of each clock cycle according
-    to Verilator: the clock rises, the inputs change, and the outputs are read before
-    the next rise."""
+def cycles_testbench(module: dict, clock: str, active: str, vectors: list[dict[str, int]]) -> str:
+    """A testbench that drives the source design the way the simulator and the game
+    do: the clock rests at the level before its active edge (`rising` or `falling`),
+    makes that edge at the start of each cycle, then the inputs change, the outputs
+    are read, and the clock returns to rest before the next cycle."""
     ins, outs = ports(module)
     data = [(port, width) for port, width in ins if port != clock]
-    directory = DESIGNS / name / "verilator"
-    shutil.rmtree(directory, ignore_errors=True)
-    directory.mkdir(parents=True)
-    lines = ["module tb;", f"  logic {clock} = 0;"]
+    rest, edge = (0, 1) if active == "rising" else (1, 0)
+    lines = ["module tb;", f"  logic {clock} = {rest};"]
     lines += [f"  logic [{width - 1}:0] {port};" for port, width in data + outs]
     lines.append("  top dut (.*);")
     lines.append("  initial begin")
     for vector in vectors:
-        lines.append(f"    {clock} = 1; #1;")
+        lines.append(f"    {clock} = {edge}; #1;")
         for port, width in data:
-            value = sum(vector[bit] << i for i, bit in enumerate(bit_names(port, width)))
+            value = sum(vector[bit] << i for i, bit in enumerate(bit_names(module, port)))
             lines.append(f"    {port} = {width}'d{value};")
         shown = " ".join(f"{port}=%b" for port, _ in outs)
         lines.append(f'    #4; $display("OUT {shown}", {", ".join(port for port, _ in outs)});')
-        lines.append(f"    {clock} = 0; #5;")
+        lines.append(f"    {clock} = {rest}; #5;")
     lines += ["    $finish;", "  end", "endmodule"]
-    (directory / "tb.sv").write_text("\n".join(lines) + "\n")
-    subprocess.run(
-        ["verilator", "--binary", "--timing", "-Wno-fatal", "--Mdir", str(directory / "obj"), "--top-module", "tb",
-         str(DESIGNS / name / "top.sv"), str(directory / "tb.sv")],
-        check=True, capture_output=True, text=True,
-    )
-    output = subprocess.run([str(directory / "obj" / "Vtb")], check=True, capture_output=True, text=True).stdout
+    return "\n".join(lines) + "\n"
+
+
+def verilator_cycles(name: str, module: dict, clock: str, active: str, vectors: list[dict[str, int]]) -> list[dict[str, int]]:
+    """What the source design's outputs are at the end of each clock cycle according
+    to Verilator, driven as `cycles_testbench` says."""
+    _, outs = ports(module)
+    directory = design_dir(name) / "verilator"
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir(parents=True)
+    (directory / "tb.sv").write_text(cycles_testbench(module, clock, active, vectors))
+    output = run_verilator(directory, design_dir(name) / "top.sv")
     results = []
     for line in output.splitlines():
         if not line.startswith("OUT "):
             continue
         row = {}
         for port, bits in re.findall(r"(\w+)=([01xz]+)", line):
-            width = dict(outs)[port]
-            for i, bit in enumerate(bit_names(port, width)):
+            for i, bit in enumerate(bit_names(module, port)):
                 row[bit] = int(bits[len(bits) - 1 - i]) if bits[len(bits) - 1 - i] in "01" else 0
         results.append(row)
     if len(results) != len(vectors):
@@ -501,9 +577,9 @@ def verilator_cycles(name: str, module: dict, clock: str, vectors: list[dict[str
 
 
 def simulate_cycles(name: str, vectors: list[dict[str, int]], shuffle: int | None = None) -> list[dict[str, int]]:
-    vectors_file = DESIGNS / name / "cycles.json"
+    vectors_file = design_dir(name) / "cycles.json"
     vectors_file.write_text(json.dumps(vectors))
-    args = ["simulate", str(DESIGNS / name / "design.json"), str(vectors_file)]
+    args = ["simulate", str(design_dir(name) / "design.json"), str(vectors_file)]
     if shuffle is not None:
         args += ["--shuffle", str(shuffle)]
     return json.loads(redfab(*args).stdout)
@@ -518,7 +594,7 @@ def cmd_cycles(names: list[str]) -> int:
             failures.append(f"{name}: not a clocked design")
             continue
         vectors = clocked_vectors(design, CYCLES, 1)
-        expected = verilator_cycles(name, module, seq["clock"], vectors)
+        expected = verilator_cycles(name, module, seq["clock"], seq["active"], vectors)
         got = simulate_cycles(name, vectors)
         wrong = [k for k, (e, g) in enumerate(zip(expected, got)) if e != g]
         for k in wrong[:3]:
@@ -535,7 +611,7 @@ def cmd_cycles(names: list[str]) -> int:
     return 1 if failures else 0
 
 
-def drive_cycles_in_game(session: Session, placement: "Placement", design: dict, vectors: list[dict[str, int]]) -> list[dict[str, int]]:
+def drive_cycles_in_game(session: Session, placement: Placement, design: dict, vectors: list[dict[str, int]]) -> list[dict[str, int]]:
     """Drives a placed clocked design through the vectors as the timing report says
     and reads its lamps at the end of each cycle."""
     seq = design["timing"]["sequential"]
@@ -569,14 +645,14 @@ def drive_cycles_in_game(session: Session, placement: "Placement", design: dict,
     return results
 
 
-def place_by_blocks(session: Session, placement: "Placement", design: dict) -> None:
+def place_by_blocks(session: Session, placement: Placement, design: dict) -> None:
     """Places a design block by block, as the trace runner does, strictly."""
     blocks = {parse_pos(p): BlockState.parse(s) for p, s in design["blocks"].items()}
     for pos, state in sorted(blocks.items(), key=lambda kv: (kv[0][1], kv[0])):
         session.setblock(placement.to_world(pos), placement.state_to_world(state), True)
 
 
-def placements_for(design: dict, origin_z: int) -> list[tuple[str, "Placement"]]:
+def placements_for(design: dict, origin_z: int) -> list[tuple[str, Placement]]:
     from .runner import Placement, Rotation, cell_size
     size = tuple(design["size"])
     fx = Fixture(name="d", doc="", size=size, placement="strict", blocks={}, events=[], ticks=1, expect=[])
@@ -628,7 +704,8 @@ def cmd_cycles_vanilla(names: list[str]) -> int:
     failures = run_cycles_in_game(
         names,
         lambda name, design: clocked_vectors(design, CYCLES, 1),
-        lambda name, design, vectors: verilator_cycles(name, load(name)[1], design["timing"]["sequential"]["clock"], vectors),
+        lambda name, design, vectors: verilator_cycles(name, load(name)[1], design["timing"]["sequential"]["clock"],
+                                                       design["timing"]["sequential"]["active"], vectors),
         expect_match=True,
     )
     for failure in failures:
@@ -647,7 +724,7 @@ def build_broken(name: str, fault: str) -> str:
         raise SystemExit(f"{broken}: the build with --break {fault} did not fail")
     if "hold violated" not in result.stdout and "hold violated" not in result.stderr:
         raise SystemExit(f"{broken}: the build did not report a hold violation:\n{result.stdout}{result.stderr}")
-    shutil.copy(DESIGNS / name / "top.sv", DESIGNS / broken / "top.sv")
+    shutil.copy(design_dir(name) / "top.sv", DESIGNS / broken / "top.sv")
     print(f"{broken}: the build is flagged for a hold violation, as it should be")
     return broken
 
@@ -657,7 +734,7 @@ def cmd_hold_negative(name: str) -> int:
     design, module = load(broken)
     seq = design["timing"]["sequential"]
     vectors = clocked_vectors(design, CYCLES, 1)
-    expected = verilator_cycles(broken, module, seq["clock"], vectors)
+    expected = verilator_cycles(broken, module, seq["clock"], seq["active"], vectors)
     got = simulate_cycles(broken, vectors)
     wrong = [k for k, (e, g) in enumerate(zip(expected, got)) if e != g]
     if not wrong:
@@ -674,7 +751,8 @@ def cmd_hold_negative_vanilla(name: str) -> int:
     failures = run_cycles_in_game(
         [broken],
         lambda n, design: clocked_vectors(design, CYCLES, 1),
-        lambda n, design, vectors: verilator_cycles(n, load(n)[1], design["timing"]["sequential"]["clock"], vectors),
+        lambda n, design, vectors: verilator_cycles(n, load(n)[1], design["timing"]["sequential"]["clock"],
+                                                    design["timing"]["sequential"]["active"], vectors),
         expect_match=False,
     )
     for failure in failures:
@@ -703,7 +781,6 @@ def burnout_fixtures(name: str) -> tuple[list[Fixture], int]:
     of it. Returns them and the spacing."""
     design, module = load(name)
     spacing = design["timing"]["input_spacing"]
-    pin = design["inputs"][0]["name"]
     rest = {p["name"]: 0 for p in design["inputs"]}
     expected = verilator_outputs(name, module, [rest])[0]
     lit = {k: bool(v) for k, v in expected.items()}
@@ -715,12 +792,12 @@ def cmd_burnout_negative(name: str) -> int:
     ok = True
     for fx, flagged in zip(fixtures, (False, True)):
         rate = spacing if fx.name == "within_budget" else spacing // 2
-        stress = redfab("stress", str(DESIGNS / name / "design.json"), "--spacing", str(rate), check=False)
+        stress = redfab("stress", str(design_dir(name) / "design.json"), "--spacing", str(rate), check=False)
         print(stress.stdout.strip())
         if (stress.returncode != 0) != flagged:
             print(f"FAIL: {name}: changes every {rate} ticks should {'' if flagged else 'not '}be flagged")
             ok = False
-        directory = DESIGNS / name / "burst"
+        directory = design_dir(name) / "burst"
         directory.mkdir(exist_ok=True)
         (directory / f"{fx.name}.fixture.json").write_text(json.dumps(fx.to_json()))
         run = redfab("check-fixtures", str(directory), check=False)

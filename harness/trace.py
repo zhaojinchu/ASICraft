@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .anvil import PendingTick
@@ -227,10 +228,6 @@ class Trace:
         return self.pending0 is not None
 
 
-def traces_equal(a: Trace, b: Trace, compare_pending: bool = True) -> bool:
-    return first_trace_difference(a, b, compare_pending) is None
-
-
 def first_trace_difference(a: Trace, b: Trace, compare_pending: bool = True) -> str | None:
     if a.initial != b.initial:
         return "initial state differs: " + _describe_diff(a.initial, b.initial)
@@ -258,3 +255,22 @@ def _describe_diff(a: States, b: States) -> str:
 
 def check_expectations(trace: Trace, expectations: list[Expectation]) -> list[str]:
     return [failure for e in expectations if (failure := e.check(trace)) is not None]
+
+
+@dataclass(frozen=True)
+class ReplaySummary:
+    """The counts `redfab check-traces` prints on its last line."""
+    matched: int
+    racy: int  # matched only with another order of same-tick events: a race in the circuit
+    mismatched: int
+    skipped: int
+
+
+def parse_replay_summary(stdout: str) -> ReplaySummary:
+    """Reads the summary line of `redfab check-traces`. Raises if there is none, so a
+    crash or a changed format cannot pass for a clean replay."""
+    found = re.search(r"(\d+) matched \((\d+) of them only with a different order of same-tick events\), "
+                      r"(\d+) mismatched, (\d+) skipped", stdout)
+    if found is None:
+        raise ValueError("check-traces printed no summary line:\n" + stdout.strip())
+    return ReplaySummary(*(int(v) for v in found.groups()))

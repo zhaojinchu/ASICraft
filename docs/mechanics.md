@@ -1,6 +1,6 @@
 # Redstone mechanics, as measured
 
-What the real game does, measured with the harness on the pinned server (Minecraft 26.3, jar `33680f5f…`) on 2026-10-04, in both the default redstone mode and the Redstone Experiments mode. Every row has a fixture in `fixtures/mechanics/` whose recording is committed and re-checked by `./check --vanilla`. **All 25 fixtures behave identically in both modes.**
+What the real game does, measured with the harness on the pinned server (Minecraft 26.3, jar `33680f5f…`): 25 fixtures on 2026-10-04 (stage 1), five more on 2026-10-05 (stage 4, repeaters), the flip-flop sweeps on 2026-10-06 (stage 8), one more on 2026-10-07 (`lever_mount`), in both the default redstone mode and the Redstone Experiments mode. Every row except the flip-flop section's has a fixture in `fixtures/mechanics/` whose recording is committed and re-checked by `./check --vanilla` (`mechanics-verify`: 31 fixtures, 62 recordings; `docs-agree` in the fast gate holds these counts to the directory); the flip-flop rows come from the tile fixtures `tiles-vanilla` records. **All 31 fixtures behave identically in both modes.**
 
 Units are game ticks (gt). "Tick t" follows `trace-format.md`: a stimulus at tick t is the last event of tick t, so a delay of d means the reaction shows at tick t+d.
 
@@ -20,7 +20,7 @@ Units are game ticks (gt). "Tick t" follows `trace-format.md`: a stimulus at tic
 | Threshold | `burnout_7`, `burnout_8` | 7 turn-offs in 60 gt: fine. **8 turn-offs: burns out on the 8th.** | **No.** The wiki says "more than eight". The game burns out *on* the eighth turn-off within 60 gt. |
 | What happens after | `burnout_8..10` | Torch stays dark and ignores further input pulses. A 160-gt block tick is scheduled at burnout; when it fires the torch relights (observed at exactly +160). | The wiki calls the 160-gt retry uncertain; here it relit every time, with no other updates arriving. |
 
-**Design rule:** a torch may turn off at most **7 times in any 60-gt window**. redfab's burnout budget check uses 7.
+**Design rule:** the game allows a torch **7 turn-offs in any 60-gt window**. redfab's burnout budget check allows at most **6** (`BURNOUT_BUDGET` in `crates/redfab-core/src/timing.rs`), one to spare; `./check` drives the inverter at twice its reported input rate and requires both the tool and the simulator to catch it.
 
 ## Repeater locking
 
@@ -65,6 +65,7 @@ Tick priorities seen in the saved pending ticks, all as documented: a repeater f
 |---|---|---|
 | `setblock … strict` places exactly the written state, with no updates | `strict_keeps_shape` | A dust written with a wrong shape and power=0 beside a redstone block stays that way until the first neighbour update, which fixes shape and power at once. |
 | `setblock` of a powered lever does **not** update the mounting block's neighbours | `lever_setblock` | Dust beside the block stays at 0. Drive inputs by placing a `redstone_block`, never by editing a lever's state. |
+| A lever that is already powered strongly powers the block it stands on; removing it updates that block's neighbours | `lever_mount` | Placed with updates, the dust on both sides of the mounting block reads 15 at tick 0 (what the input tile relies on). `setblock air` on the powered lever drops both to 0 on the same tick, with nothing pending: the lever's removal, unlike its placement, updates the mounting block's neighbours. |
 | `setblock minecraft:redstone_wire` with no properties gives a **dot**, not a cross | probe | The default block state is all `none`. (A player placing dust gets a cross; a command does not.) |
 | Dust and torches can sit on glass | probe | Both survive a neighbour update. |
 | `/tick step N` advances the game clock by exactly N | every run (asserted on every step) | Steps run asynchronously at the tick rate; `tick rate 10000` makes them near-instant. `/tick query` says "frozen" throughout, so completion is detected by polling `time query gametime`. |
@@ -116,6 +117,23 @@ Every tile variant was run in the game with drivers and readers on its ports (`r
 | A signal steps down onto a lower wire only if the block beside the lower wire (the upper wire's support) conducts | the crossing's bridge | Glass steps: no signal; stone steps: signal. Consistent with `glass_down`/`stone_down` in stage 1. |
 | A repeater works on glass and is locked at placement if a powered repeater already points into its side | repeater tile, latches | yes |
 
+## Flip-flops (stage 8)
+
+Both candidate tiles were swept in the game and in the simulator (`redfab characterize`): the data edge moved one tick at a time against the clock edge, in both directions, at clock periods 16, 12 and 8, plus clock pulses of 2 to 8 ticks. The sweep traces are among the tile fixtures `tiles-vanilla` records, and the figures below are what the simulator reads off them, which must equal the `timing` line of the tile (`cells/dff.tile`, `cells/dff_alt.tile`). Game ticks after the active clock edge:
+
+| | `dff` (master/slave locked repeaters, falling edge) | `dff_alt` (pulse latch, rising edge) |
+|---|---|---|
+| Captures data changes up to | +1 | +7 |
+| Ignores them from | +3 | +9 |
+| Setup / hold (with 2 ticks of margin) | 1 / 5 | −5 / 11 |
+| Clock to Q | 8 | 8 |
+| Minimum high / low | 4 / 4 | 4 / 2 |
+| Minimum period | 12 | 16 |
+| Ordering-dependent trials | the capture boundary (+2) only | +8 only |
+
+`dff` is the tile every clocked design uses. The wiki's derivation for this design (DESIGN.md Appendix A) said clock-to-Q 6; measured, it is 8. A clock of period 8 burns the tile's torches out (eight turn-offs in sixty ticks), which is why the sweeps at period 8 end in a long quiet time.
+
 ## Still unmeasured
 
-- Setup, hold and clock-to-output of the flip-flop designs (stage 8).
+- A lever flipped by a player. Every input in the harness, the page and the live backend is driven by placing a `redstone_block` at the probe position, because `setblock` of a powered lever updates nothing (`lever_setblock`). `lever_mount` shows a powered lever strongly powering its mounting block (dust beside it reads 15) and its removal updating the neighbours; the flip itself, which in the game's code does the same neighbour update as the removal, has no recording.
+- Litematica paste of `world.nbt`. No Minecraft client has run in this project; see README.

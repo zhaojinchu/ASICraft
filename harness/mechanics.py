@@ -167,6 +167,17 @@ def fixtures() -> list[Fixture]:
     b.at(2, (1, 2, 0), "minecraft:lever[face=floor,facing=north,powered=true]")
     out.append(b.build())
 
+    # -- a lever that arrives already powered, placed with updates (what the input tile relies on)
+    b = Build("lever_mount", "A powered lever on a stone block with dust on both sides of the block, placed with updates. "
+              "Wiki: a lever strongly powers the block it stands on, so the dust beside that block reads 15; "
+              "removing the powered lever updates the block's neighbours and the dust goes back to 0.", 6)
+    b.floor(0, 0, 2, 0).put((1, 1, 0), S).put((1, 2, 0), "minecraft:lever[face=floor,facing=north,powered=true]")
+    b.put((0, 1, 0), D).put((2, 1, 0), D)
+    b.at(2, (1, 2, 0), AIR)
+    b.expects(0, (1, 2, 0), "minecraft:lever[powered=true]").expects(0, (0, 1, 0), f"{D}[power=15]").expects(0, (2, 1, 0), f"{D}[power=15]")
+    b.expects(1, (2, 1, 0), f"{D}[power=15]").expects(2, (0, 1, 0), f"{D}[power=0]").expects(2, (2, 1, 0), f"{D}[power=0]")
+    out.append(b.stable(2).build())
+
     # -- dust connectivity across heights
     def diag(name: str, doc: str, above_lower: str | None, expect_power: int) -> Fixture:
         b = Build(name, doc, 2)

@@ -1,7 +1,10 @@
 """Trace and fixture files: round trips, diffs, expectation checks."""
 
 from harness.blockstate import BlockState
-from harness.trace import Expectation, Fixture, Trace, check_expectations, diff_states, traces_equal
+import pytest
+
+from harness.trace import (Expectation, Fixture, ReplaySummary, Trace, check_expectations, diff_states,
+                           first_trace_difference, parse_replay_summary)
 
 
 def _state(s):
@@ -39,13 +42,23 @@ def test_trace_json_round_trip_and_state_at():
     assert trace.pending_at(3)[0].delay == 2 and trace.pending_at(4) == []
 
 
-def test_traces_equal_ignores_pending_when_one_side_lacks_it():
+def test_trace_difference_ignores_pending_when_asked_and_reports_a_changed_block():
     a = {"format": "redfab-trace/1", "fixture": "t", "source": {"kind": "sim"}, "size": [1, 1, 1],
          "initial": {"0,0,0": "minecraft:stone"}, "pending0": [], "ticks": []}
     b = dict(a, source={"kind": "vanilla"})
     b["ticks"] = [{"tick": 1, "changes": {}, "pending": [{"pos": "0,0,0", "block": "minecraft:stone", "delay": 1, "priority": 0}]}]
-    assert traces_equal(Trace.from_json(a, ticks=2), Trace.from_json(b, ticks=2), compare_pending=False)
-    assert not traces_equal(Trace.from_json(a, ticks=2), Trace.from_json(b, ticks=2), compare_pending=True)
+    assert first_trace_difference(Trace.from_json(a, ticks=2), Trace.from_json(b, ticks=2), compare_pending=False) is None
+    assert "pending" in first_trace_difference(Trace.from_json(a, ticks=2), Trace.from_json(b, ticks=2), compare_pending=True)
+    # A block that differs is reported with its tick, which is what the game-versus-recording comparison rests on.
+    c = dict(a, ticks=[{"tick": 1, "changes": {"0,0,0": "minecraft:glass"}}])
+    assert first_trace_difference(Trace.from_json(a, ticks=2), Trace.from_json(c, ticks=2)).startswith("tick 1:")
+
+
+def test_replay_summary_is_parsed_and_its_absence_is_an_error():
+    line = "build/tiles: 180 matched (2 of them only with a different order of same-tick events), 0 mismatched, 1 skipped (unsupported blocks)\n"
+    assert parse_replay_summary("noise\n" + line) == ReplaySummary(matched=180, racy=2, mismatched=0, skipped=1)
+    with pytest.raises(ValueError):
+        parse_replay_summary("thread 'main' panicked")
 
 
 def test_expectations_pass_and_fail():

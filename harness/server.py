@@ -6,6 +6,7 @@ between runs. The server only listens on 127.0.0.1.
 
 import atexit
 import json
+import re
 import secrets
 import shutil
 import socket
@@ -16,6 +17,54 @@ from pathlib import Path
 from .rcon import Rcon, RconError
 
 ROOT = Path(__file__).resolve().parent.parent
+# `tools/setup.sh` links this to the JDK's java binary, whatever the JDK's layout on this platform.
+JAVA = ROOT / ".tools" / "java"
+# Written by `tools/setup.sh --accept-eula`. No server starts without it.
+EULA_FILE = ROOT / ".tools" / "eula-accepted"
+EULA_URL = "https://aka.ms/MinecraftEULA"
+# The server configuration shared with the live backend (server/minecraft.mjs):
+# the gamerules, the server.properties defaults and the JVM arguments.
+PROFILE_FILE = ROOT / "harness" / "data" / "server_profile.json"
+MOTD = "redfab test server"
+
+
+class EulaNotAccepted(RuntimeError):
+    pass
+
+
+def require_eula(path: Path = EULA_FILE) -> None:
+    """Running the Minecraft server binds whoever runs it to Mojang's EULA, so the
+    harness only starts one after that person has accepted it, which
+    `tools/setup.sh --accept-eula` records in `path`."""
+    if not path.is_file():
+        raise EulaNotAccepted(
+            f"the Minecraft server's EULA ({EULA_URL}) has not been accepted on this machine; "
+            f"read it, then run `tools/setup.sh --accept-eula`, which records the acceptance in {path}"
+        )
+
+
+def seed_argument(text: str) -> int:
+    """An argparse type for `--seed`: an integer, or `random` for one from the clock
+    (printed by the caller so a failure can be reproduced)."""
+    if text == "random":
+        return int(time.time())
+    return int(text)
+
+
+def stray_server_pattern(run_dir: Path) -> str:
+    """The `pkill -f` pattern (an extended regex) for a server started in `run_dir`.
+    Anchored after the directory, so `mechanics-vanilla` does not also match
+    `mechanics-vanilla-rx`."""
+    escaped = re.sub(r"[.^$*+?()\[\]{}|\\]", lambda m: "\\" + m.group(0), str(run_dir))
+    return rf"-Dredfab\.run={escaped}( |$)"
+
+
+def kill_stray_server(run_dir: Path) -> subprocess.CompletedProcess:
+    """Kills any server still running in `run_dir`. The pattern starts with a dash,
+    which BSD pkill would read as options; `--` ends them (macOS printed its usage
+    and killed nothing before)."""
+    return subprocess.run(["pkill", "-9", "-f", "--", stray_server_pattern(run_dir)], check=False,
+                          capture_output=True, text=True)
 
 
 def cargo() -> str:
@@ -25,6 +74,38 @@ def cargo() -> str:
         return found
     home = Path.home() / ".cargo" / "bin" / "cargo"
     return str(home) if home.exists() else "cargo"
+
+
+def redfab(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+    """Runs the redfab CLI from the checkout (`cargo run -p redfab-cli`) with its output
+    captured; with `check`, a failure raises CalledProcessError."""
+    return subprocess.run([cargo(), "run", "-q", "-p", "redfab-cli", "--", *args], cwd=ROOT, check=check,
+                          capture_output=True, text=True)
+
+
+def read_profile() -> dict:
+    """The shared server profile (harness/data/server_profile.json)."""
+    return json.loads(PROFILE_FILE.read_text())
+
+
+def server_properties(game_port: int, rcon_port: int, password: str, *,
+                      empty_world: bool = True, redstone_experiments: bool = False,
+                      extra: dict[str, str] | None = None) -> dict[str, str]:
+    """What the harness writes to server.properties: the profile's defaults, this
+    run's ports and password, and the harness's own differences on top: its motd,
+    no void preset when the world is to have ground, Mojang's experimental
+    redstone pack when asked for, then the caller's `extra`."""
+    properties = dict(read_profile()["properties"])
+    properties["server-port"] = str(game_port)
+    properties["rcon.port"] = str(rcon_port)
+    properties["rcon.password"] = password
+    properties["motd"] = MOTD
+    if not empty_world:
+        del properties["generator-settings"]
+    if redstone_experiments:
+        properties["initial-enabled-packs"] = "vanilla,redstone_experiments"
+    properties.update(extra or {})
+    return properties
 
 
 def read_versions() -> dict[str, str]:
@@ -70,7 +151,7 @@ class VanillaServer:
         self.observer_port = _free_port() if modded else 0
         self.mc_version = pins["MC_VERSION"]
         self.run_dir = ROOT / "build" / "mc" / name
-        self.java = ROOT / ".tools" / "jdk" / "Contents" / "Home" / "bin" / "java"
+        self.java = JAVA
         self.jar = ROOT / ".tools" / "mc" / f"server-{self.mc_version}.jar"
         self.game_port = _free_port()
         self.rcon_port = _free_port()
@@ -81,38 +162,22 @@ class VanillaServer:
         self.startup_seconds = 0.0
 
     def start(self, timeout: float = 240.0) -> None:
+        require_eula()
+        if not self.java.exists():
+            raise RuntimeError(f"{self.java} is missing; run tools/setup.sh")
         # If an earlier harness process was killed hard, its server may still be
         # running in this run directory. Stop it before reusing the directory.
-        subprocess.run(["pkill", "-9", "-f", f"redfab.run={self.run_dir}"], check=False)
+        kill_stray_server(self.run_dir)
         if self.run_dir.exists():
             shutil.rmtree(self.run_dir)
         self.run_dir.mkdir(parents=True)
-        # The project owner accepted the Minecraft EULA for local testing on 2026-10-01.
+        # Accepted by whoever ran `tools/setup.sh --accept-eula` (see require_eula).
         (self.run_dir / "eula.txt").write_text("eula=true\n")
-        properties = {
-            "server-ip": "127.0.0.1",
-            "server-port": str(self.game_port),
-            "enable-rcon": "true",
-            "rcon.port": str(self.rcon_port),
-            "rcon.password": self._password,
-            "broadcast-rcon-to-ops": "false",
-            "level-type": "minecraft\\:flat",
-            "generate-structures": "false",
-            # The server would pause ticking 60 s after the last player left; we never have players.
-            "pause-when-empty-seconds": "-1",
-            "spawn-protection": "0",
-            "view-distance": "4",
-            "simulation-distance": "4",
-            "max-tick-time": "-1",
-            "difficulty": "peaceful",
-            "motd": "redfab test server",
-        }
-        if self.empty_world:
-            preset = json.dumps({"layers": [], "biome": "minecraft:the_void"})
-            properties["generator-settings"] = preset.replace(":", "\\:")
-        if self.redstone_experiments:
-            properties["initial-enabled-packs"] = "vanilla,redstone_experiments"
-        properties.update(self._extra_properties)
+        properties = server_properties(
+            self.game_port, self.rcon_port, self._password,
+            empty_world=self.empty_world, redstone_experiments=self.redstone_experiments,
+            extra=self._extra_properties,
+        )
         (self.run_dir / "server.properties").write_text(
             "".join(f"{key}={value}\n" for key, value in properties.items())
         )
@@ -130,24 +195,11 @@ class VanillaServer:
             if not mod.exists():
                 raise RuntimeError(f"{mod} is missing; run tools/build_mod.sh")
             shutil.copy(mod, self.run_dir / "mods")
-            launch = [f"-Dredfab.observer.port={self.observer_port}", "-jar", str(self.run_dir / "fabric-server-launch.jar")]
-        else:
-            launch = ["-jar", str(self.jar)]
 
         started = time.monotonic()
         log = open(self.run_dir / "server.log", "wb")
         self._proc = subprocess.Popen(
-            [
-                str(self.java),
-                "-Xms512M",
-                "-Xmx2G",
-                # Unpack the bundled libraries once, not into every run directory.
-                f"-DbundlerRepoDir={ROOT / '.tools' / 'mc' / 'bundle'}",
-                # Marker so stray processes can be found by run directory.
-                f"-Dredfab.run={self.run_dir}",
-                *launch,
-                "--nogui",
-            ],
+            self.launch_command(),
             cwd=self.run_dir,
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -167,6 +219,23 @@ class VanillaServer:
             time.sleep(0.25)
         self._kill()
         raise TimeoutError(f"server did not open RCON within {timeout}s; see {self.run_dir / 'server.log'}")
+
+    def launch_command(self) -> list[str]:
+        """The server's command line: the profile's JVM arguments, then this run's markers."""
+        if self.modded:
+            launch = [f"-Dredfab.observer.port={self.observer_port}", "-jar", str(self.run_dir / "fabric-server-launch.jar")]
+        else:
+            launch = ["-jar", str(self.jar)]
+        return [
+            str(self.java),
+            *read_profile()["jvm_args"],
+            # Unpack the bundled libraries once, not into every run directory.
+            f"-DbundlerRepoDir={ROOT / '.tools' / 'mc' / 'bundle'}",
+            # Marker so stray processes can be found by run directory.
+            f"-Dredfab.run={self.run_dir}",
+            *launch,
+            "--nogui",
+        ]
 
     def command(self, text: str) -> str:
         assert self.rcon is not None, "server not started"

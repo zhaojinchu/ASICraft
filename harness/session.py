@@ -11,26 +11,14 @@ import time
 
 from .anvil import Box, PendingTick, SnapshotReader, StaleSnapshot
 from .blockstate import BlockState, Pos
-from .server import VanillaServer
+from .server import VanillaServer, read_profile
 
 # Values that keep the world inert: nothing spawns, nothing grows, time and
-# weather stand still, broken blocks drop nothing, and admin commands stay out of the log.
-GAMERULES = {
-    "random_tick_speed": "0",
-    "advance_time": "false",
-    "advance_weather": "false",
-    "spawn_mobs": "false",
-    "spawn_monsters": "false",
-    "spawn_phantoms": "false",
-    "spawn_patrols": "false",
-    "spawn_wandering_traders": "false",
-    "spawn_wardens": "false",
-    "mob_griefing": "false",
-    "block_drops": "false",
-    "entity_drops": "false",
-    "log_admin_commands": "false",
-    "fire_spread_radius_around_player": "0",
-}
+# weather stand still, broken blocks drop nothing, and admin commands stay out
+# of the log. Shared with the live backend through harness/data/server_profile.json;
+# the backend also raises max_block_modifications for its plot clears, which the
+# harness does not need (its fills stay under the game's default limit).
+GAMERULES: dict[str, str] = read_profile()["gamerules"]
 
 # Fastest rate the game allows; stepping then takes ~0.1 ms per tick instead of 50 ms.
 TICK_RATE = 10000

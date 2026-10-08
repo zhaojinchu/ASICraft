@@ -5,7 +5,6 @@ The two implementations share no code, so agreement means the bytes are right.
 
 import gzip
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -15,7 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from harness.blockstate import BlockState, format_pos  # noqa: E402
 from harness.nbt import read_nbt  # noqa: E402
-from harness.server import read_versions  # noqa: E402
+from harness.server import read_versions, redfab  # noqa: E402
 
 TRACES = [
     "fixtures/mechanics/torch_delay.vanilla.trace.json",
@@ -23,10 +22,6 @@ TRACES = [
     "fixtures/mechanics/diag_up_open.vanilla.trace.json",
     "fixtures/mechanics/plus_cross.vanilla.trace.json",
 ]
-
-
-def redfab(*args: str) -> None:
-    subprocess.run(["cargo", "run", "-q", "-p", "redfab-cli", "--", *args], cwd=ROOT, check=True)
 
 
 def read_structure(path: Path) -> tuple[list[int], dict[str, str], int]:

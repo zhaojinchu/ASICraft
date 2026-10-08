@@ -36,11 +36,6 @@ class PendingTick:
 
         return cls(parse_pos(data["pos"]), data["block"], int(data["delay"]), int(data["priority"]))
 
-    def translated(self, dx: int, dy: int, dz: int) -> PendingTick:
-        x, y, z = self.pos
-        return PendingTick((x + dx, y + dy, z + dz), self.block, self.delay, self.priority)
-
-
 def _in_box(pos: Pos, box: Box) -> bool:
     (x0, y0, z0), (x1, y1, z1) = box
     x, y, z = pos
@@ -90,11 +85,6 @@ def _bounding(boxes: list[Box]) -> Box:
 def read_region_blocks(path: Path, box: Box) -> tuple[dict[Pos, BlockState], list[PendingTick]]:
     """All non-air blocks and pending block ticks inside `box` from one region file."""
     return SnapshotReader(path.parent).read([box])
-
-
-def read_world_blocks(region_dir: Path, box: Box) -> tuple[dict[Pos, BlockState], list[PendingTick]]:
-    """Same as read_region_blocks across every region file the box touches."""
-    return SnapshotReader(region_dir).read([box])
 
 
 class StaleSnapshot(Exception):
@@ -185,4 +175,4 @@ def _decompress(raw: bytes) -> bytes:
     raise ValueError(f"unsupported chunk compression {compression}")
 
 
-__all__ = ["AIR", "Box", "PendingTick", "SnapshotReader", "StaleSnapshot", "read_region_blocks", "read_world_blocks"]
+__all__ = ["AIR", "Box", "PendingTick", "SnapshotReader", "StaleSnapshot", "read_region_blocks"]
