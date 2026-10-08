@@ -1,8 +1,12 @@
 // Compiles submissions in a child process, one at a time, and kills a child
 // that runs past the time limit or grows past the memory limit. The queue is
-// bounded: beyond it, submissions are turned away at once.
+// bounded: beyond it, submissions are turned away at once. A source seen
+// before is answered from a cache keyed by its hash, so the examples cost
+// nothing after the first time and a repeated hostile source cannot hold the
+// compiler again.
 
 import { execFile, fork } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,9 +37,19 @@ async function residentBytes(pid) {
     });
 }
 
-export function createSandbox({ wasm, seconds, memoryMb, queue, testHooks = false, log = () => {} }) {
+export function createSandbox({ wasm, seconds, memoryMb, queue, cacheEntries = 32, testHooks = false, log = () => {} }) {
     let running = null;
     const waiting = [];
+    const cache = new Map(); // source hash -> { built } or { error }, in order of last use
+    const stats = { hits: 0, misses: 0 };
+
+    const keyOf = (request) => createHash('sha256').update(`${request.top}\0${request.name}\0${request.source}`).digest('hex');
+
+    function remember(key, entry) {
+        cache.delete(key);
+        cache.set(key, entry);
+        while (cache.size > cacheEntries) cache.delete(cache.keys().next().value);
+    }
 
     function next() {
         if (running || !waiting.length) return;
@@ -49,8 +63,11 @@ export function createSandbox({ wasm, seconds, memoryMb, queue, testHooks = fals
     function run(request) {
         return new Promise((resolve, reject) => {
             const started = Date.now();
+            // The child sees untrusted source, so it gets only the environment it needs.
+            const env = { REDFAB_WASM: wasm, REDFAB_TEST_HOOKS: testHooks ? '1' : '' };
+            for (const name of ['PATH', 'HOME', 'TMPDIR', 'LANG', 'LC_ALL']) if (process.env[name] !== undefined) env[name] = process.env[name];
             const proc = fork(child, [], {
-                env: { ...process.env, REDFAB_WASM: wasm, REDFAB_TEST_HOOKS: testHooks ? '1' : '' },
+                env,
                 stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
                 serialization: 'json',
             });
@@ -69,7 +86,7 @@ export function createSandbox({ wasm, seconds, memoryMb, queue, testHooks = fals
             };
             const clock = setTimeout(() => {
                 log(`compile of ${request.name}: stopped after ${seconds} s`);
-                finish(reject, new SandboxError(`compiling took longer than ${seconds} s; stopped`));
+                finish(reject, new SandboxError(`compiling took longer than ${seconds} s; stopped. Try a smaller design (about 100 cells compile in time)`));
             }, seconds * 1000);
             const meter = setInterval(async () => {
                 const bytes = await residentBytes(proc.pid);
@@ -103,18 +120,36 @@ export function createSandbox({ wasm, seconds, memoryMb, queue, testHooks = fals
     }
 
     return {
-        /// Compiles a submission. Rejects with a SandboxError.
+        /// Compiles a submission, or answers from the cache. Rejects with a SandboxError.
         compile(request) {
+            const key = keyOf(request);
+            const known = cache.get(key);
+            if (known) {
+                stats.hits += 1;
+                remember(key, known);
+                return known.error ? Promise.reject(known.error) : Promise.resolve({ ...known.built });
+            }
             if (waiting.length >= queue) {
                 return Promise.reject(new SandboxError('the compiler is busy; try again in a moment', 429));
             }
+            stats.misses += 1;
             return new Promise((resolve, reject) => {
                 waiting.push({ request, resolve, reject });
                 next();
+            }).then((built) => {
+                remember(key, { built });
+                return { ...built };
+            }, (err) => {
+                // A refusal of the source is as good next time; a crash or a busy compiler is not.
+                if (err instanceof SandboxError && err.status === 400) remember(key, { error: err });
+                throw err;
             });
         },
         get busy() {
             return (running ? 1 : 0) + waiting.length;
+        },
+        get cache() {
+            return { entries: cache.size, hits: stats.hits, misses: stats.misses };
         },
     };
 }

@@ -2,10 +2,16 @@
 // harness does it (harness/server.py, harness/session.py), and the world the
 // backend talks to: placing structure files, setting probe blocks, clearing
 // plots, keeping chunks loaded, reading the tick time, and the mod's stream.
+//
+// Two RCON connections: levers, placements and clears share one; the clock
+// edges of every plot go over the other, so a backlog of lever commands never
+// delays an edge. Both re-dial when they drop. The stream reconnects on its
+// own with a backoff, and says so, because what the server did meanwhile was
+// missed. `health()` reports all of that for /api/status.
 
 import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer as createNetServer, createConnection } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
@@ -14,23 +20,59 @@ import { Rcon } from './rcon.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-const GAMERULES = {
-    random_tick_speed: '0',
-    advance_time: 'false',
-    advance_weather: 'false',
-    spawn_mobs: 'false',
-    spawn_monsters: 'false',
-    spawn_phantoms: 'false',
-    spawn_patrols: 'false',
-    spawn_wandering_traders: 'false',
-    spawn_wardens: 'false',
-    mob_griefing: 'false',
-    block_drops: 'false',
-    entity_drops: 'false',
-    log_admin_commands: 'false',
-    fire_spread_radius_around_player: '0',
-};
+export const EULA_URL = 'https://aka.ms/MinecraftEULA';
+// Written by `tools/setup.sh --accept-eula`; the harness looks for the same file.
+export const EULA_FILE = join(root, '.tools/eula-accepted');
+
+// The server configuration shared with the harness: gamerules, server.properties
+// defaults and JVM arguments. The backend's own differences go on top, below.
+export const PROFILE_FILE = join(root, 'harness/data/server_profile.json');
+export const PROFILE = JSON.parse(readFileSync(PROFILE_FILE, 'utf8'));
+export const GAMERULES = PROFILE.gamerules;
+export const MOTD = 'redfab live playground';
 const FILL_LIMIT = 32_768; // blocks per fill command, the game's default limit
+
+/// What the backend writes to server.properties: the profile's defaults, this
+/// run's ports and password, its own motd, and online-mode off (the live
+/// server's player policy is a stage 13 decision; the harness never has players).
+export function serverProperties({ gamePort, rconPort, password }) {
+    return {
+        ...PROFILE.properties,
+        'server-port': String(gamePort),
+        'rcon.port': String(rconPort),
+        'rcon.password': password,
+        'online-mode': 'false',
+        'motd': MOTD,
+    };
+}
+
+/// The server's command line after the Java binary: the profile's JVM arguments, then this run's markers.
+export function javaArgs({ runDir, observerPort }) {
+    return [
+        ...PROFILE.jvm_args,
+        `-DbundlerRepoDir=${join(root, '.tools/mc/bundle')}`,
+        `-Dredfab.run=${runDir}`,
+        `-Dredfab.observer.port=${observerPort}`,
+        '-jar', join(runDir, 'fabric-server-launch.jar'), '--nogui',
+    ];
+}
+
+/// Kills the server a backend that was killed left behind in `runDir`, by its
+/// pid file, before the directory is pulled from under it. Returns the pid
+/// killed, or null when there was nothing to kill.
+export function killLeftover(runDir, log = () => {}) {
+    const pidFile = join(runDir, 'server.pid');
+    if (!existsSync(pidFile)) return null;
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    if (!Number.isInteger(pid) || pid <= 1) return null;
+    try {
+        process.kill(pid, 'SIGKILL');
+    } catch {
+        return null; // already gone
+    }
+    log(`killed the server left behind in ${runDir} (pid ${pid})`);
+    return pid;
+}
 
 export function readVersions() {
     const pins = {};
@@ -39,6 +81,19 @@ export function readVersions() {
         if (m) pins[m[1]] = m[2].trim();
     }
     return pins;
+}
+
+/// The Java binary: `.tools/java`, which tools/setup.sh links to the JDK's
+/// java wherever the tarball put it, or the macOS JDK layout from before the link.
+export function javaPath() {
+    const linked = join(root, '.tools/java');
+    return existsSync(linked) ? linked : join(root, '.tools/jdk/Contents/Home/bin/java');
+}
+
+/// Throws unless whoever runs this machine has accepted the server's EULA.
+export function requireEula(file = EULA_FILE) {
+    if (existsSync(file)) return;
+    throw new Error(`the Minecraft server's EULA (${EULA_URL}) has not been accepted on this machine; read it, then run tools/setup.sh --accept-eula, which records the acceptance in ${file}`);
 }
 
 function freePort() {
@@ -69,38 +124,104 @@ function portOpen(port) {
 
 const sleep = (ms) => new Promise((ok) => setTimeout(ok, ms));
 
-/// Connects to the mod's stream and hands every message to `onMessage`; reconnects if it drops.
-function observe(port, onMessage, log) {
+/// Connects to the mod's stream and hands every message to `onMessage`. One
+/// reconnect loop at a time: a close only starts it when none is running, and
+/// a refused attempt waits longer each time, up to `maxDelay`. `onReconnect`
+/// runs after every reconnection but the first connection.
+export function observe(port, onMessage, { log = () => {}, onReconnect = () => {}, maxDelay = 5000, openTimeout = 60_000 } = {}) {
     let socket = null;
     let stopped = false;
-    const open = async () => {
-        for (let attempt = 0; !stopped; attempt++) {
-            try {
-                await new Promise((ok, bad) => {
-                    socket = new WebSocket(`ws://127.0.0.1:${port}/`);
-                    socket.onopen = ok;
-                    socket.onerror = () => bad(new Error('refused'));
-                    socket.onmessage = (e) => onMessage(JSON.parse(e.data));
-                    socket.onclose = () => {
-                        if (!stopped) {
-                            log('the observer stream closed; reconnecting');
-                            setTimeout(open, 500);
-                        }
-                    };
-                });
+    let loop = null;
+    let connections = 0;
+    let lastMessageAt = 0;
+    let attempts = 0;
+
+    const attempt = () => new Promise((ok, bad) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/`);
+        const refused = () => bad(new Error('refused'));
+        ws.onerror = () => {};
+        ws.onclose = refused;
+        ws.onmessage = (e) => {
+            lastMessageAt = Date.now();
+            onMessage(JSON.parse(e.data));
+        };
+        ws.onopen = () => {
+            if (stopped) {
+                ws.close();
+                refused();
                 return;
-            } catch {
-                if (attempt > 60) throw new Error(`no observer stream on port ${port}`);
-                await sleep(500);
             }
-        }
+            socket = ws;
+            ws.onclose = () => {
+                if (socket === ws) socket = null;
+                if (stopped) return;
+                log('the observer stream closed; reconnecting');
+                reconnect();
+            };
+            ok();
+        };
+    });
+
+    /// Tries until connected or `deadline`; concurrent callers share the one loop.
+    function connect(deadline) {
+        if (loop) return loop;
+        loop = (async () => {
+            let delay = 250;
+            for (;;) {
+                if (stopped) throw new Error('stopped');
+                attempts += 1;
+                try {
+                    await attempt();
+                    connections += 1;
+                    return;
+                } catch {
+                    if (deadline !== null && Date.now() > deadline) throw new Error(`no observer stream on port ${port}`);
+                    await sleep(delay);
+                    delay = Math.min(delay * 2, maxDelay);
+                }
+            }
+        })().finally(() => {
+            loop = null;
+        });
+        return loop;
+    }
+
+    function reconnect() {
+        connect(null).then(() => {
+            log(`the observer stream is back (connection ${connections})`);
+            onReconnect();
+        }, (err) => log(`the observer stream: ${err.message}`));
+    }
+
+    return {
+        open: () => connect(Date.now() + openTimeout),
+        close() {
+            stopped = true;
+            socket?.close();
+        },
+        send(text) {
+            if (!socket) throw new Error('the observer stream is down');
+            socket.send(text);
+        },
+        get up() {
+            return socket !== null;
+        },
+        get age() {
+            return lastMessageAt ? Date.now() - lastMessageAt : null;
+        },
+        get reconnects() {
+            return Math.max(0, connections - 1);
+        },
+        get attempts() {
+            return attempts;
+        },
     };
-    return { open, close: () => { stopped = true; socket?.close(); } };
 }
 
 export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_000 }) {
     const pins = readVersions();
-    const java = join(root, '.tools/jdk/Contents/Home/bin/java');
+    requireEula();
+    const java = javaPath();
     const jar = join(root, '.tools/mc', `server-${pins.MC_VERSION}.jar`);
     const fabric = join(root, '.tools/fabric');
     const mod = join(root, 'build/mod/redfab-observer.jar');
@@ -110,30 +231,13 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
     const [gamePort, rconPort, observerPort] = [await freePort(), await freePort(), await freePort()];
     const password = randomBytes(16).toString('hex');
 
+    // A server left behind by a backend that was killed would have the run directory pulled from under it.
+    killLeftover(runDir, log);
     rmSync(runDir, { recursive: true, force: true });
     mkdirSync(runDir, { recursive: true });
-    // The project owner accepted the Minecraft EULA for local testing on 2026-10-01.
+    // Accepted by whoever ran `tools/setup.sh --accept-eula` (see requireEula).
     writeFileSync(join(runDir, 'eula.txt'), 'eula=true\n');
-    const preset = JSON.stringify({ layers: [], biome: 'minecraft:the_void' }).replaceAll(':', '\\:');
-    const properties = {
-        'server-ip': '127.0.0.1',
-        'server-port': String(gamePort),
-        'enable-rcon': 'true',
-        'rcon.port': String(rconPort),
-        'rcon.password': password,
-        'broadcast-rcon-to-ops': 'false',
-        'level-type': 'minecraft\\:flat',
-        'generator-settings': preset,
-        'generate-structures': 'false',
-        'pause-when-empty-seconds': '-1',
-        'spawn-protection': '0',
-        'view-distance': '4',
-        'simulation-distance': '4',
-        'max-tick-time': '-1',
-        'difficulty': 'peaceful',
-        'online-mode': 'false',
-        'motd': 'redfab live playground',
-    };
+    const properties = serverProperties({ gamePort, rconPort, password });
     writeFileSync(join(runDir, 'server.properties'), Object.entries(properties).map(([k, v]) => `${k}=${v}\n`).join(''));
     for (const item of ['libraries', '.fabric', 'versions']) cpSync(join(fabric, item), join(runDir, item), { recursive: true, verbatimSymlinks: true });
     cpSync(join(fabric, 'fabric-server-launch.jar'), join(runDir, 'fabric-server-launch.jar'));
@@ -142,17 +246,21 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
     cpSync(mod, join(runDir, 'mods/redfab-observer.jar'));
 
     const logFile = openSync(join(runDir, 'server.log'), 'w');
-    const proc = spawn(java, [
-        '-Xms512M', '-Xmx2G',
-        `-DbundlerRepoDir=${join(root, '.tools/mc/bundle')}`,
-        `-Dredfab.run=${runDir}`,
-        `-Dredfab.observer.port=${observerPort}`,
-        '-jar', join(runDir, 'fabric-server-launch.jar'), '--nogui',
-    ], { cwd: runDir, stdio: ['ignore', logFile, logFile], detached: true });
+    const proc = spawn(java, javaArgs({ runDir, observerPort }), { cwd: runDir, stdio: ['ignore', logFile, logFile], detached: true });
+    writeFileSync(join(runDir, 'server.pid'), `${proc.pid}\n`);
     const onExit = () => {
         if (proc.exitCode === null) proc.kill('SIGKILL');
     };
     process.on('exit', onExit);
+    // Whoever runs the backend hears when the game dies, expectedly or not.
+    let exited = null;
+    let stopping = false;
+    const exitListeners = [];
+    proc.on('exit', (code, signal) => {
+        exited = { code, signal, expected: stopping };
+        if (!stopping) log(`Minecraft exited unexpectedly (${signal || code}); see ${join(runDir, 'server.log')}`);
+        for (const cb of exitListeners) cb(exited);
+    });
     const started = Date.now();
     log(`starting Minecraft ${pins.MC_VERSION} with the observer mod in ${runDir}`);
     while (!(await portOpen(rconPort))) {
@@ -163,20 +271,29 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
         }
         await sleep(250);
     }
-    const rcon = await Rcon.connect('127.0.0.1', rconPort, password);
+    // One RCON connection: the server answers concurrent connections through
+    // one shared buffer, so a second one gets the first one's replies (see
+    // rcon.mjs). The clock lane jumps the queue instead of having its own socket.
+    const rcon = await Rcon.connect('127.0.0.1', rconPort, password, { log });
     log(`server up in ${((Date.now() - started) / 1000).toFixed(1)} s`);
 
     // The stream.
     const listeners = [];
+    const reconnectListeners = [];
     let tick = null;
+    let forgotten = 0;
     const stream = observe(observerPort, (message) => {
         if (message.hello !== undefined) {
             tick = message.tick;
             return;
         }
+        if (message.forgot !== undefined) {
+            forgotten += 1;
+            return;
+        }
         tick = message.tick;
         for (const cb of listeners) cb(message);
-    }, log);
+    }, { log, onReconnect: () => reconnectListeners.forEach((cb) => cb()) });
     await stream.open();
 
     // The world's rules: nothing moves but redstone, and commands may change big boxes.
@@ -184,9 +301,10 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
         const reply = await rcon.command(`gamerule ${rule} ${value}`);
         if (!reply.includes('is now set to')) throw new Error(`gamerule ${rule}: ${reply}`);
     }
-    const limitReply = await rcon.command('gamerule max_block_modifications 1000000');
-    const bigFills = limitReply.includes('is now set to');
-    if (!bigFills) log(`fills stay under ${FILL_LIMIT} blocks (${limitReply.trim()})`);
+    // Plot clears are big fills; the harness never fills past the game's default, so this is the backend's alone.
+    const limitReply = await rcon.command(`gamerule max_block_modifications ${PROFILE.max_block_modifications}`);
+    const fillLimit = limitReply.includes('is now set to') ? PROFILE.max_block_modifications : FILL_LIMIT;
+    if (fillLimit === FILL_LIMIT) log(`fills stay under ${FILL_LIMIT} blocks (${limitReply.trim()})`);
     const query = await rcon.command('tick query');
     if (!/running normally/i.test(query)) log(`tick query: ${query.trim()}`);
 
@@ -199,6 +317,9 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
         },
         onBatch(cb) {
             listeners.push(cb);
+        },
+        onStreamReconnect(cb) {
+            reconnectListeners.push(cb);
         },
         command: (text) => rcon.command(text),
         async forceload([[x0, , z0], [x1, , z1]]) {
@@ -217,13 +338,22 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
             const reply = await rcon.command(`place template redfab:${name} ${x} ${y} ${z} none none 1.0 0 strict`);
             if (!reply.startsWith('Loaded template')) throw new Error(`place template: ${reply}`);
         },
-        async setblock([x, y, z], state) {
-            const reply = await rcon.command(`setblock ${x} ${y} ${z} ${state}`);
+        /// Drops a placed template from the game's cache (the mod does it) and from disk.
+        async forget(name) {
+            await rm(join(structures, `${name}.nbt`), { force: true });
+            stream.send(JSON.stringify({ forget: `redfab:${name}` }));
+        },
+        get forgotten() {
+            return forgotten;
+        },
+        async setblock([x, y, z], state, { lane = 'levers' } = {}) {
+            const reply = await rcon.command(`setblock ${x} ${y} ${z} ${state}`, { urgent: lane === 'clock' });
             if (!reply.startsWith('Changed the block') && !reply.startsWith('Could not set the block')) throw new Error(`setblock: ${reply}`);
         },
         async clear([[x0, y0, z0], [x1, y1, z1]]) {
+            // In strips of rows that stay under the fill limit: a full 512 by 512 plot is more than one fill even with the raised limit.
             const layer = (x1 - x0 + 1) * (y1 - y0 + 1);
-            const rows = bigFills ? z1 - z0 + 1 : Math.max(1, Math.floor(FILL_LIMIT / layer));
+            const rows = Math.max(1, Math.floor(fillLimit / layer));
             for (let z = z0; z <= z1; z += rows) {
                 const zEnd = Math.min(z1, z + rows - 1);
                 const reply = await rcon.command(`fill ${x0} ${y0} ${z} ${x1} ${y1} ${zEnd} minecraft:air`);
@@ -237,18 +367,40 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
             if (!avg) return { avg_ms: null, p95_ms: null, raw: reply.trim() };
             return { avg_ms: Number(avg[1]), p95_ms: p95 ? Number(p95[1]) : null };
         },
+        /// Whether the game, its RCON and the stream are there right now.
+        health() {
+            return {
+                running: proc.exitCode === null && exited === null,
+                rcon_up: rcon.up,
+                rcon_reconnects: Math.max(0, rcon.reconnects),
+                stream_up: stream.up,
+                stream_age_ms: stream.age,
+                stream_reconnects: stream.reconnects,
+                forgotten,
+            };
+        },
     };
 
     return {
         world,
         runDir,
+        proc,
         source: { kind: 'live', mc_version: pins.MC_VERSION, jar_sha1: pins.MC_SERVER_SHA1, redstone_experiments: false },
+        /// `cb` runs when the Java process exits, with {code, signal, expected}.
+        onExit(cb) {
+            if (exited) cb(exited);
+            else exitListeners.push(cb);
+        },
+        get exited() {
+            return exited;
+        },
         async close() {
+            stopping = true;
             stream.close();
             try {
                 await rcon.command('stop');
             } catch {
-                // the connection drops as the server stops
+                // the connection drops as the server stops, or the server is already gone
             }
             rcon.close();
             const deadline = Date.now() + 60_000;
