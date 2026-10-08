@@ -361,6 +361,24 @@ wasm_identical() {
     node tools/wasm_build_check.mjs $DESIGNS
 }
 
+# No shipped design may get bigger or slower than tests/baselines/area.json says: tiles,
+# footprint, chunks, routing columns, repeaters, settle time, hold fix rounds and the two
+# ratios, plus the input spacing of combinational designs and the period, skew, input
+# window and hold slack of clocked ones (harness/area_check.py says how each is read). A
+# deliberate regression is an edit of the baseline in the same commit, named in its
+# message. The negative control: a copy of the baseline claiming one repeater fewer for
+# a design must fail naming that design.
+area_period_of() {
+    local control=$1; shift
+    uv run --frozen python -m harness.area_check "$@" &&
+    uv run --frozen python -m harness.area_check --control $control build/check/area-control-$control.json &&
+    refused_with "$control: repeaters" \
+        uv run --frozen python -m harness.area_check --baseline build/check/area-control-$control.json $control
+}
+area_period() {
+    area_period_of adder8 $DESIGNS $CAPACITY_DESIGNS
+}
+
 # In the game, at three placements and in both redstone modes: outputs equal
 # Verilator's (every input combination up to 32, a sample beyond that), the recorded
 # traces equal the simulator's, a strictly placed build does not move, and a normally
@@ -385,6 +403,7 @@ run equiv-negative      equiv_negative
 run sim-vs-verilator    sim_vs_verilator
 run lvs-negative        lvs_negative
 run wasm-identical      wasm_identical
+run area-period         area_period
 if [ $VANILLA = 1 ]; then
     run design-vanilla           design_vanilla
     run design-negative-vanilla  design_negative_vanilla
@@ -577,8 +596,14 @@ negatives_vanilla() {
     uv run --frozen python -m harness.design burnout-negative-vanilla not1
 }
 
+# The clocked rows of the area-period baseline (see stage 3), once these are built.
+area_period_clocked() {
+    area_period_of counter4 $CLOCKED
+}
+
 stage "stage 9: counter and state machine"
 run build-clocked       build_clocked
+run area-period-clocked area_period_clocked
 run cycles-sim          cycles_sim
 run hold-negative       hold_negative
 run burnout-negative    burnout_negative
