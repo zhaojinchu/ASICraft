@@ -12,7 +12,7 @@
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
-  body { display: grid; grid-template-rows: auto 1fr; }
+  body { display: grid; grid-template-rows: auto 1fr auto; }
   header { display: flex; align-items: center; gap: 16px; padding: 8px 16px; border-bottom: 1px solid var(--edge); background: var(--panel); }
   header h1 { font-size: 16px; margin: 0; font-weight: 600; }
   header .hint { color: var(--dim); font-size: 13px; }
@@ -23,11 +23,13 @@
   button:hover { background: #343a44; }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   button:disabled { opacity: .5; cursor: default; }
-  select { background: #2b3038; color: var(--text); border: 1px solid #3a4049; border-radius: 6px; padding: 6px; font: inherit; }
+  select, input[type="text"] { background: #2b3038; color: var(--text); border: 1px solid #3a4049; border-radius: 6px; padding: 6px; font: inherit; }
+  #top { width: 9em; font-family: ui-monospace, Menlo, monospace; }
+  #toolbar label { color: var(--dim); font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
   #source { width: 100%; height: 100%; resize: none; border: 0; padding: 10px; background: #0f1113; color: #f0f0f0;
             font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 4; outline: none; }
   #status { padding: 6px 10px; border-top: 1px solid var(--edge); border-bottom: 1px solid var(--edge); color: var(--dim); min-height: 30px; }
-  #status.ok { color: var(--ok); } #status.bad { color: var(--bad); }
+  #status.ok { color: var(--ok); } #status.bad { color: var(--bad); } #status.warn { color: #e8b23d; }
   #log { margin: 0; padding: 8px 10px; overflow: auto; font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--dim); white-space: pre-wrap; }
   #right { display: grid; grid-template-rows: auto 1fr; min-height: 0; }
   #panel { display: flex; gap: 16px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--edge); flex-wrap: wrap; min-height: 48px; }
@@ -35,6 +37,7 @@
   .pins .label { color: var(--dim); font-size: 12px; margin-right: 4px; }
   .lever { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a4049; background: #2b3038; }
   .lever[data-on="1"] { background: #5a2a1a; border-color: var(--accent); }
+  .lever[data-pending="1"] { border-style: dashed; border-color: var(--accent); }
   .lamp { display: inline-flex; align-items: center; gap: 6px; }
   .lamp .bulb { width: 14px; height: 14px; border-radius: 50%; background: #3a2a1a; border: 1px solid #5a4a2a; }
   .lamp[data-lit="1"] .bulb { background: #ffd34d; box-shadow: 0 0 8px #ffd34d; border-color: #ffe08a; }
@@ -42,6 +45,7 @@
   #view { position: relative; min-height: 0; }
   #view canvas { display: block; width: 100%; height: 100%; }
   #view .help { position: absolute; left: 10px; bottom: 8px; color: var(--dim); font-size: 12px; pointer-events: none; }
+  footer { padding: 6px 16px; border-top: 1px solid var(--edge); color: var(--dim); font-size: 11px; display: flex; gap: 16px; flex-wrap: wrap; justify-content: space-between; }
   @media (max-width: 800px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; } #left { border-right: 0; border-bottom: 1px solid var(--edge); } }
 </style>
 </head>
@@ -54,9 +58,12 @@
   <section id="left">
     <div id="toolbar">
       <select id="examples" aria-label="examples"></select>
-      <button id="compile" class="primary">Compile</button>
+      <label>top <input id="top" type="text" placeholder="auto" spellcheck="false" aria-label="top module" title="the top module's name; empty: the module named top, or the only one"></label>
+      <button id="compile" class="primary" title="Ctrl+Enter or Cmd+Enter">Compile</button>
       <button id="run" disabled>Pause</button>
-      <button id="download" disabled title="the structure file, for /place template or Litematica">world.nbt</button>
+      <button id="download" disabled title="the structure file: /place template loads it; Litematica should load it too, but that is untested">world.nbt</button>
+      <button id="report" disabled title="the build report: cells, blocks, footprint, lever and lamp positions, timing">report.txt</button>
+      <button id="design-json" disabled title="the design file: the layout, timing and pins the simulator and the view use">design.json</button>
       <button id="live" hidden title="build on the server and run it in the game">Run on the server</button>
       <button id="release" hidden title="give the plot back">Stop</button>
     </div>
@@ -73,8 +80,12 @@
     <div id="view"><div class="help">drag to orbit, scroll to zoom, click a lever to flip it</div></div>
   </section>
 </main>
+<footer>
+  <span>Compile with Ctrl+Enter or Cmd+Enter. Your edited source is kept in this browser.</span>
+  <span>NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</span>
+</footer>
 <script type="importmap">
-{ "imports": { "three": "/node_modules/three/build/three.module.js", "three/addons/": "/node_modules/three/examples/jsm/" } }
+{ "imports": { "three": "/pkg/three@0.186.1/build/three.module.js", "three/addons/": "/pkg/three@0.186.1/examples/jsm/" } }
 </script>
 <script type="module" src="./app.js"></script>
 </body>
