@@ -45,7 +45,10 @@ for (const [name, data] of Object.entries(outputs ?? {})) {
     if (inputs[name] !== text) writeFileSync(join(workdir, name), text);
 }
 if (failure) {
-    const lines = log.trimEnd().split('\n');
+    // Plain text: the frontend colours its diagnostics for a terminal.
+    const lines = log.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '').trimEnd().split('\n');
+    const error = lines.find((l) => /^ERROR:|: error: |^error: /.test(l.trim()));
+    if (error) console.error(error.trim());
     console.error(lines.slice(-8).join('\n'));
     console.error(`yosys failed: ${failure.message ?? failure}`);
     process.exit(1);

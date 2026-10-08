@@ -3,11 +3,17 @@
 //! runs them under Node, the playground in a browser worker; `{top}` is the
 //! top module's name.
 
-/// Synthesis: read, flatten, map flip-flops to the falling-edge cell (with an
-/// inverter on the clock for rising-edge ones) and gates to NOT/NOR2/NOR3.
+/// Synthesis: read, flatten, turn memories into registers and muxes, give
+/// every register an initial value (0 unless the source says otherwise),
+/// write the netlist for the lint (`pre.json`, see [`crate::lint`]), then map
+/// flip-flops to the falling-edge cell (with an inverter on the clock for
+/// rising-edge ones) and gates to NOT/NOR2/NOR3.
 pub const MAP_SCRIPT: &str = "\
 read_slang --threads 1 --top {top} top.sv
 proc
+memory
+write_json pre.json
+setundef -init -zero
 opt
 techmap
 opt
@@ -19,11 +25,16 @@ write_json mapped.json
 write_verilog -noattr mapped.v
 ";
 
-/// The equivalence proof between the source and the mapped netlist.
+/// The equivalence proof between the source and the mapped netlist. The proof
+/// ignores initial values; `gold.json` is written so that they can be compared
+/// with the mapped netlist's (see [`crate::lint::check_inits`]).
 pub const EQUIV_SCRIPT: &str = "\
 read_slang --threads 1 --top {top} top.sv
 proc
+memory
+setundef -init -zero
 opt_clean
+write_json gold.json
 rename {top} gold
 design -stash gold
 read_verilog mapped.v

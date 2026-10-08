@@ -33,10 +33,11 @@ pub enum Mutation {
     RepeaterNoPulseStretch,
     RepeaterOnePriority,
     RepeaterWeakFront,
+    LeverPowersNothing,
 }
 
 impl Mutation {
-    pub const ALL: [Mutation; 14] = [
+    pub const ALL: [Mutation; 15] = [
         Mutation::DustLosesTwoPerBlock,
         Mutation::TorchDelayOneTick,
         Mutation::LampOffDelayTwoTicks,
@@ -51,6 +52,7 @@ impl Mutation {
         Mutation::RepeaterNoPulseStretch,
         Mutation::RepeaterOnePriority,
         Mutation::RepeaterWeakFront,
+        Mutation::LeverPowersNothing,
     ];
 
     pub fn name(self) -> &'static str {
@@ -69,6 +71,7 @@ impl Mutation {
             Mutation::RepeaterNoPulseStretch => "repeater-no-pulse-stretch",
             Mutation::RepeaterOnePriority => "repeater-one-priority",
             Mutation::RepeaterWeakFront => "repeater-weak-front",
+            Mutation::LeverPowersNothing => "lever-powers-nothing",
         }
     }
 
@@ -110,7 +113,8 @@ const FLAGS_NO_NEIGHBORS: Flags = Flags { neighbors: false, shapes: true };
 const TORCH_DELAY: u64 = 2;
 const LAMP_OFF_DELAY: u64 = 4;
 const BURNOUT_WINDOW: u64 = 60;
-const BURNOUT_TOGGLES: usize = 8;
+/// A torch burns out when it turns off this many times within sixty ticks.
+pub const BURNOUT_TOGGLES: usize = 8;
 const BURNOUT_RETRY: u64 = 160;
 
 #[derive(Clone)]
@@ -469,6 +473,13 @@ impl Sim {
             }
             Block::Torch { .. } | Block::WallTorch { .. } => self.torch_notify_neighbors(pos),
             Block::Repeater { facing, .. } => self.repeater_update_front(pos, facing),
+            // A powered lever that goes away tells its own neighbours (the caller
+            // does that) and the neighbours of the block it was mounted on
+            // (LeverBlock.onRemove, the lever_mount recording).
+            Block::Lever { powered: true, .. } => {
+                let mount = pos.offset(old.lever_mount().expect("levers have a mount"));
+                self.update_neighbors_at(mount);
+            }
             _ => {}
         }
     }
@@ -639,6 +650,42 @@ mod tests {
         for x in 1..=16 {
             assert_eq!(power(&sim, x, 1, 0), (16 - x) as u8, "dust {x} blocks from the source");
         }
+    }
+
+    /// The only way a player drives a finished build: a lever on a stone block
+    /// powers that block strongly, so dust beside the block (not beside the
+    /// lever) reads 15, and nothing once the lever is off again. A lever set by
+    /// command tells its neighbours nothing (the lever_setblock recording), so
+    /// the dust is poked to read it, as a player's flip would.
+    #[test]
+    fn a_lever_powers_the_block_it_stands_on() {
+        let blocks = [
+            (0, 0, 0, "stone"),
+            (1, 0, 0, "stone"),
+            (0, 1, 0, "stone"),
+            (0, 2, 0, "lever[face=floor,facing=north,powered=false]"),
+            (1, 1, 0, "redstone_wire[east=none,west=side]"),
+        ];
+        let mut sim = Sim::new(world((2, 3, 1), &blocks));
+        sim.poke_all();
+        assert_eq!(power(&sim, 1, 1, 0), 0);
+        let lever = Pos::new(0, 2, 0);
+        sim.set_block(lever, "lever[face=floor,facing=north,powered=true]".parse().unwrap(), false).unwrap();
+        assert_eq!(power(&sim, 1, 1, 0), 0, "a command-set lever updates nothing");
+        sim.poke_all();
+        assert_eq!(power(&sim, 1, 1, 0), 15, "the mount block is strongly powered");
+        assert!(sim.pending().is_empty(), "dust reacts at once");
+        sim.set_block(lever, "lever[face=floor,facing=north,powered=false]".parse().unwrap(), false).unwrap();
+        sim.poke_all();
+        assert_eq!(power(&sim, 1, 1, 0), 0);
+        // Removing a powered lever is different: the game updates the mount's
+        // neighbours itself (the lever_mount recording), so no poke is needed.
+        sim.set_block(lever, "lever[face=floor,facing=north,powered=true]".parse().unwrap(), false).unwrap();
+        sim.poke_all();
+        assert_eq!(power(&sim, 1, 1, 0), 15);
+        sim.set_block(lever, Block::Air, false).unwrap();
+        assert_eq!(power(&sim, 1, 1, 0), 0, "removing a powered lever updates the mount's neighbours");
+        assert!(sim.pending().is_empty());
     }
 
     #[test]

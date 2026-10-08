@@ -129,6 +129,22 @@ pub fn replay(fixture_json: &str, trace_json: &str, mutation: Option<Mutation>) 
     }
     let by_tick: BTreeMap<u32, &TickFile> = trace.ticks.iter().map(|t| (t.tick, t)).collect();
 
+    // A fixture placed with updates and recorded with nothing pending is a settled
+    // world: every block in it has already looked at its neighbours under the
+    // game's rules. Looking again under the simulator's rules must change
+    // nothing, or a rule about the initial state (a lever that powers its mount,
+    // say) is wrong without any later tick showing it.
+    if fixture.placement == "update" && trace.pending0.as_ref().is_some_and(Vec::is_empty) {
+        let mut settled = sim.clone();
+        settled.poke_all();
+        if let Err(e) = settled.settle(200) {
+            return Ok(Replay::Mismatch(format!("tick 0: the recorded world is not stable in the simulator: {e}")));
+        }
+        if let Some(diff) = first_block_difference(settled.world(), &expected) {
+            return Ok(Replay::Mismatch(format!("tick 0: the recorded world is not stable in the simulator: {diff}")));
+        }
+    }
+
     let no_events = Vec::new();
     let mut reordered_ticks = 0;
     for tick in 1..=fixture.ticks {
