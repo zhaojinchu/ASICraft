@@ -49,9 +49,36 @@ pub struct Design {
     /// Best and worst case for each output, in game ticks after an input change.
     #[serde(default)]
     pub timing: Timing,
+    /// How the gates were placed: `pitch4`, four rows per gate (stage 6).
+    #[serde(default)]
+    pub placement: String,
+    /// Counts of the routed layout, which the area-period baseline
+    /// (`tests/baselines/area.json`) holds to: tiles, the tile grid, repeaters
+    /// (in their own tiles and in crossings), and the rounds of hold fixes the
+    /// build needed. Files written before them read as zero.
+    #[serde(default)]
+    pub tiles: usize,
+    #[serde(default)]
+    pub grid: Grid,
+    #[serde(default)]
+    pub repeaters: usize,
+    #[serde(default)]
+    pub hold_fix_rounds: usize,
     /// Position (`x,y,z`) to full block state.
     pub blocks: BTreeMap<String, String>,
 }
+
+/// The tile grid of a built design, in tiles: `routing` is the routing columns
+/// of each gap between gate columns, west to east.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Grid {
+    pub cols: i32,
+    pub rows: i32,
+    pub routing: Vec<i32>,
+}
+
+/// The one placement style today, named in `Design::placement`.
+pub const PLACEMENT_PITCH4: &str = "pitch4";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InputPin {
@@ -277,6 +304,7 @@ pub fn build_unchecked_logged(
         .values()
         .filter(|p| matches!(p, Placed::Repeater { .. } | Placed::Cross { repeater_entry: Some(_), .. }))
         .count();
+    let (cols, rows) = layout.size();
 
     let (sx, sy, sz) = world.size();
     let design = Design {
@@ -307,6 +335,11 @@ pub fn build_unchecked_logged(
             .collect(),
         settle_ticks,
         timing: timing.clone(),
+        placement: PLACEMENT_PITCH4.to_string(),
+        tiles: layout.tiles.len(),
+        grid: Grid { cols, rows, routing: routing_cols.clone() },
+        repeaters: repeater_count,
+        hold_fix_rounds: rounds,
         blocks: world.iter().map(|(pos, block)| (pos.to_string(), block.to_string())).collect(),
     };
     // The burnout budget: how fast the inputs may change (combinational designs),
@@ -336,7 +369,7 @@ pub fn build_unchecked_logged(
         }
         design
     };
-    let (cols, rows) = layout.size();
+    // The report prints the counts the design file carries, so the two cannot differ.
     let timing_line = match &design.timing.sequential {
         Some(seq) => sequential_report(seq, design.settle_ticks),
         None if netlist.inputs.is_empty() => "  no inputs: the outputs never change\n".to_string(),
@@ -367,7 +400,7 @@ pub fn build_unchecked_logged(
             positions += &format!("    {:<16} lamp at {}\n", output.name, lamp);
         }
     }
-    let routing_text = match routing_cols.as_slice() {
+    let routing_text = match design.grid.routing.as_slice() {
         [one] => format!("{one} routing column{}", if *one == 1 { "" } else { "s" }),
         many => format!(
             "routing columns {} west to east",
@@ -375,9 +408,12 @@ pub fn build_unchecked_logged(
         ),
     };
     let report = format!(
-        "design {name}\n  cells: {}\n  tiles: {} ({cols} columns x {rows} rows, {routing_text})\n  repeaters: {repeater_count}\n  blocks: {} in {sx} x {sy} x {sz}\n{timing_line}{positions}{}",
+        "design {name}\n  cells: {}\n  tiles: {} ({} columns x {} rows, {routing_text})\n  repeaters: {}\n  blocks: {} in {sx} x {sy} x {sz}\n{timing_line}{positions}{}",
         netlist.cells.len(),
-        layout.tiles.len(),
+        design.tiles,
+        design.grid.cols,
+        design.grid.rows,
+        design.repeaters,
         design.blocks.len(),
         if problems.is_empty() { "  layout matches the netlist\n" } else { "" },
     );
@@ -890,6 +926,36 @@ mod tests {
         let design = Design::from_json(bare).unwrap();
         let Err(err) = crate::timing::measure(&design, 10, 1, 1) else { panic!("measured without a report") };
         assert!(err.contains("no timing report for output y"), "{err}");
+        // ... and one without the layout counts reads them as zero.
+        assert_eq!((design.placement.as_str(), design.tiles, design.repeaters, design.hold_fix_rounds), ("", 0, 0, 0));
+        assert_eq!(design.grid, Grid::default());
+    }
+
+    /// The counts the area-period baseline reads from design.json are the ones
+    /// report.txt prints, and they are counts of the layout, not of the report.
+    #[test]
+    fn the_design_file_carries_the_counts_the_report_prints() {
+        let built = build(NOR2, "top", "nor2").unwrap();
+        let design = &built.design;
+        assert_eq!(design.placement, PLACEMENT_PITCH4);
+        assert_eq!(design.hold_fix_rounds, 0);
+        let line = built.report.lines().find(|l| l.contains("tiles:")).unwrap().trim();
+        assert_eq!(
+            line,
+            format!(
+                "tiles: {} ({} columns x {} rows, routing columns {} west to east)",
+                design.tiles,
+                design.grid.cols,
+                design.grid.rows,
+                design.grid.routing.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")
+            )
+        );
+        assert!(built.report.contains(&format!("\n  repeaters: {}\n", design.repeaters)));
+        // One gate, one input tile per input, one output tile, and the wire between.
+        assert!(design.tiles >= 4 && design.grid.cols >= 3 && design.grid.rows >= 1);
+        assert_eq!(design.grid.routing.len(), 2);
+        let repeater_blocks = design.blocks.values().filter(|b| b.contains("repeater")).count();
+        assert_eq!(design.repeaters, repeater_blocks);
     }
 
     /// The estimate under-counts the feedback nets of clocked netlists, so the
