@@ -998,6 +998,30 @@ mod tests {
         assert!(widened_runs >= 2, "only {widened_runs} of the clocked netlists needed a widening");
     }
 
+    /// A column of inverters reads only on the west, so the packed style lays
+    /// them in consecutive rows and the pick takes it over four rows per gate;
+    /// the clocked designs keep the four-row pitch in this step.
+    #[test]
+    fn inverters_pack_into_consecutive_rows_and_clocked_designs_keep_the_pitch() {
+        let mut ports = Vec::new();
+        let mut cells = Vec::new();
+        for i in 0..6 {
+            ports.push(format!(r#""a{i}":{{"direction":"input","bits":[{}]}}"#, 2 + i));
+            ports.push(format!(r#""y{i}":{{"direction":"output","bits":[{}]}}"#, 10 + i));
+            cells.push(format!(r#""n{i}":{{"type":"NOT","connections":{{"A":[{}],"Y":[{}]}}}}"#, 2 + i, 10 + i));
+        }
+        let json =
+            format!(r#"{{"modules":{{"top":{{"ports":{{{}}},"cells":{{{}}}}}}}}}"#, ports.join(","), cells.join(","));
+        let built = build(&json, "top", "inverters").unwrap();
+        assert_eq!(built.design.placement, "packed");
+        // Six inputs, six gates and six outputs, one row each, nothing between.
+        assert!(built.design.grid.rows <= 7, "{} rows for six inverters", built.design.grid.rows);
+        let vectors = r#"[{"a0":0,"a1":1,"a2":0,"a3":1,"a4":0,"a5":1}]"#;
+        assert_eq!(outputs(&built.design, vectors), r#"[{"y0":1,"y1":0,"y2":1,"y3":0,"y4":1,"y5":0}]"#);
+        let toggle = build(TOGGLE, "top", "toggle").unwrap();
+        assert_eq!(toggle.design.placement, "pitch4");
+    }
+
     #[test]
     fn too_many_inputs_are_refused_before_placing() {
         let mut ports = String::new();
