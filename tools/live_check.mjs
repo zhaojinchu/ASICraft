@@ -6,17 +6,23 @@
 // an inverter is submitted through the API and driven by its lever, and what
 // the stream said must replay natively tick for tick; a scripted browser
 // session submits the counter, runs it live with its levers, and the page must
-// show what the server shows and the recording must replay tick for tick; six
-// counters running at once must leave the server's tick time within budget.
+// show what the server shows, no clock edge may be lost or land more than
+// MAX_JITTER ticks after its scheduled tick (a late edge stretches the period;
+// it never shortens the next one), and the recording must replay tick for
+// tick; six counters running at once (on 512 by 512 plots) must leave the
+// server's tick time within budget and their clocks within the same bound;
+// every placed template must have been forgotten by the game and deleted from
+// disk; and the status must have said live throughout, with no reconnection.
 // Screenshots go to build/playground/. Needs Brave or Chrome; set
 // REDFAB_BROWSER to another Chromium binary.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import puppeteer from 'puppeteer-core';
 import { startLive } from '../server/live.mjs';
+import { buildWasm, findBrowser } from './common.mjs';
 import { api, changesAt, connect, designSource, firstTraceDifference, root, sleep, waitFor } from './live_common.mjs';
 
 const out = join(root, 'build/playground');
@@ -24,21 +30,18 @@ mkdirSync(out, { recursive: true });
 const show = process.argv.includes('--show');
 const TICK_BUDGET = { avg_ms: 25, p95_ms: 45 };
 const PLOTS = 6;
+// A flip goes out when the stream reports the tick it is due; it lands late
+// when the next tick starts before the command is processed, which the host's
+// scheduling decides. More than this means a stalled backend, not noise.
+const MAX_JITTER = 2;
 
-const BROWSERS = [
-    process.env.REDFAB_BROWSER,
-    '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    '/usr/bin/chromium', '/usr/bin/google-chrome',
-].filter(Boolean);
-const browserPath = BROWSERS.find((p) => existsSync(p));
+const browserPath = findBrowser();
 if (!browserPath) {
     console.log('no Chromium found; install Brave or Chrome, or set REDFAB_BROWSER');
     process.exit(1);
 }
 
-execFileSync('cargo', ['build', '-q', '-p', 'redfab-wasm', '--target', 'wasm32-unknown-unknown', '--release'], { cwd: root, stdio: 'inherit' });
+buildWasm();
 execFileSync(join(root, 'tools/build_mod.sh'), { cwd: root, stdio: 'pipe' });
 
 const failures = [];
@@ -69,11 +72,28 @@ async function controller(base, wsBase, name, extra = {}) {
     return { ...reply.body, client };
 }
 
-const live = await startLive({ runDir: join(root, 'build/mc/live-check'), port: 0, plots: PLOTS, log: (m) => console.log(`  [live] ${m}`) });
+const runDir = join(root, 'build/mc/live-check');
+// The checks come from one machine, so the per-address limits are lifted here.
+const live = await startLive({ runDir, port: 0, plots: PLOTS, perIp: { plots: PLOTS, compiles: 2, submissionsPerHour: 100 }, log: (m) => console.log(`  [live] ${m}`) });
 const base = `http://127.0.0.1:${live.port}`;
 const wsBase = `ws://127.0.0.1:${live.port}`;
 let browser = null;
+
+/// The clock driver's edges must all have landed, on their scheduled tick or
+/// within MAX_JITTER ticks after it.
+function onSchedule(name, info) {
+    const clock = info.body.clock;
+    if (!clock) return fail(`${name}: no clock driver on the plot`);
+    const where = clock.late > 0 ? `${clock.late} landed late, by at most ${clock.max_jitter} ticks` : 'every flip landed on its scheduled tick';
+    if (clock.lost > 0 || clock.max_jitter > MAX_JITTER) fail(`${name}: ${clock.edges} clock edges, ${where}, ${clock.lost} lost (allowed: none lost, at most ${MAX_JITTER} ticks late)`);
+    else console.log(`${name}: ${clock.edges} clock edges, ${where}`);
+}
+
 try {
+    const startup = await api(base, '/api/status');
+    if (!startup.body.live) fail(`the status is not live at the start: ${JSON.stringify(startup.body.minecraft)}`);
+    else console.log(`live: plots ${startup.body.plots.total}, plot size ${startup.body.limits.plotSize.join(' by ')}`);
+
     // --- an inverter through the API: its lever, and the recording
     {
         const not1 = await controller(base, wsBase, 'not1');
@@ -93,7 +113,7 @@ try {
         await flip(false, 30);
         const info = await api(base, `/api/plots/${not1.plot}`);
         if (JSON.stringify(info.body.lamps) !== '[1]') fail(`not1: with a off the lamp should be lit; the server shows ${JSON.stringify(info.body.lamps)}`);
-        const exported = await api(base, `/api/plots/${not1.plot}/trace`);
+        const exported = await api(base, `/api/plots/${not1.plot}/trace?token=${not1.token}`);
         if (exported.status !== 200) fail(`not1: trace export: ${exported.body.error}`);
         else {
             const y = not1.design.outputs[0].lamp;
@@ -146,7 +166,8 @@ try {
         else console.log(`counter4: the page shows the server's lamps ${JSON.stringify(shown)} at server tick ${info.body.tick}`);
         const pageTick = await page.evaluate(() => window.redfab.liveTick);
         if (Math.abs(pageTick - info.body.tick) > 40) fail(`counter4: the page is at tick ${pageTick}, the server at ${info.body.tick}`);
-        const exported = await api(base, `/api/plots/${plot.plot}/trace`);
+        onSchedule('counter4', info);
+        const exported = await api(base, `/api/plots/${plot.plot}/trace?token=${plot.token}`);
         if (exported.status !== 200) fail(`counter4: trace export: ${exported.body.error}`);
         else {
             const bit0 = design.outputs.find((p) => p.name === 'count[0]').lamp;
@@ -171,13 +192,30 @@ try {
         const running = (await api(base, '/api/status')).body.plots;
         if (running.free !== 0) fail(`not every plot is in use: ${JSON.stringify(running)}`);
         await sleep(12_000);
-        const tick = (await api(base, '/api/status')).body.tick;
+        const after = await api(base, '/api/status');
+        const tick = after.body.tick;
         if (!tick || tick.avg_ms > TICK_BUDGET.avg_ms || tick.p95_ms > TICK_BUDGET.p95_ms) {
             fail(`tick time with ${running.total} plots: ${JSON.stringify(tick)}; the budget is ${JSON.stringify(TICK_BUDGET)}`);
         } else {
             console.log(`tick time with ${running.total} counters running: average ${tick.avg_ms} ms, P95 ${tick.p95_ms} ms (budget ${TICK_BUDGET.avg_ms}/${TICK_BUDGET.p95_ms})`);
         }
+        for (const c of extra) onSchedule(`counter4 on plot ${c.plot}`, await api(base, `/api/plots/${c.plot}`));
         for (const c of extra) c.client.close();
+
+        // --- the backend stayed live, the templates are gone from the game and the disk
+        const health = after.body.minecraft;
+        if (!after.body.live || health.stream_reconnects !== 0 || health.rcon_reconnects !== 0) {
+            fail(`the backend did not stay live throughout: ${JSON.stringify(after.body)}`);
+        }
+        const placements = after.body.placements;
+        await waitFor(() => live.minecraft.world.forgotten >= placements, 10_000).catch(() => {});
+        const forgotten = live.minecraft.world.forgotten;
+        const files = readdirSync(join(runDir, 'world/generated/redfab/structure')).filter((f) => f.endsWith('.nbt'));
+        if (forgotten < placements || files.length) {
+            fail(`${placements} templates were placed, the game forgot ${forgotten}, ${files.length} .nbt files remain: ${files.join(' ')}`);
+        } else {
+            console.log(`${placements} templates placed, every one forgotten by the game and deleted from disk`);
+        }
     }
 } catch (err) {
     fail(err.stack || String(err));
@@ -185,6 +223,7 @@ try {
     if (browser) await browser.close();
     await live.close();
 }
+if (!live.minecraft.exited?.expected) fail(`the game's exit was not the expected one: ${JSON.stringify(live.minecraft.exited)}`);
 for (const f of failures) console.log(`FAIL: ${f}`);
 if (!failures.length) console.log(`screenshots in ${out}`);
 process.exit(failures.length ? 1 : 0);
