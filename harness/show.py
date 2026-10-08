@@ -31,6 +31,7 @@ import sys
 import time
 
 from .design import DESIGNS, all_vectors, design_dir, design_name, load, verilator_outputs
+from .session import Session
 from .server import VanillaServer, cargo
 
 GROUND_Y = -60   # the surface of the default flat world
@@ -70,7 +71,9 @@ def main(argv: list[str] | None = None) -> int:
             server.command(f"gamerule {rule}")
         x, y, z = ORIGIN
         sx, _, sz = design["size"]
-        server.command(f"forceload add {x - 16} {z - 16} {x + sx + 16} {z + sz + 16}")
+        # One forceload command covers at most 256 chunks; the session loads a big
+        # footprint in strips (an 8-bit adder is 30 by 31 chunks).
+        Session(server).forceload(((x - 16, 0, z - 16), (x + sx + 16, 0, z + sz + 16)))
         server.command(f"setworldspawn {x - 3} {y} {z + sz // 2}")
         reply = server.command(f"place template redfab:{name} {x} {y} {z} none none 1.0 0 strict")
         if not reply.startswith("Loaded template"):
