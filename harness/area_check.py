@@ -12,10 +12,11 @@ chunks, routing columns, repeaters, settle ticks, the hold fix rounds, tiles per
 repeaters per torch on the worst path; combinational designs also their input spacing,
 clocked ones the period, the clock skew (latest minus earliest arrival), the input window
 (wider is better) and the least hold slack (may fall, must stay at or above zero). The
-cell count and the placement style must be the same, or the row describes another
-layout. Every number may only stay or improve; a deliberate regression is an edit of the
-baseline in the same commit, named in its message. The sequential analysis reports no
-path, so clocked rows have no repeaters-per-torch figure.
+cell count and the placement style (one of `STYLES`, the names `place.rs` gives them)
+must be the same, or the row describes another layout. Every number may only stay or
+improve; a deliberate regression is an edit of the baseline in the same commit, named in
+its message. The sequential analysis reports no path, so clocked rows have no
+repeaters-per-torch figure.
 
 `measure` turns a design file and its mapped netlist into a row, `compare` a row and its
 baseline into the problems, `format_baseline` writes the file in its one canonical form;
@@ -41,6 +42,8 @@ LOWER_IS_BETTER = ("tiles", "area", "chunks", "routing_cols", "repeaters", "sett
                    "hold_fix_rounds", "tiles_per_cell", "repeaters_per_torch")
 HIGHER_IS_BETTER = ("input_window",)
 MUST_MATCH = ("cells", "placement")
+# The placement styles the build may pick, by the names place.rs gives them.
+STYLES = ("pitch4", "packed")
 
 
 class Stale(Exception):
