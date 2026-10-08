@@ -5,22 +5,19 @@
 //
 // Run `redfab build` for each design first.
 
-import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { buildWasm, root } from './common.mjs';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-execFileSync('cargo', ['build', '-q', '-p', 'redfab-wasm', '--target', 'wasm32-unknown-unknown', '--release'], { cwd: root, stdio: 'inherit' });
-const wasm = readFileSync(join(root, 'target/wasm32-unknown-unknown/release/redfab_wasm.wasm'));
+const wasm = readFileSync(buildWasm());
 const { instance } = await WebAssembly.instantiate(wasm, {});
-const { memory, redfab_alloc, redfab_build, redfab_free } = instance.exports;
+const { memory, redfab_alloc, redfab_call, redfab_free } = instance.exports;
 
 function build(request) {
     const input = new TextEncoder().encode(JSON.stringify(request));
     const inPtr = redfab_alloc(input.length);
     new Uint8Array(memory.buffer, inPtr, input.length).set(input);
-    const outPtr = redfab_build(inPtr, input.length);
+    const outPtr = redfab_call(inPtr, input.length);
     redfab_free(inPtr, input.length);
     const length = new DataView(memory.buffer).getUint32(outPtr, true);
     const reply = JSON.parse(new TextDecoder().decode(new Uint8Array(memory.buffer, outPtr + 4, length)));

@@ -89,14 +89,19 @@ export class View {
         this.renderer.render(this.scene, this.camera);
     }
 
-    /// Shows a design: its blocks, with the camera framing them.
-    show(design) {
+    /// Removes the design on show, leaving an empty scene.
+    clear() {
         for (const mesh of Object.values(this.meshes)) {
             this.scene.remove(mesh);
             mesh.geometry.dispose();
         }
         this.meshes = {};
         this.instances.clear();
+    }
+
+    /// Shows a design: its blocks, with the camera framing them.
+    show(design) {
+        this.clear();
         const byKind = {};
         for (const [pos, state] of Object.entries(design.blocks)) {
             (byKind[kindOf(state)] ??= []).push([pos, state]);
@@ -144,6 +149,15 @@ export class View {
         for (const kind of touched) this.meshes[kind].instanceColor.needsUpdate = true;
     }
 
+    /// The colour a block is drawn in, as a hex string (for the checks).
+    colourAt(pos) {
+        const at = this.instances.get(pos);
+        if (!at) return null;
+        const colour = new THREE.Color();
+        this.meshes[at.kind].getColorAt(at.index, colour);
+        return colour.getHexString();
+    }
+
     /// The block under a click, if the pointer did not drag.
     pick(event) {
         if (!this.pressed || !this.onClick) return;
@@ -167,6 +181,7 @@ export class View {
     /// Where a block's centre is on screen, in page pixels (for the checks).
     screenPosition(pos) {
         const [x, y, z] = pos.split(',').map(Number);
+        this.camera.updateMatrixWorld(); // the camera may have moved since the last frame
         const v = new THREE.Vector3(x + 0.5, y + 0.5, z + 0.5).project(this.camera);
         const rect = this.renderer.domElement.getBoundingClientRect();
         return { x: rect.left + ((v.x + 1) / 2) * rect.width, y: rect.top + ((1 - v.y) / 2) * rect.height };
