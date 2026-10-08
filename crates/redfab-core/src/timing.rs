@@ -1121,10 +1121,14 @@ pub fn worst_stress(design: &Design, spacing: u32) -> Result<(usize, Option<Pos>
     Ok(worst)
 }
 
+/// The fewest ticks between input changes the stress walks try: less than this
+/// no design is offered.
+pub const MIN_INPUT_SPACING: u32 = 8;
+
 /// The fewest ticks between input changes that keep every torch within the
-/// burnout budget over the stress walks, tried from eight upwards.
+/// burnout budget over the stress walks, tried from [`MIN_INPUT_SPACING`] upwards.
 pub fn input_spacing(design: &Design) -> Result<u32, String> {
-    let mut spacing = 8;
+    let mut spacing = MIN_INPUT_SPACING;
     loop {
         let (worst, _, _) = worst_stress(design, spacing)?;
         if worst <= BURNOUT_BUDGET {

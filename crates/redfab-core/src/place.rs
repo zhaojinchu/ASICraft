@@ -2,10 +2,17 @@
 //!
 //! Gates go into columns by logic depth, with routing columns between. Within a
 //! column, gates are ordered by the average row of what feeds them (a few
-//! barycenter sweeps), which keeps most wires short and uncrossed. Each gate
-//! takes four rows: the tile above it feeds its north input, the tile below
-//! its south input, its west input comes straight in from the left, and the
-//! fourth row is left free so that other nets can pass the gate column.
+//! barycenter sweeps), which keeps most wires short and uncrossed. The tile
+//! above a gate feeds its north input, the tile below its south input, and its
+//! west input comes straight in from the left. How many rows a gate takes is
+//! the placement's [`Style`]: four at the four-row pitch (north feed, gate,
+//! south feed, a free row for the nets that must pass the column), or, packed,
+//! only the rows its pins use, with a free row after every few gates. Packed,
+//! a pin pays for a feed row, so a gate reads on the west whenever that is
+//! nearly as short, and two neighbouring gates that would each take the same
+//! net on a feed side take it on their facing sides and share the feed tile
+//! between them. The build tries the styles and keeps the layout that
+//! measures best.
 //!
 //! Flip-flops form a column of their own, two cells wide, before the first
 //! gates: their outputs are sources like the inputs, and their D inputs are
@@ -25,6 +32,38 @@ use crate::tile::{Edge, PITCH};
 
 /// A tile position: (column, row). Columns run east, rows run south.
 pub type Cell = (i32, i32);
+
+/// How the gates of a column take their rows.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Style {
+    /// Four rows per gate: north feed, gate, south feed, a free row.
+    Pitch4,
+    /// A row for each feed side a gate uses and one for the gate, with a free
+    /// row after every few gates for the nets that pass the column.
+    Packed,
+}
+
+impl Style {
+    /// Every style, in the order the build tries them.
+    pub const ALL: [Style; 2] = [Style::Pitch4, Style::Packed];
+
+    /// The name a design file records.
+    pub fn name(self) -> &'static str {
+        match self {
+            Style::Pitch4 => "pitch4",
+            Style::Packed => "packed",
+        }
+    }
+
+    /// The style a design file names, if any.
+    pub fn from_name(name: &str) -> Option<Style> {
+        Style::ALL.into_iter().find(|s| s.name() == name)
+    }
+}
+
+/// What a north or south side costs a packed gate on top of the wire to it: the
+/// feed row it takes from the column. Measured the same for one, two and three.
+const FEED_ROW_COST: f64 = 2.0;
 
 /// What a column of the grid is, named so that a tile keeps its name when a
 /// gap is widened: the new routing column goes at the east end of the gap.
@@ -158,8 +197,9 @@ pub fn gap_count(netlist: &Netlist) -> Result<usize, String> {
     Ok(stages(netlist, &level).1)
 }
 
-/// Places the netlist with `routing[g]` routing columns in gap `g`.
-pub fn place(netlist: &Netlist, routing: &[i32]) -> Result<Placement, String> {
+/// Places the netlist with `routing[g]` routing columns in gap `g`, the rows
+/// taken as `style` says.
+pub fn place(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Placement, String> {
     let drivers = netlist.drivers()?;
     let level = levels(netlist, &drivers)?;
     let has_dff = netlist.cells.iter().any(|c| c.is_dff());
@@ -212,23 +252,33 @@ pub fn place(netlist: &Netlist, routing: &[i32]) -> Result<Placement, String> {
             netlist.sinks_of(net).into_iter().map(|(c, _)| if c == usize::MAX { gaps as i32 } else { stage[c] as i32 });
         sinks.chain(std::iter::once(driver)).fold((i32::MAX, i32::MIN), |(lo, hi), l| (lo.min(l), hi.max(l)))
     };
-    let crossing_rows = (1..gaps)
+    let crossing_of_stage: Vec<i32> = (0..gaps)
         .map(|s| {
-            let crossing = (0..netlist.net_count)
+            (0..netlist.net_count)
                 .filter(|&n| {
                     let (lo, hi) = span(n);
                     lo < s as i32 && (s as i32) < hi
                 })
-                .count() as i32;
-            3 * by_stage.get(&s).map_or(0, Vec::len) as i32 + crossing
+                .count() as i32
         })
-        .max()
-        .unwrap_or(0);
+        .collect();
+    // The most rows any stage can take: three per gate (north feed, gate, south
+    // feed) and one per crossing net; the packed sweeps need fewer.
+    let crossing_rows =
+        (1..gaps).map(|s| 3 * by_stage.get(&s).map_or(0, Vec::len) as i32 + crossing_of_stage[s]).max().unwrap_or(0);
     // One spare row at the bottom: two nets that have to swap rows need a third row to pass.
-    let rows = (4 * gates_per_col).max(crossing_rows + 1).max(sources + 1).max(netlist.outputs.len() as i32 + 1).max(2);
+    let mut rows = match style {
+        Style::Pitch4 => (4 * gates_per_col).max(crossing_rows + 1),
+        Style::Packed => crossing_rows + 1,
+    }
+    .max(sources + 1)
+    .max(netlist.outputs.len() as i32 + 1)
+    .max(2);
 
     // Rows: start in index order, then sweep by barycenter a few times.
     let mut row_of_cell = vec![0i32; netlist.cells.len()];
+    // Packed: the sides each gate's pins were given when its rows were reserved.
+    let mut sides_of_cell: Vec<Vec<Edge>> = vec![Vec::new(); netlist.cells.len()];
     let mut row_of_input: Vec<i32> = (0..netlist.inputs.len() as i32).collect();
     let mut row_of_tie: Vec<i32> = (0..used_constants.len() as i32).map(|i| i + netlist.inputs.len() as i32).collect();
     let mut row_of_output: Vec<i32> = (0..netlist.outputs.len() as i32).collect();
@@ -262,8 +312,29 @@ pub fn place(netlist: &Netlist, routing: &[i32]) -> Result<Placement, String> {
                 })
                 .collect();
             order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
-            for (i, (_, c)) in order.iter().enumerate() {
-                row_of_cell[*c] = 1 + 4 * i as i32;
+            match style {
+                Style::Pitch4 => {
+                    for (i, (_, c)) in order.iter().enumerate() {
+                        row_of_cell[*c] = 1 + 4 * i as i32;
+                    }
+                }
+                Style::Packed => {
+                    let order: Vec<usize> = order.iter().map(|(_, c)| *c).collect();
+                    let from: Vec<Vec<f64>> = order
+                        .iter()
+                        .map(|&c| {
+                            netlist.cells[c]
+                                .inputs
+                                .iter()
+                                .map(|&n| driver_row(n, &row_of_cell, &row_of_input, &row_of_tie))
+                                .collect()
+                        })
+                        .collect();
+                    let crossing = crossing_of_stage[stage[order[0]]];
+                    let every = if crossing > 0 { (order.len() as i32 + crossing - 1) / crossing } else { i32::MAX };
+                    let bottom = pack_stage(netlist, &order, &from, every, &mut row_of_cell, &mut sides_of_cell);
+                    rows = rows.max(bottom + 1);
+                }
             }
         }
         // Outputs: in the order of their drivers' rows and each as near its
@@ -309,18 +380,23 @@ pub fn place(netlist: &Netlist, routing: &[i32]) -> Result<Placement, String> {
         used_constants.iter().zip(&row_of_tie).map(|(&(net, value), &r)| (net, value, (0, r))).collect();
     let outputs: Vec<Cell> = row_of_output.iter().map(|&r| (cols - 1, r)).collect();
 
-    // Pin edges: give each input net the side closest to where it comes from. A
-    // flip-flop's sides are fixed: D on the west, the clock on the north.
+    // Pin edges: give each input net the side closest to where it comes from
+    // (packed, the sides its rows were reserved for). A flip-flop's sides are
+    // fixed: D on the west, the clock on the north.
     let mut pin_edges = Vec::new();
     for (c, cell) in netlist.cells.iter().enumerate() {
         if cell.is_dff() {
             pin_edges.push(vec![Edge::West, Edge::North]);
             continue;
         }
+        if style == Style::Packed {
+            pin_edges.push(sides_of_cell[c].clone());
+            continue;
+        }
         let row = f64::from(gates[c].1);
         let from: Vec<f64> =
             cell.inputs.iter().map(|&n| driver_row(n, &row_of_cell, &row_of_input, &row_of_tie)).collect();
-        pin_edges.push(assign_sides(&from, row));
+        pin_edges.push(assign_sides(&from, row, row, 0.0, &vec![None; from.len()]));
     }
 
     Ok(Placement {
@@ -418,15 +494,108 @@ fn spread(targets: &[f64], rows: i32) -> Vec<i32> {
     out
 }
 
+/// Lays the gates of one stage, `order` from the top down, packed: a gate takes
+/// a row for its north feed when a pin reads on the north, its own row, and a
+/// row for its south feed when a pin reads on the south (`from[i]` holds the
+/// rows gate `order[i]`'s nets come from). Two gates in a row that would each
+/// take the same net on a feed side take it on their facing sides, the upper on
+/// the south and the lower on the north, and share the one feed tile between
+/// them, a row fewer than two feeds. A free row is left
+/// after every `every` gates for the nets that pass the column. A flip-flop
+/// reads D on the west and the clock on the north. Records each gate's row and
+/// sides; returns the first row below the stage.
+fn pack_stage(
+    netlist: &Netlist,
+    order: &[usize],
+    from: &[Vec<f64>],
+    every: i32,
+    row_of_cell: &mut [i32],
+    sides_of_cell: &mut [Vec<Edge>],
+) -> i32 {
+    let reads_once = |c: usize, net: NetId| netlist.cells[c].inputs.iter().filter(|&&m| m == net).count() == 1;
+    let mut top = 0i32;
+    let mut since_free = 0i32;
+    // The net shared with the gate above, which this gate reads on the north.
+    let mut shared_above: Option<NetId> = None;
+    for (i, &c) in order.iter().enumerate() {
+        let cell = &netlist.cells[c];
+        let (sides, shared_below) = if cell.is_dff() {
+            (vec![Edge::West, Edge::North], None)
+        } else {
+            let forced_above: Vec<Option<Edge>> =
+                cell.inputs.iter().map(|&net| (Some(net) == shared_above).then_some(Edge::North)).collect();
+            // Reading on the north costs a row above the gate, unless that row is
+            // the feed shared with the gate above.
+            let row_with_north = if shared_above.is_some() { top } else { top + 1 };
+            let own = assign_sides(&from[i], f64::from(top), f64::from(row_with_north), FEED_ROW_COST, &forced_above);
+            // A net the gate below also reads, that both would take on a feed side
+            // of their own accord (so sharing the tile saves a row); neither reads it
+            // twice, and it is not the one shared above. The lowest such net.
+            let below = order.get(i + 1).copied().filter(|&b| !netlist.cells[b].is_dff());
+            let shared_below = below.and_then(|b| {
+                let next = &netlist.cells[b];
+                let unforced = vec![None; next.inputs.len()];
+                let own_below =
+                    assign_sides(&from[i + 1], f64::from(top + 2), f64::from(top + 3), FEED_ROW_COST, &unforced);
+                let on_feed = |sides: &[Edge], inputs: &[NetId], net: NetId| {
+                    inputs.iter().zip(sides).any(|(&m, &side)| m == net && side != Edge::West)
+                };
+                cell.inputs
+                    .iter()
+                    .copied()
+                    .filter(|&net| {
+                        Some(net) != shared_above
+                            && reads_once(c, net)
+                            && reads_once(b, net)
+                            && on_feed(&own, &cell.inputs, net)
+                            && on_feed(&own_below, &next.inputs, net)
+                    })
+                    .min()
+            });
+            match shared_below {
+                None => (own, None),
+                Some(shared) => {
+                    let forced: Vec<Option<Edge>> = cell
+                        .inputs
+                        .iter()
+                        .zip(&forced_above)
+                        .map(|(&net, &above)| if net == shared { Some(Edge::South) } else { above })
+                        .collect();
+                    let sides =
+                        assign_sides(&from[i], f64::from(top), f64::from(row_with_north), FEED_ROW_COST, &forced);
+                    (sides, shared_below)
+                }
+            }
+        };
+        let uses_north = sides.contains(&Edge::North);
+        let uses_south = sides.contains(&Edge::South);
+        let row = top + i32::from(uses_north && shared_above.is_none());
+        row_of_cell[c] = row;
+        sides_of_cell[c] = sides;
+        top = row + 1 + i32::from(uses_south);
+        since_free += 1;
+        shared_above = shared_below;
+        if shared_below.is_none() && since_free >= every && i + 1 < order.len() {
+            top += 1;
+            since_free = 0;
+        }
+    }
+    top
+}
+
 /// Distinct sides for up to three input pins, minimising how far each net has
-/// to travel vertically to reach its side (west: the gate's row; north: above; south: below).
-fn assign_sides(from_rows: &[f64], gate_row: f64) -> Vec<Edge> {
+/// to travel vertically to reach its side (west: the gate's row; north: above;
+/// south: below) plus `feed_cost` for every north or south side. The gate sits
+/// at `row`, or at `row_with_north` when a pin reads on the north. A pin with a
+/// side in `forced` gets that side.
+fn assign_sides(
+    from_rows: &[f64],
+    row: f64,
+    row_with_north: f64,
+    feed_cost: f64,
+    forced: &[Option<Edge>],
+) -> Vec<Edge> {
     let sides = [Edge::West, Edge::North, Edge::South];
-    let target = |e: Edge| match e {
-        Edge::North => gate_row - 1.0,
-        Edge::South => gate_row + 1.0,
-        _ => gate_row,
-    };
     let n = from_rows.len();
     let mut best: Option<(f64, Vec<Edge>)> = None;
     // Every ordered choice of n distinct sides out of three.
@@ -443,7 +612,20 @@ fn assign_sides(from_rows: &[f64], gate_row: f64) -> Vec<Edge> {
         choices = longer;
     }
     for choice in choices {
-        let cost: f64 = choice.iter().zip(from_rows).map(|(&e, &r)| (r - target(e)).abs()).sum();
+        if choice.iter().zip(forced).any(|(&e, f)| f.is_some_and(|f| f != e)) {
+            continue;
+        }
+        let gate_row = if choice.contains(&Edge::North) { row_with_north } else { row };
+        let target = |e: Edge| match e {
+            Edge::North => gate_row - 1.0,
+            Edge::South => gate_row + 1.0,
+            _ => gate_row,
+        };
+        let cost: f64 = choice
+            .iter()
+            .zip(from_rows)
+            .map(|(&e, &r)| (r - target(e)).abs() + if e == Edge::West { 0.0 } else { feed_cost })
+            .sum();
         if best.as_ref().is_none_or(|(c, _)| cost < *c) {
             best = Some((cost, choice));
         }
@@ -465,7 +647,7 @@ mod tests {
     fn columns_are_named_stably_and_gaps_have_their_own_width() {
         let netlist = Netlist::from_yosys_json(TWO_LEVELS, "top", &Library::builtin().unwrap()).unwrap();
         assert_eq!(gap_count(&netlist).unwrap(), 3);
-        let p = place(&netlist, &[2, 1, 3]).unwrap();
+        let p = place(&netlist, &[2, 1, 3], Style::Pitch4).unwrap();
         // sources, 2 routing, gate, 1 routing, gate, 3 routing, outputs
         assert_eq!(p.cols, 1 + 2 + 1 + 1 + 1 + 3 + 1);
         assert_eq!(p.column(0), Column::Sources);
@@ -482,10 +664,10 @@ mod tests {
         assert_eq!(p.col_width, vec![PITCH; p.cols as usize]);
         assert_eq!(p.row_depth, vec![PITCH; p.rows as usize]);
         // Widening the middle gap moves the later columns but keeps their names.
-        let q = place(&netlist, &[2, 2, 3]).unwrap();
+        let q = place(&netlist, &[2, 2, 3], Style::Pitch4).unwrap();
         assert_eq!(q.column(6), Column::Gates { index: 1, offset: 0 });
         assert_eq!(q.column(5), Column::Routing { gap: 1, offset: 1 });
-        assert!(place(&netlist, &[1, 1]).is_err());
+        assert!(place(&netlist, &[1, 1], Style::Pitch4).is_err());
     }
 
     #[test]
@@ -495,6 +677,103 @@ mod tests {
         assert_eq!(spread(&[7.0, 8.0, 9.0], 10), vec![7, 8, 9]);
         assert_eq!(spread(&[8.0, 9.0, 9.0], 10), vec![7, 8, 9]);
         assert_eq!(spread(&[-3.0, 2.0], 3), vec![0, 2]);
+    }
+
+    #[test]
+    fn a_feed_side_costs_a_packed_gate_a_row_so_the_west_wins_when_it_is_near() {
+        let free = |n: usize| vec![None; n];
+        // At the four-row pitch (no cost) a driver one row up takes the north side.
+        assert_eq!(assign_sides(&[4.0], 5.0, 5.0, 0.0, &free(1)), vec![Edge::North]);
+        // Packed, the gate moves down a row to make room for a north feed, so
+        // the west port is as near, and the feed row costs on top: west.
+        assert_eq!(assign_sides(&[4.0], 5.0, 6.0, FEED_ROW_COST, &free(1)), vec![Edge::West]);
+        // Three nets from below, above and the gate's own row: the one at the
+        // gate's row takes the west, the one below the south, the one above the north.
+        assert_eq!(
+            assign_sides(&[9.0, 2.0, 5.0], 5.0, 6.0, FEED_ROW_COST, &free(3)),
+            vec![Edge::South, Edge::West, Edge::North]
+        );
+        // A forced side is kept whatever it costs.
+        assert_eq!(
+            assign_sides(&[9.0, 2.0, 5.0], 5.0, 6.0, FEED_ROW_COST, &[None, Some(Edge::South), None]),
+            vec![Edge::West, Edge::South, Edge::North]
+        );
+    }
+
+    /// Three NOR2 gates reading nets (b, a), (c, a) and (a, d).
+    const SHARE: &str = r#"{"modules":{"top":{
+        "ports":{"a":{"direction":"input","bits":[2]},"b":{"direction":"input","bits":[3]},"c":{"direction":"input","bits":[4]},
+                 "d":{"direction":"input","bits":[5]},"y":{"direction":"output","bits":[6]},"z":{"direction":"output","bits":[7]},
+                 "w":{"direction":"output","bits":[8]}},
+        "cells":{"g0":{"type":"NOR2","connections":{"A":[3],"B":[2],"Y":[6]}},
+                 "g1":{"type":"NOR2","connections":{"A":[4],"B":[2],"Y":[7]}},
+                 "g2":{"type":"NOR2","connections":{"A":[2],"B":[5],"Y":[8]}}}}}}"#;
+
+    #[test]
+    fn packed_neighbours_share_a_feed_tile_only_when_both_would_take_the_net_on_a_feed_side() {
+        let netlist = Netlist::from_yosys_json(SHARE, "top", &Library::builtin().unwrap()).unwrap();
+        let pack = |order: &[usize], from: &[Vec<f64>], every: i32| {
+            let mut rows = vec![0; 3];
+            let mut sides = vec![Vec::new(); 3];
+            let bottom = pack_stage(&netlist, order, from, every, &mut rows, &mut sides);
+            (rows, sides, bottom)
+        };
+        // g0 reads b from above on the west and a from below on the south; g1
+        // reads c from far below on the west and a on a feed side: a is shared,
+        // g0 south, g1 north, and the pair takes three rows instead of four.
+        let (rows, sides, bottom) = pack(&[0, 1], &[vec![0.0, 6.0], vec![10.0, 6.0]], i32::MAX);
+        assert_eq!((rows[0], rows[1]), (0, 2));
+        assert_eq!((&sides[0], &sides[1]), (&vec![Edge::West, Edge::South], &vec![Edge::West, Edge::North]));
+        assert_eq!(bottom, 3);
+        // g2 reads a on the west of its own accord: no sharing, g2 one row lower
+        // with its north feed between.
+        let (rows, sides, bottom) = pack(&[0, 2], &[vec![0.0, 6.0], vec![6.0, 0.0]], i32::MAX);
+        assert_eq!((rows[0], rows[2]), (0, 3));
+        assert_eq!(sides[2], vec![Edge::West, Edge::North]);
+        assert_eq!(bottom, 4);
+        // A free row after every gate when nets pass the column.
+        let (rows, _, bottom) = pack(&[2, 0], &[vec![6.0, 0.0], vec![0.0, 6.0]], 1);
+        assert_eq!((rows[2], rows[0]), (1, 3));
+        assert_eq!(bottom, 5);
+    }
+
+    /// Packed, no two gates of a column want the same feed tile unless they
+    /// share it for one net on facing sides, every feed tile is free, and the
+    /// columns are no taller than at the four-row pitch.
+    #[test]
+    fn packed_feed_tiles_never_collide_and_the_columns_are_no_taller() {
+        for seed in 0..12u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let gates = 4 + rng.below(12);
+            let inputs = 2 + rng.below(4);
+            let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, 0);
+            let gaps = gap_count(&netlist).unwrap();
+            let packed = place(&netlist, &vec![1; gaps], Style::Packed).unwrap();
+            let pitch4 = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
+            let tallest = |p: &Placement| p.gates.iter().map(|g| g.1).max().unwrap_or(0);
+            assert!(tallest(&packed) <= tallest(&pitch4) && packed.rows <= pitch4.rows, "seed {seed}");
+            let mut feeds: BTreeMap<Cell, Vec<(usize, Edge)>> = BTreeMap::new();
+            for (c, cell) in netlist.cells.iter().enumerate() {
+                let (col, row) = packed.gates[c];
+                assert!(row >= 0 && row < packed.rows, "seed {seed}: gate {c} at row {row} of {}", packed.rows);
+                for (&net, &edge) in cell.inputs.iter().zip(&packed.pin_edges[c]) {
+                    let feed = match edge {
+                        Edge::North => (col, row - 1),
+                        Edge::South => (col, row + 1),
+                        _ => continue,
+                    };
+                    assert!(packed.is_free(feed), "seed {seed}: the feed tile {feed:?} of gate {c} is taken");
+                    feeds.entry(feed).or_default().push((net, edge));
+                }
+            }
+            for (feed, users) in feeds {
+                match users.as_slice() {
+                    [_] => {}
+                    [(a, ea), (b, eb)] => assert!(a == b && ea != eb, "seed {seed}: {feed:?} fed by {users:?}"),
+                    _ => panic!("seed {seed}: {feed:?} fed by {users:?}"),
+                }
+            }
+        }
     }
 
     #[test]
@@ -508,7 +787,7 @@ mod tests {
             "cells":{"g":{"type":"NOR2","connections":{"A":[2],"B":[3],"Y":[4]}},
                      "h":{"type":"NOR2","connections":{"A":[3],"B":[2],"Y":[5]}}}}}}"#;
         let netlist = Netlist::from_yosys_json(json, "top", &Library::builtin().unwrap()).unwrap();
-        let p = place(&netlist, &[1, 1]).unwrap();
+        let p = place(&netlist, &[1, 1], Style::Pitch4).unwrap();
         let estimate = estimate_routing(&netlist, &p);
         assert_eq!(estimate, vec![2, 1]);
     }
