@@ -308,7 +308,7 @@ mod tests {
     fn tiles_are_realized_where_the_tables_put_them() {
         let library = Library::builtin().unwrap();
         let netlist = Netlist::from_yosys_json(TOGGLE, "top", &library).unwrap();
-        let (routed, _) = place_and_route(&library, &netlist).unwrap();
+        let (routed, _) = place_and_route(&library, &netlist, crate::place::Style::Pitch4).unwrap();
         let layout = &routed.layout;
         let (cols, rows) = layout.size();
         assert_eq!(layout.col_width, vec![PITCH; layout.col_width.len()]);

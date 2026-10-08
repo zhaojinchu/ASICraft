@@ -933,7 +933,7 @@ fn unturned(edge: Edge, rotation: u8) -> Edge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::place::{estimate_routing, gap_count, place};
+    use crate::place::{Style, estimate_routing, gap_count, place};
     use crate::tile::Library;
 
     /// `n` inputs and `n` NOR3 gates, gate k reading inputs k, k+1 and k+3 (mod n):
@@ -983,7 +983,7 @@ mod tests {
     fn a_gap_too_narrow_is_given_up_after_stalling_and_named() {
         let netlist = braid(5);
         let gaps = gap_count(&netlist).unwrap();
-        let narrow = place(&netlist, &vec![1; gaps]).unwrap();
+        let narrow = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
         let estimate = estimate_routing(&netlist, &narrow);
         assert!(estimate[0] > 1, "the first gap must need more than one column: {estimate:?}");
         let library = Library::builtin().unwrap();
@@ -1012,7 +1012,7 @@ mod tests {
         assert!(history.costs.values().all(|&c| c > 0.0));
         assert!(history.costs.keys().any(|(column, _, _)| matches!(column, Column::Routing { gap: 0, .. })));
         // Widened to the estimate, the placement routes, cold and from the history.
-        let wide = place(&netlist, &estimate).unwrap();
+        let wide = place(&netlist, &estimate, Style::Pitch4).unwrap();
         let cold = route(&library, &netlist, &wide, None, &mut log).unwrap();
         let warm = route(&library, &netlist, &wide, Some(&history), &mut log).unwrap();
         assert!(cold.rounds > 0 && warm.rounds > 0);
@@ -1023,8 +1023,8 @@ mod tests {
     fn a_seeded_history_steers_nets_off_the_costly_tracks() {
         let netlist = braid(5);
         let gaps = gap_count(&netlist).unwrap();
-        let narrow = place(&netlist, &vec![1; gaps]).unwrap();
-        let wide = place(&netlist, &estimate_routing(&netlist, &narrow)).unwrap();
+        let narrow = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
+        let wide = place(&netlist, &estimate_routing(&netlist, &narrow), Style::Pitch4).unwrap();
         let first = first_routing_column(&wide);
         let library = Library::builtin().unwrap();
         let mut log = |_: &str| {};

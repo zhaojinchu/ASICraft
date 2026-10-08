@@ -8,10 +8,10 @@ use crate::bake::bake;
 use crate::block::Block;
 use crate::extract::{Circuit, extract, weak_signals};
 use crate::geom::Pos;
-use crate::layout::{Macro, Placed};
+use crate::layout::{Macro, Placed, Realized};
 use crate::lvs::lvs;
 use crate::netlist::{Driver, Netlist};
-use crate::place::{estimate_routing, gap_count, place};
+use crate::place::{Style, estimate_routing, gap_count, place};
 use crate::route::{History, RouteFailure, route};
 use crate::sim::Sim;
 use crate::structure::structure_file;
@@ -49,7 +49,7 @@ pub struct Design {
     /// Best and worst case for each output, in game ticks after an input change.
     #[serde(default)]
     pub timing: Timing,
-    /// How the gates were placed: `pitch4`, four rows per gate (stage 6).
+    /// How the gates were placed: the name of the [`Style`] the build kept.
     #[serde(default)]
     pub placement: String,
     /// Counts of the routed layout, which the area-period baseline
@@ -76,9 +76,6 @@ pub struct Grid {
     pub rows: i32,
     pub routing: Vec<i32>,
 }
-
-/// The one placement style today, named in `Design::placement`.
-pub const PLACEMENT_PITCH4: &str = "pitch4";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InputPin {
@@ -206,6 +203,14 @@ pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(B
 }
 
 /// [`build_unchecked`], telling `log` about each phase.
+///
+/// Every placement style is taken through placing, routing, the layout check and
+/// timing, and the best layout is kept: for a combinational design the smallest
+/// footprint, then the shortest settle, provided its inputs may change as often
+/// as under the four-row pitch; a clocked design keeps the four-row pitch in
+/// this step. The styles are tried in a fixed order and ties go to the earlier,
+/// so the same netlist always builds the same. The burnout budget is measured
+/// once, on the winner.
 pub fn build_unchecked_logged(
     netlist: &Netlist,
     name: &str,
@@ -214,161 +219,75 @@ pub fn build_unchecked_logged(
 ) -> Result<(Built, Vec<String>), String> {
     let library = Library::builtin()?;
     check_netlist(netlist)?;
-    let (mut routed, routing_cols) = place_and_route_logged(&library, netlist, log)?;
-    log("checking the layout against the netlist and timing it");
     let lamp_names: Vec<String> = netlist.outputs.iter().map(|p| p.name.clone()).collect();
-
-    // Realize, check and time; lengthen the D path of any flip-flop whose hold is
-    // violated (a repeater's delay up, or a repeater into a wire), and go again.
-    let mut rounds = 0;
-    let (realized, world, circuit, mut problems, mut timing) = loop {
-        let realized = routed.layout.realize(&library, netlist)?;
-        let world = bake(realized.world.clone())?;
-        let circuit = extract(&world, &realized.probes);
-        let mut problems = check_circuit(
-            &world,
-            &circuit,
-            netlist,
-            &realized.probes,
-            &realized.lamps,
-            &realized.ties,
-            &realized.macros,
-        );
-        let lamps_named: Vec<(String, Pos)> = lamp_names.iter().cloned().zip(realized.lamps.iter().copied()).collect();
-        let timing = match analyze_timing(&library, netlist, &world, &circuit, &realized, &lamps_named) {
-            Ok(timing) => timing,
-            Err(e) => {
-                problems.push(format!("timing: {e}"));
-                Timing::default()
+    let clocked = netlist.cells.iter().any(|c| c.is_dff());
+    let styles: &[Style] = if clocked { &[Style::Pitch4] } else { &Style::ALL };
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for &style in styles {
+        if styles.len() > 1 {
+            log(&format!("{} placement", style.name()));
+        }
+        match lay_out(&library, netlist, style, &lamp_names, log) {
+            Ok(candidate) => {
+                log(&format!("  {}: {}", style.name(), candidate.summary()));
+                candidates.push(candidate);
             }
-        };
-        let violated: Vec<String> = timing.sequential.as_ref().map(|s| s.hold_violations.clone()).unwrap_or_default();
-        if violated.is_empty() || !problems.is_empty() || rounds >= HOLD_FIX_ROUNDS {
-            break (realized, world, circuit, problems, timing);
+            Err(e) => {
+                log(&format!("  {} placement failed: {e}", style.name()));
+                failures.push(e);
+            }
         }
-        rounds += 1;
-        log(&format!("hold fix round {rounds}: lengthening the D path of {}", violated.join(", ")));
-        for cell in &violated {
-            let c = netlist.cells.iter().position(|x| x.label == *cell).expect("a flip-flop of the netlist");
-            lengthen(&mut routed, netlist, netlist.cells[c].inputs[0], (c, 0))
-                .map_err(|e| format!("flip-flop {cell}: cannot lengthen its D path for hold: {e}"))?;
-        }
-    };
-    if let Some(s) = &timing.sequential
-        && !s.hold_violations.is_empty()
-    {
-        problems.push(format!(
-            "hold violated at flip-flops {} after {rounds} rounds of fixes",
-            s.hold_violations.join(", ")
-        ));
+    }
+    if candidates.is_empty() {
+        return Err(failures.swap_remove(0));
+    }
+    // The pick, among the layouts that pass the checks (any at all when none does).
+    let eligible: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].problems.is_empty()).collect();
+    let chosen = eligible.iter().copied().min_by_key(|&i| candidates[i].rank(clocked)).unwrap_or(0);
+    let mut chosen = candidates.swap_remove(chosen);
+    if styles.len() > 1 {
+        log(&format!("keeping the {} placement", chosen.style.name()));
     }
 
     // A fault built in on purpose, after the fixes, so that the checks can catch it.
-    let (realized, world, _circuit) = match fault {
-        Break::None => (realized, world, circuit),
-        Break::Hold => {
-            break_layout(&mut routed, netlist, &timing, fault)?;
-            let realized = routed.layout.realize(&library, netlist)?;
-            let world = bake(realized.world.clone())?;
-            let circuit = extract(&world, &realized.probes);
-            problems = check_circuit(
-                &world,
-                &circuit,
-                netlist,
-                &realized.probes,
-                &realized.lamps,
-                &realized.ties,
-                &realized.macros,
-            );
-            let lamps_named: Vec<(String, Pos)> =
-                lamp_names.iter().cloned().zip(realized.lamps.iter().copied()).collect();
-            timing = match analyze_timing(&library, netlist, &world, &circuit, &realized, &lamps_named) {
-                Ok(timing) => timing,
-                Err(e) => {
-                    problems.push(format!("timing: {e}"));
-                    Timing::default()
-                }
-            };
-            if let Some(s) = &timing.sequential
-                && !s.hold_violations.is_empty()
-            {
-                problems.push(format!("hold violated at flip-flops {}", s.hold_violations.join(", ")));
-            }
-            (realized, world, circuit)
+    if fault == Break::Hold {
+        break_layout(&mut chosen.routed, netlist, &chosen.timing, fault)?;
+        let (realized, world, _, mut problems, timing) =
+            check_and_time(&library, netlist, &chosen.routed, &lamp_names)?;
+        if let Some(s) = &timing.sequential
+            && !s.hold_violations.is_empty()
+        {
+            problems.push(format!("hold violated at flip-flops {}", s.hold_violations.join(", ")));
         }
-    };
-    let layout = &routed.layout;
-    let settle_ticks = timing.settle_ticks();
-    let repeater_count = layout
-        .tiles
-        .values()
-        .filter(|p| matches!(p, Placed::Repeater { .. } | Placed::Cross { repeater_entry: Some(_), .. }))
-        .count();
-    let (cols, rows) = layout.size();
+        chosen = Candidate { realized, world, problems, timing, ..chosen };
+    }
 
-    let (sx, sy, sz) = world.size();
-    let design = Design {
-        format: DESIGN_FORMAT.to_string(),
-        name: name.to_string(),
-        size: [sx, sy, sz],
-        inputs: netlist
-            .inputs
-            .iter()
-            .zip(&realized.probes)
-            .map(|(port, probe)| InputPin {
-                name: port.name.clone(),
-                probe: probe.to_string(),
-                on: Block::RedstoneBlock.to_string(),
-                off: Block::Stone.to_string(),
-            })
-            .collect(),
-        outputs: netlist
-            .outputs
-            .iter()
-            .zip(&realized.lamps)
-            .map(|(port, lamp)| OutputPin { name: port.name.clone(), lamp: lamp.to_string() })
-            .collect(),
-        constants: realized
-            .ties
-            .iter()
-            .map(|&(net, value, pos)| ConstantPin { net, value, anchor: pos.to_string() })
-            .collect(),
-        settle_ticks,
-        timing: timing.clone(),
-        placement: PLACEMENT_PITCH4.to_string(),
-        tiles: layout.tiles.len(),
-        grid: Grid { cols, rows, routing: routing_cols.clone() },
-        repeaters: repeater_count,
-        hold_fix_rounds: rounds,
-        blocks: world.iter().map(|(pos, block)| (pos.to_string(), block.to_string())).collect(),
-    };
-    // The burnout budget: how fast the inputs may change (combinational designs),
-    // or whether the clock period respects it (clocked ones).
-    let design = {
-        let mut design = design;
-        if problems.is_empty() {
-            log("measuring the burnout budget");
+    let (mut design, mut problems) = finish(&chosen, netlist, name, log)?;
+    // A packed layout whose inputs must change less often than under the
+    // four-row pitch is not kept over it.
+    if !clocked
+        && chosen.style != Style::Pitch4
+        && design.timing.input_spacing > crate::timing::MIN_INPUT_SPACING
+        && let Some(i) = candidates.iter().position(|c| c.style == Style::Pitch4 && c.problems.is_empty())
+    {
+        let pitch4 = candidates.swap_remove(i);
+        let (other, other_problems) = finish(&pitch4, netlist, name, log)?;
+        if other.timing.input_spacing < design.timing.input_spacing {
+            log(&format!(
+                "keeping the pitch4 placement after all: its inputs may change every {} ticks, the {} placement's every {}",
+                other.timing.input_spacing,
+                chosen.style.name(),
+                design.timing.input_spacing
+            ));
+            chosen = pitch4;
+            design = other;
+            problems = other_problems;
         }
-        match &timing.sequential {
-            None if problems.is_empty() => {
-                timing.input_spacing = crate::timing::input_spacing(&design)?;
-                design.timing.input_spacing = timing.input_spacing;
-            }
-            Some(seq) if problems.is_empty() => {
-                let (worst, pos) = crate::timing::clock_stress(&design, 64, 1)?;
-                if worst > crate::timing::BURNOUT_BUDGET {
-                    problems.push(format!(
-                        "the torch at {} turns off {worst} times within sixty ticks at a clock period of {}; the budget is {}",
-                        pos.map_or("?".to_string(), |p| p.to_string()),
-                        seq.period,
-                        crate::timing::BURNOUT_BUDGET
-                    ));
-                }
-            }
-            _ => {}
-        }
-        design
-    };
+    }
+    let realized = &chosen.realized;
+    let (sx, sy, sz) = chosen.world.size();
+
     // The report prints the counts the design file carries, so the two cannot differ.
     let timing_line = match &design.timing.sequential {
         Some(seq) => sequential_report(seq, design.settle_ticks),
@@ -417,7 +336,188 @@ pub fn build_unchecked_logged(
         design.blocks.len(),
         if problems.is_empty() { "  layout matches the netlist\n" } else { "" },
     );
-    Ok((Built { structure: structure_file(&world), design, report }, problems))
+    Ok((Built { structure: structure_file(&chosen.world), design, report }, problems))
+}
+
+/// A layout in one placement style, checked and timed, before the pick.
+struct Candidate {
+    style: Style,
+    routed: crate::route::Routed,
+    routing_cols: Vec<i32>,
+    realized: Realized,
+    world: World,
+    /// What the layout check and the timing found wrong, if anything.
+    problems: Vec<String>,
+    timing: Timing,
+    hold_fix_rounds: usize,
+}
+
+impl Candidate {
+    /// What the pick minimises: the clock period then the footprint for a
+    /// clocked design, the footprint then the settle time for the rest.
+    fn rank(&self, clocked: bool) -> (u32, u32) {
+        let (sx, _, sz) = self.world.size();
+        let area = (sx * sz) as u32;
+        if clocked {
+            (self.timing.sequential.as_ref().map_or(u32::MAX, |s| s.period), area)
+        } else {
+            (area, self.timing.settle_ticks())
+        }
+    }
+
+    /// One line of what the layout came to.
+    fn summary(&self) -> String {
+        let (cols, rows) = self.routed.layout.size();
+        let (sx, _, sz) = self.world.size();
+        let timing = match &self.timing.sequential {
+            Some(seq) => format!("period {}", seq.period),
+            None => format!("settle {}", self.timing.settle_ticks()),
+        };
+        let problems =
+            if self.problems.is_empty() { String::new() } else { format!(", {} problems", self.problems.len()) };
+        format!("{cols} x {rows} tiles, {sx} x {sz} blocks, {timing}{problems}")
+    }
+}
+
+/// Places and routes `netlist` in `style`, then realizes, checks and times the
+/// layout, lengthening the D path of any flip-flop whose hold is violated (a
+/// repeater's delay up, or a repeater into a wire) and going again.
+fn lay_out(
+    library: &Library,
+    netlist: &Netlist,
+    style: Style,
+    lamp_names: &[String],
+    log: Log,
+) -> Result<Candidate, String> {
+    let (mut routed, routing_cols) = place_and_route_logged(library, netlist, style, log)?;
+    log("checking the layout against the netlist and timing it");
+    let mut rounds = 0;
+    loop {
+        let (realized, world, _, mut problems, timing) = check_and_time(library, netlist, &routed, lamp_names)?;
+        let violated: Vec<String> = timing.sequential.as_ref().map(|s| s.hold_violations.clone()).unwrap_or_default();
+        if violated.is_empty() || !problems.is_empty() || rounds >= HOLD_FIX_ROUNDS {
+            if !violated.is_empty() {
+                problems.push(format!(
+                    "hold violated at flip-flops {} after {rounds} rounds of fixes",
+                    violated.join(", ")
+                ));
+            }
+            return Ok(Candidate {
+                style,
+                routed,
+                routing_cols,
+                realized,
+                world,
+                problems,
+                timing,
+                hold_fix_rounds: rounds,
+            });
+        }
+        rounds += 1;
+        log(&format!("hold fix round {rounds}: lengthening the D path of {}", violated.join(", ")));
+        for cell in &violated {
+            let c = netlist.cells.iter().position(|x| x.label == *cell).expect("a flip-flop of the netlist");
+            lengthen(&mut routed, netlist, netlist.cells[c].inputs[0], (c, 0))
+                .map_err(|e| format!("flip-flop {cell}: cannot lengthen its D path for hold: {e}"))?;
+        }
+    }
+}
+
+/// Realizes a routed layout as blocks, checks them against the netlist and times them.
+fn check_and_time(
+    library: &Library,
+    netlist: &Netlist,
+    routed: &crate::route::Routed,
+    lamp_names: &[String],
+) -> Result<(Realized, World, Circuit, Vec<String>, Timing), String> {
+    let realized = routed.layout.realize(library, netlist)?;
+    let world = bake(realized.world.clone())?;
+    let circuit = extract(&world, &realized.probes);
+    let mut problems =
+        check_circuit(&world, &circuit, netlist, &realized.probes, &realized.lamps, &realized.ties, &realized.macros);
+    let lamps_named: Vec<(String, Pos)> = lamp_names.iter().cloned().zip(realized.lamps.iter().copied()).collect();
+    let timing = match analyze_timing(library, netlist, &world, &circuit, &realized, &lamps_named) {
+        Ok(timing) => timing,
+        Err(e) => {
+            problems.push(format!("timing: {e}"));
+            Timing::default()
+        }
+    };
+    Ok((realized, world, circuit, problems, timing))
+}
+
+/// The design file of a candidate, with the burnout budget measured: how fast
+/// the inputs may change (combinational designs), or whether the clock period
+/// respects it (clocked ones, a problem when not). Returns the design and the
+/// candidate's problems with any the budget adds.
+fn finish(candidate: &Candidate, netlist: &Netlist, name: &str, log: Log) -> Result<(Design, Vec<String>), String> {
+    let layout = &candidate.routed.layout;
+    let realized = &candidate.realized;
+    let timing = &candidate.timing;
+    let mut problems = candidate.problems.clone();
+    let repeater_count = layout
+        .tiles
+        .values()
+        .filter(|p| matches!(p, Placed::Repeater { .. } | Placed::Cross { repeater_entry: Some(_), .. }))
+        .count();
+    let (cols, rows) = layout.size();
+    let (sx, sy, sz) = candidate.world.size();
+    let mut design = Design {
+        format: DESIGN_FORMAT.to_string(),
+        name: name.to_string(),
+        size: [sx, sy, sz],
+        inputs: netlist
+            .inputs
+            .iter()
+            .zip(&realized.probes)
+            .map(|(port, probe)| InputPin {
+                name: port.name.clone(),
+                probe: probe.to_string(),
+                on: Block::RedstoneBlock.to_string(),
+                off: Block::Stone.to_string(),
+            })
+            .collect(),
+        outputs: netlist
+            .outputs
+            .iter()
+            .zip(&realized.lamps)
+            .map(|(port, lamp)| OutputPin { name: port.name.clone(), lamp: lamp.to_string() })
+            .collect(),
+        constants: realized
+            .ties
+            .iter()
+            .map(|&(net, value, pos)| ConstantPin { net, value, anchor: pos.to_string() })
+            .collect(),
+        settle_ticks: timing.settle_ticks(),
+        timing: timing.clone(),
+        placement: candidate.style.name().to_string(),
+        tiles: layout.tiles.len(),
+        grid: Grid { cols, rows, routing: candidate.routing_cols.clone() },
+        repeaters: repeater_count,
+        hold_fix_rounds: candidate.hold_fix_rounds,
+        blocks: candidate.world.iter().map(|(pos, block)| (pos.to_string(), block.to_string())).collect(),
+    };
+    if problems.is_empty() {
+        log("measuring the burnout budget");
+    }
+    match &timing.sequential {
+        None if problems.is_empty() => {
+            design.timing.input_spacing = crate::timing::input_spacing(&design)?;
+        }
+        Some(seq) if problems.is_empty() => {
+            let (worst, pos) = crate::timing::clock_stress(&design, 64, 1)?;
+            if worst > crate::timing::BURNOUT_BUDGET {
+                problems.push(format!(
+                    "the torch at {} turns off {worst} times within sixty ticks at a clock period of {}; the budget is {}",
+                    pos.map_or("?".to_string(), |p| p.to_string()),
+                    seq.period,
+                    crate::timing::BURNOUT_BUDGET
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok((design, problems))
 }
 
 /// The clocked design's lines of report.txt: the measured timing, and the rule a
@@ -619,18 +719,23 @@ pub fn clock_input(netlist: &Netlist) -> Result<usize, String> {
 
 /// Places and routes, giving the congested gaps more routing columns each time
 /// routing fails. Returns the routed layout and the routing columns per gap.
-pub fn place_and_route(library: &Library, netlist: &Netlist) -> Result<(crate::route::Routed, Vec<i32>), String> {
-    place_and_route_logged(library, netlist, &mut |_| {})
+pub fn place_and_route(
+    library: &Library,
+    netlist: &Netlist,
+    style: Style,
+) -> Result<(crate::route::Routed, Vec<i32>), String> {
+    place_and_route_logged(library, netlist, style, &mut |_| {})
 }
 
 /// [`place_and_route`], telling `log` about each attempt.
 pub fn place_and_route_logged(
     library: &Library,
     netlist: &Netlist,
+    style: Style,
     log: Log,
 ) -> Result<(crate::route::Routed, Vec<i32>), String> {
     let gaps = gap_count(netlist)?;
-    let first = place(netlist, &vec![1; gaps])?;
+    let first = place(netlist, &vec![1; gaps], style)?;
     let mut routing = estimate_routing(netlist, &first);
     log(&format!(
         "placing {} cells in {} gate columns and {} rows; routing columns estimated at {}",
@@ -642,7 +747,7 @@ pub fn place_and_route_logged(
     let mut history: Option<History> = None;
     let mut last = String::new();
     for attempt in 1..=MAX_ROUTING_ATTEMPTS {
-        let placement = place(netlist, &routing)?;
+        let placement = place(netlist, &routing, style)?;
         log(&format!(
             "routing attempt {attempt}: {} columns x {} rows, routing columns {}",
             placement.cols,
@@ -941,7 +1046,7 @@ mod tests {
     fn the_design_file_carries_the_counts_the_report_prints() {
         let built = build(NOR2, "top", "nor2").unwrap();
         let design = &built.design;
-        assert_eq!(design.placement, PLACEMENT_PITCH4);
+        assert!(Style::from_name(&design.placement).is_some(), "placement {:?}", design.placement);
         assert_eq!(design.hold_fix_rounds, 0);
         let line = built.report.lines().find(|l| l.contains("tiles:")).unwrap().trim();
         assert_eq!(
@@ -973,10 +1078,11 @@ mod tests {
             let (gates, inputs, flip_flops) = (2 + rng.below(6), 1 + rng.below(3), 1 + rng.below(3));
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
             let gaps = gap_count(&netlist).unwrap();
-            let estimate = estimate_routing(&netlist, &place(&netlist, &vec![1; gaps]).unwrap());
+            let estimate = estimate_routing(&netlist, &place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap());
             let mut lines: Vec<String> = Vec::new();
             let library = Library::builtin().unwrap();
-            let (_, routing) = place_and_route_logged(&library, &netlist, &mut |l| lines.push(l.to_string())).unwrap();
+            let (_, routing) =
+                place_and_route_logged(&library, &netlist, Style::Pitch4, &mut |l| lines.push(l.to_string())).unwrap();
             assert_eq!(routing.len(), gaps);
             assert!(routing.iter().zip(&estimate).all(|(r, e)| r >= e), "seed {seed}: {routing:?} < {estimate:?}");
             // Each widening names the gaps it widens; those gaps end wider than estimated.
