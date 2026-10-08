@@ -1,5 +1,5 @@
-// A WebSocket server that only ever sends: enough of RFC 6455 to accept a
-// browser or a test client on localhost and push text frames to it. No
+// A WebSocket server for the stream: enough of RFC 6455 to accept a client on
+// localhost, push text frames to it, and read the one request it may send. No
 // dependencies, so the mod needs nothing but the loader.
 package dev.redfab.observer;
 
@@ -15,6 +15,9 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 public final class WebSocketServer {
@@ -22,11 +25,15 @@ public final class WebSocketServer {
 
     private final int port;
     private final Supplier<String> hello;
+    private final BiConsumer<String, Consumer<String>> onRequest;
     private final List<Client> clients = new ArrayList<>();
 
-    public WebSocketServer(int port, Supplier<String> hello) {
+    /// `hello` is the first frame every client gets; `onRequest` sees each text
+    /// frame a client sends, with a way to answer that client alone.
+    public WebSocketServer(int port, Supplier<String> hello, BiConsumer<String, Consumer<String>> onRequest) {
         this.port = port;
         this.hello = hello;
+        this.onRequest = onRequest;
     }
 
     public void start() {
@@ -45,7 +52,7 @@ public final class WebSocketServer {
                 handler.start();
             }
         } catch (IOException e) {
-            System.out.println("[redfab-observer] cannot listen on " + port + ": " + e.getMessage());
+            Observer.LOGGER.warn("cannot listen on {}: {}", port, e.getMessage());
         }
     }
 
@@ -70,7 +77,7 @@ public final class WebSocketServer {
             synchronized (clients) {
                 clients.add(client);
             }
-            // Read the client's frames: answer pings, stop on close, ignore the rest.
+            // Read the client's frames: answer pings, hand text to the request handler, stop on close.
             while (true) {
                 int first = in.read();
                 if (first < 0) break;
@@ -86,6 +93,9 @@ public final class WebSocketServer {
                 for (int i = 0; i < payload.length; i++) payload[i] ^= mask[i & 3];
                 if (opcode == 0x8) break;
                 if (opcode == 0x9) client.frame(0xA, payload);
+                if (opcode == 0x1 && onRequest != null) {
+                    onRequest.accept(new String(payload, StandardCharsets.UTF_8), client::send);
+                }
             }
         } catch (Exception e) {
             // A client that goes away is not an error worth logging.
@@ -145,7 +155,15 @@ public final class WebSocketServer {
         }
     }
 
-    /// One client: frames go out from its own thread, so the server thread never waits on a socket.
+    /// How many clients are connected right now.
+    public int clientCount() {
+        synchronized (clients) {
+            return clients.size();
+        }
+    }
+
+    /// One client: frames go out from its own thread, so the server thread never
+    /// waits on a socket. The thread ends within a second of the client going.
     private static final class Client {
         private final Socket socket;
         private final OutputStream out;
@@ -165,6 +183,7 @@ public final class WebSocketServer {
         }
 
         void frame(int opcode, byte[] payload) {
+            if (!open) return;
             byte[] header;
             int n = payload.length;
             if (n < 126) {
@@ -188,7 +207,8 @@ public final class WebSocketServer {
         private void drain() {
             try {
                 while (open) {
-                    byte[] frame = queue.take();
+                    byte[] frame = queue.poll(1, TimeUnit.SECONDS);
+                    if (frame == null) continue; // nothing to send; look again, in case the client went
                     out.write(frame);
                     out.flush();
                 }
@@ -199,6 +219,7 @@ public final class WebSocketServer {
 
         void close() {
             open = false;
+            queue.clear();
             try {
                 socket.close();
             } catch (IOException ignored) {

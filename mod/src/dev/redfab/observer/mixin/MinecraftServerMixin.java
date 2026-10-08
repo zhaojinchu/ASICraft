@@ -19,6 +19,7 @@ public abstract class MinecraftServerMixin {
     @Inject(method = "tickServer(Ljava/util/function/BooleanSupplier;)V", at = @At("HEAD"))
     private void redfab$tickStarts(BooleanSupplier hasTimeLeft, CallbackInfo ci) {
         MinecraftServer server = (MinecraftServer) (Object) this;
+        Observer.attach(server);
         Observer.betweenTicks(server.overworld().getGameTime());
     }
 

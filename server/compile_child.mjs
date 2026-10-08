@@ -13,8 +13,12 @@ const hooks = process.env.REDFAB_TEST_HOOKS === '1';
 process.on('message', async (request) => {
     try {
         if (hooks && typeof request.source === 'string') {
-            // For the checks only: a compile that never ends, and one that eats memory.
-            const hook = request.source.match(/^\/\/ redfab-test: (hang|allocate (\d+))/);
+            // For the checks only: a compile that never ends, one that eats memory, and one that tells what it can see.
+            const hook = request.source.match(/^\/\/ redfab-test: (hang|env|allocate (\d+))/);
+            if (hook?.[1] === 'env') {
+                process.send({ ok: false, error: `env: ${Object.keys(process.env).sort().join(',')}` });
+                return;
+            }
             if (hook) {
                 if (hook[2]) {
                     const kept = [];

@@ -5,6 +5,17 @@
 // unknown type follows every command and its answer marks the end; and the
 // server wants one request per socket read, so the sentinel goes out only once
 // the command's first reply packet has arrived.
+//
+// The connection is not for life: when the socket closes or a command gets no
+// reply in time, every command in hand is rejected, and the next command dials
+// and authenticates again. `up` says whether a socket is open right now.
+//
+// One connection per server, not one per purpose: the vanilla server runs every
+// RCON client's commands through one shared console source (DedicatedServer
+// .runCommand clears it, runs the command on the server thread and reads it
+// back, with a thread per client and no lock), so two connections mix and lose
+// each other's replies. A command that must not wait behind the queue (a clock
+// edge) is sent `urgent`: it goes out next, ahead of what is queued.
 
 import { createConnection } from 'node:net';
 
@@ -16,22 +27,69 @@ const MAX_COMMAND_BYTES = 1446;
 export class RconError extends Error {}
 
 export class Rcon {
-    static connect(host, port, password, { timeout = 30_000 } = {}) {
+    /// Dials and authenticates; rejects when the server is not there or the password is wrong.
+    static async connect(host, port, password, options = {}) {
+        const rcon = new Rcon(host, port, password, options);
+        await rcon.dial();
+        return rcon;
+    }
+
+    constructor(host, port, password, { timeout = 30_000, commandTimeout = 30_000, log = () => {} } = {}) {
+        this.host = host;
+        this.port = port;
+        this.password = password;
+        this.connectTimeout = timeout;
+        this.commandTimeout = commandTimeout;
+        this.log = log;
+        this.socket = null;
+        this.dialing = null;
+        this.closed = false;
+        this.reconnects = -1; // the first dial is not a reconnect
+        this.buffer = Buffer.alloc(0);
+        this.nextId = 1;
+        this.queue = [];
+        this.current = null;
+        this.authWaiting = null;
+    }
+
+    /// Whether a socket is open and authenticated.
+    get up() {
+        return this.socket !== null && !this.socket.destroyed;
+    }
+
+    /// Opens the socket and authenticates, once at a time: concurrent callers share the attempt.
+    dial() {
+        if (this.closed) return Promise.reject(new RconError('the RCON client is closed'));
+        if (this.up) return Promise.resolve();
+        if (this.dialing) return this.dialing;
+        this.dialing = this.open().finally(() => {
+            this.dialing = null;
+        });
+        return this.dialing;
+    }
+
+    open() {
         return new Promise((resolve, reject) => {
-            const socket = createConnection({ host, port });
+            const socket = createConnection({ host: this.host, port: this.port });
+            socket.setNoDelay(true);
             const timer = setTimeout(() => {
                 socket.destroy();
-                reject(new RconError(`RCON did not connect within ${timeout} ms`));
-            }, timeout);
+                reject(new RconError(`RCON did not connect within ${this.connectTimeout} ms`));
+            }, this.connectTimeout);
             socket.once('error', (e) => {
                 clearTimeout(timer);
-                reject(e);
+                reject(e instanceof Error ? e : new RconError(String(e)));
             });
             socket.once('connect', () => {
-                const rcon = new Rcon(socket);
-                rcon.auth(password).then(() => {
+                this.socket = socket;
+                this.buffer = Buffer.alloc(0);
+                socket.on('data', (chunk) => this.onData(chunk));
+                socket.on('close', () => this.drop(socket, new RconError('the RCON connection closed')));
+                socket.on('error', (e) => this.drop(socket, e instanceof Error ? e : new RconError(String(e))));
+                this.auth().then(() => {
                     clearTimeout(timer);
-                    resolve(rcon);
+                    this.reconnects += 1;
+                    resolve();
                 }, (e) => {
                     clearTimeout(timer);
                     socket.destroy();
@@ -41,18 +99,12 @@ export class Rcon {
         });
     }
 
-    constructor(socket) {
-        this.socket = socket;
-        this.socket.setNoDelay(true);
-        this.buffer = Buffer.alloc(0);
-        this.nextId = 1;
-        this.queue = [];
-        this.current = null;
-        this.authWaiting = null;
-        this.commandTimeout = 30_000;
-        socket.on('data', (chunk) => this.onData(chunk));
-        socket.on('close', () => this.fail(new RconError('the RCON connection closed')));
-        socket.on('error', (e) => this.fail(e instanceof Error ? e : new RconError(String(e))));
+    /// The socket went away: the command in flight and the queue are rejected, explicitly.
+    drop(socket, error) {
+        if (socket !== this.socket) return;
+        this.socket = null;
+        socket.destroy();
+        this.fail(error);
     }
 
     takeId() {
@@ -70,31 +122,42 @@ export class Rcon {
         this.socket.write(packet);
     }
 
-    auth(password) {
+    auth() {
         return new Promise((resolve, reject) => {
             this.authWaiting = { resolve, reject };
-            this.send(this.takeId(), AUTH, password);
+            this.send(this.takeId(), AUTH, this.password);
         });
     }
 
-    /// Runs one command and resolves with its full reply text. Commands run one at a time.
-    command(text) {
+    /// Runs one command and resolves with its full reply text. Commands run one
+    /// at a time, in order, an `urgent` one ahead of the queue; with no socket
+    /// open, the first command dials.
+    command(text, { urgent = false } = {}) {
         if (Buffer.byteLength(text, 'utf8') > MAX_COMMAND_BYTES) {
             return Promise.reject(new RconError(`command is longer than ${MAX_COMMAND_BYTES} bytes`));
         }
+        if (this.closed) return Promise.reject(new RconError('the RCON client is closed'));
         return new Promise((resolve, reject) => {
-            this.queue.push({ text, resolve, reject });
+            if (urgent) this.queue.unshift({ text, resolve, reject });
+            else this.queue.push({ text, resolve, reject });
             this.pump();
         });
     }
 
     pump() {
         if (this.current || !this.queue.length) return;
+        if (!this.up) {
+            this.dial().then(() => this.pump(), (err) => {
+                this.log(`RCON: ${err.message}`);
+                this.fail(err);
+            });
+            return;
+        }
         const job = this.queue.shift();
         this.current = { ...job, cmdId: this.takeId(), endId: this.takeId(), parts: [], sentinelSent: false };
         this.current.timer = setTimeout(() => {
-            this.fail(new RconError(`no reply to ${JSON.stringify(job.text)} within ${this.commandTimeout} ms`));
-            this.socket.destroy();
+            const socket = this.socket;
+            this.drop(socket, new RconError(`no reply to ${JSON.stringify(job.text)} within ${this.commandTimeout} ms`));
         }, this.commandTimeout);
         this.send(this.current.cmdId, COMMAND, job.text);
     }
@@ -134,7 +197,7 @@ export class Rcon {
                 this.send(current.endId, SENTINEL, '');
             }
         } else {
-            this.fail(new RconError(`unexpected RCON reply id ${id} for ${JSON.stringify(current.text)}`));
+            this.drop(this.socket, new RconError(`unexpected RCON reply id ${id} for ${JSON.stringify(current.text)}`));
         }
     }
 
@@ -151,7 +214,12 @@ export class Rcon {
         for (const job of this.queue.splice(0)) job.reject(error);
     }
 
+    /// Closes for good: no command runs after this.
     close() {
-        this.socket.destroy();
+        this.closed = true;
+        const socket = this.socket;
+        this.socket = null;
+        socket?.destroy();
+        this.fail(new RconError('the RCON client is closed'));
     }
 }

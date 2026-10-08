@@ -1,61 +1,16 @@
 // Shared by the live playground's checks: trace comparison in the trace
-// format, a WebSocket client with a message queue, and small waits.
+// format (from server/trace.mjs, the same code the backend records with), a
+// WebSocket client with a message queue, and small waits.
 
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { root, wasmPath } from './common.mjs';
 
-export const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-export const wasmPath = join(root, 'target/wasm32-unknown-unknown/release/redfab_wasm.wasm');
+export { root, wasmPath };
+export { canonicalState, changesAt, firstTraceDifference, stateAt } from '../server/trace.mjs';
 
 export const nativeDesign = (name) => readFileSync(join(root, 'build/designs', name, 'design.json'), 'utf8');
 export const designSource = (name) => readFileSync(join(root, 'designs', name, 'top.sv'), 'utf8');
-
-/// The block states inside the box after `tick` ticks of a trace, air left out.
-export function stateAt(trace, tick) {
-    const state = new Map(Object.entries(trace.initial));
-    for (const entry of trace.ticks) {
-        if (entry.tick > tick) break;
-        for (const [pos, block] of Object.entries(entry.changes)) {
-            if (block === 'minecraft:air') state.delete(pos);
-            else state.set(pos, block);
-        }
-    }
-    return state;
-}
-
-/// The first tick at which two traces disagree, as text, or null. Pending ticks
-/// are not compared: a live source cannot report them.
-export function firstTraceDifference(a, b) {
-    const describe = (sa, sb) => {
-        const diffs = [];
-        for (const pos of [...new Set([...sa.keys(), ...sb.keys()])].sort()) {
-            if ((sa.get(pos) ?? 'minecraft:air') !== (sb.get(pos) ?? 'minecraft:air')) {
-                diffs.push(`${pos}: ${sa.get(pos) ?? 'minecraft:air'} vs ${sb.get(pos) ?? 'minecraft:air'}`);
-            }
-            if (diffs.length >= 5) break;
-        }
-        return diffs.join('; ');
-    };
-    const sa0 = stateAt(a, 0);
-    const sb0 = stateAt(b, 0);
-    if (describe(sa0, sb0)) return `initial state differs: ${describe(sa0, sb0)}`;
-    const last = Math.max(a.ticks.at(-1)?.tick ?? 0, b.ticks.at(-1)?.tick ?? 0);
-    const ticks = new Set([...a.ticks.map((t) => t.tick), ...b.ticks.map((t) => t.tick)]);
-    for (let t = 1; t <= last; t++) {
-        if (!ticks.has(t)) continue;
-        const sa = stateAt(a, t);
-        const sb = stateAt(b, t);
-        const diff = describe(sa, sb);
-        if (diff) return `tick ${t}: ${diff}`;
-    }
-    return null;
-}
-
-/// How many entries of a trace change the given position.
-export function changesAt(trace, pos) {
-    return trace.ticks.filter((t) => pos in t.changes).length;
-}
 
 /// A WebSocket with a queue, so a test can wait for the next message.
 export function connect(url) {
@@ -135,10 +90,10 @@ export async function waitFor(fn, ms = 10_000, every = 50) {
     }
 }
 
-export async function api(base, path, { method = 'GET', body } = {}) {
+export async function api(base, path, { method = 'GET', body, headers = {} } = {}) {
     const reply = await fetch(`${base}${path}`, {
         method,
-        headers: body === undefined ? {} : { 'content-type': 'application/json' },
+        headers: { ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers },
         body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body),
     });
     const text = await reply.text();
@@ -148,5 +103,5 @@ export async function api(base, path, { method = 'GET', body } = {}) {
     } catch {
         json = { error: text };
     }
-    return { status: reply.status, body: json };
+    return { status: reply.status, body: json, headers: reply.headers };
 }
