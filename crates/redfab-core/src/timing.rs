@@ -141,6 +141,31 @@ pub struct FlipFlopTiming {
     pub setup_slack: Option<i32>,
 }
 
+impl Sequential {
+    /// The same report at a longer `period`: the clock is high for half of it,
+    /// the outputs are read a tick before its end, the inputs may change until
+    /// as long before the next edge as before, and every setup slack grows by
+    /// the difference. Slowing the clock changes nothing else.
+    pub fn at_period(&self, period: u32) -> Sequential {
+        assert!(period >= self.period, "a period of {period} is shorter than the {} analysed", self.period);
+        let longer = period - self.period;
+        let mut slowed = self.clone();
+        slowed.period = period;
+        slowed.high = period / 2;
+        slowed.sample_at = period - 1;
+        slowed.input_change_by += longer;
+        for t in &mut slowed.flip_flops {
+            if let Some(slack) = &mut t.setup_slack {
+                *slack += longer as i32;
+            }
+        }
+        slowed
+    }
+}
+
+/// The longest clock period offered: past it the analysis gives up.
+pub const MAX_PERIOD: i32 = 400;
+
 impl Timing {
     /// Game ticks after an input change by which every output is final: the
     /// bound by path, which is never less than the exact figure.
@@ -322,8 +347,8 @@ pub fn analyze_sequential(
             break;
         }
         period += 2;
-        if period > 400 {
-            return Err("no clock period below 400 ticks satisfies the design".to_string());
+        if period > MAX_PERIOD {
+            return Err(format!("no clock period below {MAX_PERIOD} ticks satisfies the design"));
         }
     }
     if period % 2 == 1 {
@@ -1238,6 +1263,41 @@ mod tests {
     const NOT: &str = r#"{"modules":{"top":{
         "ports":{"a":{"direction":"input","bits":[2]},"y":{"direction":"output","bits":[3]}},
         "cells":{"g":{"type":"NOT","connections":{"A":[2],"Y":[3]}}}}}}"#;
+
+    /// Slowing the clock keeps the report consistent: the high half, the
+    /// sample tick and the end of the input window follow the period, every
+    /// setup slack grows by the difference, and nothing else moves.
+    #[test]
+    fn a_report_at_a_longer_period_moves_only_what_the_period_sets() {
+        let seq = Sequential {
+            clock: "clk".to_string(),
+            active: "rising".to_string(),
+            period: 92,
+            high: 46,
+            input_change_from: 3,
+            input_change_by: 17,
+            input_change_at: 3,
+            sample_at: 91,
+            flip_flops: vec![
+                FlipFlopTiming {
+                    cell: "q0".to_string(),
+                    clock_arrival: 4,
+                    hold_slack: Some(3),
+                    setup_slack: Some(10),
+                    ..Default::default()
+                },
+                FlipFlopTiming { cell: "q1".to_string(), clock_arrival: 7, ..Default::default() },
+            ],
+            hold_violations: Vec::new(),
+        };
+        let slowed = seq.at_period(100);
+        assert_eq!((slowed.period, slowed.high, slowed.sample_at), (100, 50, 99));
+        assert_eq!((slowed.input_change_from, slowed.input_change_by, slowed.input_change_at), (3, 25, 3));
+        assert_eq!(slowed.flip_flops[0].setup_slack, Some(18));
+        assert_eq!(slowed.flip_flops[0].hold_slack, Some(3));
+        assert_eq!(slowed.flip_flops[1].setup_slack, None);
+        assert_eq!(seq.at_period(92), seq);
+    }
     const NOR2: &str = r#"{"modules":{"top":{
         "ports":{"a":{"direction":"input","bits":[2]},"b":{"direction":"input","bits":[3]},"y":{"direction":"output","bits":[4]}},
         "cells":{"g":{"type":"NOR2","connections":{"A":[2],"B":[3],"Y":[4]}}}}}}"#;

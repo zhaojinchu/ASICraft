@@ -135,8 +135,6 @@ def test_the_committed_baseline_is_canonical_and_lists_exactly_the_shipped_desig
     assert sorted(rows) == shipped
     for name, row in rows.items():
         assert row["placement"] in STYLES, name
-        if "period" in row:
-            assert row["placement"] == "pitch4", f"{name}: clocked designs keep the four-row pitch until step 3"
         assert row["cells"] >= 1 and row["tiles"] >= row["cells"], name
         assert ("period" in row) != ("input_spacing" in row), name
         assert row["area"] == row["footprint"][0] * row["footprint"][1], name
