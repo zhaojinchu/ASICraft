@@ -196,6 +196,14 @@ pub enum Break {
 /// Rounds of lengthening short paths before giving up on hold.
 const HOLD_FIX_ROUNDS: usize = 20;
 
+/// The placement styles a combinational design is laid out in, and a clocked
+/// one, in the order they are tried (ties in the pick go to the earlier). The
+/// stretched style measured as a loss on every combinational design (adder8
+/// 455 x 195 against 470 x 180 packed, adder4 its inputs changing every 12
+/// ticks instead of 8), so it is tried for the clocked ones.
+const COMBINATIONAL_STYLES: &[Style] = &[Style::Pitch4, Style::Packed];
+const CLOCKED_STYLES: &[Style] = &Style::ALL;
+
 /// [`build_netlist`], but a layout that fails the checks is returned along with
 /// the problems instead of being an error, so it can be looked at.
 pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(Built, Vec<String>), String> {
@@ -207,10 +215,13 @@ pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(B
 /// Every placement style is taken through placing, routing, the layout check and
 /// timing, and the best layout is kept: for a combinational design the smallest
 /// footprint, then the shortest settle, provided its inputs may change as often
-/// as under the four-row pitch; a clocked design keeps the four-row pitch in
-/// this step. The styles are tried in a fixed order and ties go to the earlier,
-/// so the same netlist always builds the same. The burnout budget is measured
-/// once, on the winner.
+/// as under the four-row pitch; for a clocked design the least footprint times
+/// clock period, then the shorter period (counter4 stretched measured half the
+/// footprint of the four-row pitch for a period 6 % longer, negedge packed 6 %
+/// less footprint for a period 45 % longer). The styles are tried in a fixed order and ties
+/// go to the earlier, so the same netlist always builds the same. The burnout
+/// budget is measured once, on the winner (a clocked design's clock slows until
+/// it is met).
 pub fn build_unchecked_logged(
     netlist: &Netlist,
     name: &str,
@@ -221,7 +232,7 @@ pub fn build_unchecked_logged(
     check_netlist(netlist)?;
     let lamp_names: Vec<String> = netlist.outputs.iter().map(|p| p.name.clone()).collect();
     let clocked = netlist.cells.iter().any(|c| c.is_dff());
-    let styles: &[Style] = if clocked { &[Style::Pitch4] } else { &Style::ALL };
+    let styles: &[Style] = if clocked { CLOCKED_STYLES } else { COMBINATIONAL_STYLES };
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     for &style in styles {
@@ -353,15 +364,17 @@ struct Candidate {
 }
 
 impl Candidate {
-    /// What the pick minimises: the clock period then the footprint for a
-    /// clocked design, the footprint then the settle time for the rest.
-    fn rank(&self, clocked: bool) -> (u32, u32) {
+    /// What the pick minimises: for a clocked design the footprint times the
+    /// clock period, then the period; for the rest the footprint, then the
+    /// settle time.
+    fn rank(&self, clocked: bool) -> (u64, u64) {
         let (sx, _, sz) = self.world.size();
-        let area = (sx * sz) as u32;
+        let area = (sx * sz) as u64;
         if clocked {
-            (self.timing.sequential.as_ref().map_or(u32::MAX, |s| s.period), area)
+            let period = self.timing.sequential.as_ref().map_or(u64::from(u32::MAX), |s| u64::from(s.period));
+            (area * period, period)
         } else {
-            (area, self.timing.settle_ticks())
+            (area, u64::from(self.timing.settle_ticks()))
         }
     }
 
@@ -402,6 +415,7 @@ fn lay_out(
                     violated.join(", ")
                 ));
             }
+            problems.extend(unlengthenable(&routed, netlist));
             return Ok(Candidate {
                 style,
                 routed,
@@ -504,20 +518,42 @@ fn finish(candidate: &Candidate, netlist: &Netlist, name: &str, log: Log) -> Res
         None if problems.is_empty() => {
             design.timing.input_spacing = crate::timing::input_spacing(&design)?;
         }
-        Some(seq) if problems.is_empty() => {
-            let (worst, pos) = crate::timing::clock_stress(&design, 64, 1)?;
-            if worst > crate::timing::BURNOUT_BUDGET {
-                problems.push(format!(
-                    "the torch at {} turns off {worst} times within sixty ticks at a clock period of {}; the budget is {}",
-                    pos.map_or("?".to_string(), |p| p.to_string()),
-                    seq.period,
-                    crate::timing::BURNOUT_BUDGET
-                ));
+        Some(_) if problems.is_empty() => {
+            if let Err(e) = slow_clock_to_budget(&mut design, log) {
+                problems.push(e);
             }
         }
         _ => {}
     }
     Ok((design, problems))
+}
+
+/// Runs the clock stress at the design's period and, while some torch turns off
+/// more often than the budget allows, slows the clock two ticks at a time; a
+/// problem when no period up to the longest offered keeps within the budget.
+fn slow_clock_to_budget(design: &mut Design, log: Log) -> Result<(), String> {
+    loop {
+        let (worst, pos) = crate::timing::clock_stress(design, 64, 1)?;
+        if worst <= crate::timing::BURNOUT_BUDGET {
+            return Ok(());
+        }
+        let seq = design.timing.sequential.as_ref().expect("a clocked design");
+        let torch = pos.map_or("?".to_string(), |p| p.to_string());
+        if seq.period as i32 + 2 > crate::timing::MAX_PERIOD {
+            return Err(format!(
+                "the torch at {torch} turns off {worst} times within sixty ticks at a clock period of {}; the budget is {}, and no longer period is offered",
+                seq.period,
+                crate::timing::BURNOUT_BUDGET
+            ));
+        }
+        log(&format!(
+            "the torch at {torch} turns off {worst} times within sixty ticks at a clock period of {}; the budget is {}, so the clock slows to {}",
+            seq.period,
+            crate::timing::BURNOUT_BUDGET,
+            seq.period + 2
+        ));
+        design.timing.sequential = Some(seq.at_period(seq.period + 2));
+    }
 }
 
 /// The clocked design's lines of report.txt: the measured timing, and the rule a
@@ -554,36 +590,67 @@ fn sequential_report(seq: &crate::timing::Sequential, settle_ticks: u32) -> Stri
 
 /// Lengthens the path of `net` to `sink` by two game ticks: the last tile of the
 /// branch that no other sink of the net shares gets a repeater, or its repeater
-/// one more setting. Crossings cannot take one.
+/// one more setting; a branch with no tile of its own (one that is a prefix of
+/// another sink's) lengthens at the last tile it shares, and the paths through
+/// that tile with it. Crossings cannot take one.
 fn lengthen(
     routed: &mut crate::route::Routed,
     netlist: &Netlist,
     net: usize,
     sink: (usize, usize),
 ) -> Result<(), String> {
+    let (cell, longer) = lengthening(routed, netlist, net, sink)?;
+    routed.layout.tiles.insert(cell, longer);
+    Ok(())
+}
+
+/// What [`lengthen`] would change: the tile, and what it becomes.
+fn lengthening(
+    routed: &crate::route::Routed,
+    netlist: &Netlist,
+    net: usize,
+    sink: (usize, usize),
+) -> Result<(crate::place::Cell, Placed), String> {
     let index = netlist.sinks_of(net).iter().position(|s| *s == sink).ok_or("not a sink of the net")?;
     let branches = routed.branches.get(&net).ok_or("the net was not routed")?;
     let own = &branches[index];
     let shared = |cell: &crate::place::Cell| {
         branches.iter().enumerate().any(|(i, b)| i != index && b.iter().any(|(c, _)| c == cell))
     };
-    for &(cell, entry) in own.iter().rev() {
-        if shared(&cell) {
-            continue;
-        }
-        match routed.layout.tiles.get(&cell).cloned() {
-            Some(Placed::Wire { edges }) => {
-                routed.layout.tiles.insert(cell, Placed::Repeater { edges, entry, delay: 1 });
-                return Ok(());
+    // Tiles of its own first, from the sink back; then the shared ones.
+    for only_own in [true, false] {
+        for &(cell, entry) in own.iter().rev() {
+            if shared(&cell) == only_own {
+                continue;
             }
-            Some(Placed::Repeater { edges, entry, delay }) if delay < 4 => {
-                routed.layout.tiles.insert(cell, Placed::Repeater { edges, entry, delay: delay + 1 });
-                return Ok(());
+            match routed.layout.tiles.get(&cell).cloned() {
+                Some(Placed::Wire { edges }) => return Ok((cell, Placed::Repeater { edges, entry, delay: 1 })),
+                Some(Placed::Repeater { edges, entry, delay }) if delay < 4 => {
+                    return Ok((cell, Placed::Repeater { edges, entry, delay: delay + 1 }));
+                }
+                _ => continue,
             }
-            _ => continue,
         }
     }
-    Err("no tile of its own on the way can take a repeater or a longer one".to_string())
+    Err("no tile on the way can take a repeater or a longer one".to_string())
+}
+
+/// The flip-flops whose D path could not be lengthened for hold: the fixer must
+/// always have a tile to use, so a layout that leaves one without (a D branch
+/// of nothing but crossings and repeaters at their longest) is refused even
+/// when its hold is met.
+fn unlengthenable(routed: &crate::route::Routed, netlist: &Netlist) -> Vec<String> {
+    netlist
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| cell.is_dff())
+        .filter_map(|(c, cell)| {
+            lengthening(routed, netlist, cell.inputs[0], (c, 0))
+                .err()
+                .map(|e| format!("flip-flop {}: its D path cannot be lengthened for hold: {e}", cell.label))
+        })
+        .collect()
 }
 
 /// Builds a fault in: slows the clock to the flip-flop with the least hold slack
@@ -734,7 +801,7 @@ pub fn place_and_route_logged(
     style: Style,
     log: Log,
 ) -> Result<(crate::route::Routed, Vec<i32>), String> {
-    let gaps = gap_count(netlist)?;
+    let gaps = gap_count(netlist, style)?;
     let first = place(netlist, &vec![1; gaps], style)?;
     let mut routing = estimate_routing(netlist, &first);
     log(&format!(
@@ -1077,7 +1144,7 @@ mod tests {
             let mut rng = crate::tiletest::Rng::new(seed);
             let (gates, inputs, flip_flops) = (2 + rng.below(6), 1 + rng.below(3), 1 + rng.below(3));
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
-            let gaps = gap_count(&netlist).unwrap();
+            let gaps = gap_count(&netlist, Style::Pitch4).unwrap();
             let estimate = estimate_routing(&netlist, &place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap());
             let mut lines: Vec<String> = Vec::new();
             let library = Library::builtin().unwrap();
@@ -1105,10 +1172,9 @@ mod tests {
     }
 
     /// A column of inverters reads only on the west, so the packed style lays
-    /// them in consecutive rows and the pick takes it over four rows per gate;
-    /// the clocked designs keep the four-row pitch in this step.
+    /// them in consecutive rows and the pick takes it over four rows per gate.
     #[test]
-    fn inverters_pack_into_consecutive_rows_and_clocked_designs_keep_the_pitch() {
+    fn inverters_pack_into_consecutive_rows() {
         let mut ports = Vec::new();
         let mut cells = Vec::new();
         for i in 0..6 {
@@ -1124,8 +1190,82 @@ mod tests {
         assert!(built.design.grid.rows <= 7, "{} rows for six inverters", built.design.grid.rows);
         let vectors = r#"[{"a0":0,"a1":1,"a2":0,"a3":1,"a4":0,"a5":1}]"#;
         assert_eq!(outputs(&built.design, vectors), r#"[{"y0":1,"y1":0,"y2":1,"y3":0,"y4":1,"y5":0}]"#);
-        let toggle = build(TOGGLE, "top", "toggle").unwrap();
-        assert_eq!(toggle.design.placement, "pitch4");
+    }
+
+    /// Every style the build may pick has a name a design file records and the
+    /// harness knows (`harness.area_check.STYLES`), and the name reads back.
+    #[test]
+    fn every_placement_style_has_a_name_the_design_file_records() {
+        for name in ["pitch4", "packed", "stretched"] {
+            let style = Style::from_name(name).unwrap_or_else(|| panic!("no placement style named {name}"));
+            assert_eq!(style.name(), name);
+        }
+        assert_eq!(Style::ALL.len(), 3);
+        assert!(Style::from_name("stacked").is_none());
+    }
+
+    /// The burnout budget: a clocked design whose period would make a torch
+    /// turn off more than six times in sixty ticks is slowed, two ticks at a
+    /// time, until it keeps within the budget, instead of being refused.
+    #[test]
+    fn a_clock_too_fast_for_the_burnout_budget_is_slowed_until_it_keeps_within_it() {
+        let mut design = build(TOGGLE, "top", "toggle").unwrap().design;
+        let analysed = design.timing.sequential.clone().unwrap();
+        // At a period of 8 the clock inverter alone turns off 7.5 times in sixty ticks.
+        let mut fast = analysed.clone();
+        fast.period = 8;
+        fast.high = 4;
+        fast.sample_at = 7;
+        design.timing.sequential = Some(fast);
+        let (worst, _) = crate::timing::clock_stress(&design, 64, 1).unwrap();
+        assert!(worst > crate::timing::BURNOUT_BUDGET, "{worst} turn-offs at period 8");
+        let mut lines: Vec<String> = Vec::new();
+        slow_clock_to_budget(&mut design, &mut |l| lines.push(l.to_string())).unwrap();
+        let slowed = design.timing.sequential.clone().unwrap();
+        assert!(slowed.period > 8 && slowed.period <= analysed.period, "slowed to {}", slowed.period);
+        assert!(slowed.period.is_multiple_of(2));
+        assert_eq!((slowed.high, slowed.sample_at), (slowed.period / 2, slowed.period - 1));
+        let (worst, _) = crate::timing::clock_stress(&design, 64, 1).unwrap();
+        assert!(worst <= crate::timing::BURNOUT_BUDGET);
+        assert_eq!(lines.len() as u32, (slowed.period - 8) / 2);
+        assert!(lines[0].contains("at a clock period of 8; the budget is 6, so the clock slows to 10"), "{}", lines[0]);
+    }
+
+    /// The hold fixer always has a tile: in every style, every flip-flop's D
+    /// branch of these random clocked netlists can be lengthened, and when a
+    /// branch has no tile of its own (it is a prefix of another sink's branch)
+    /// the fix goes into a tile it shares.
+    #[test]
+    fn every_flip_flop_keeps_a_tile_the_hold_fixer_can_use() {
+        let library = Library::builtin().unwrap();
+        let mut shared_fixes = 0;
+        for seed in 100..106u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let (gates, inputs, flip_flops) = (2 + rng.below(6), 1 + rng.below(3), 1 + rng.below(3));
+            let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
+            for style in Style::ALL {
+                let (routed, _) = place_and_route(&library, &netlist, style).unwrap();
+                assert!(unlengthenable(&routed, &netlist).is_empty(), "seed {seed}, {}", style.name());
+                for (c, cell) in netlist.cells.iter().enumerate().filter(|(_, cell)| cell.is_dff()) {
+                    let net = cell.inputs[0];
+                    let (at, longer) = lengthening(&routed, &netlist, net, (c, 0)).unwrap();
+                    assert!(matches!(longer, Placed::Repeater { .. }));
+                    let branches = &routed.branches[&net];
+                    let index = netlist.sinks_of(net).iter().position(|s| *s == (c, 0)).unwrap();
+                    let shared =
+                        branches.iter().enumerate().any(|(i, b)| i != index && b.iter().any(|(t, _)| *t == at));
+                    if shared {
+                        shared_fixes += 1;
+                        // Only because no tile of its own could take the fix.
+                        assert!(branches[index].iter().all(|(t, _)| {
+                            branches.iter().enumerate().any(|(i, b)| i != index && b.iter().any(|(u, _)| u == t))
+                                || !matches!(routed.layout.tiles.get(t), Some(Placed::Wire { .. }))
+                        }));
+                    }
+                }
+            }
+        }
+        assert!(shared_fixes > 0, "no branch without a tile of its own among the seeds");
     }
 
     #[test]

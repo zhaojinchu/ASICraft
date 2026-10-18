@@ -982,7 +982,7 @@ mod tests {
     #[test]
     fn a_gap_too_narrow_is_given_up_after_stalling_and_named() {
         let netlist = braid(5);
-        let gaps = gap_count(&netlist).unwrap();
+        let gaps = gap_count(&netlist, Style::Pitch4).unwrap();
         let narrow = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
         let estimate = estimate_routing(&netlist, &narrow);
         assert!(estimate[0] > 1, "the first gap must need more than one column: {estimate:?}");
@@ -1022,7 +1022,7 @@ mod tests {
     #[test]
     fn a_seeded_history_steers_nets_off_the_costly_tracks() {
         let netlist = braid(5);
-        let gaps = gap_count(&netlist).unwrap();
+        let gaps = gap_count(&netlist, Style::Pitch4).unwrap();
         let narrow = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
         let wide = place(&netlist, &estimate_routing(&netlist, &narrow), Style::Pitch4).unwrap();
         let first = first_routing_column(&wide);

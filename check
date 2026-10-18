@@ -509,7 +509,14 @@ build_deterministic() {
     cmp build/designs/adder4/mapped.json build/again/adder4/mapped.json &&
     cmp build/designs/adder4/design.json build/again/adder4/design.json &&
     cmp build/designs/adder4/world.nbt build/again/adder4/world.nbt &&
-    echo "adder4 builds the same twice"
+    echo "adder4 builds the same twice" &&
+    # A clocked design goes through the pick among the placement styles too; the
+    # clocked builds come later in the gate, so this one is built twice here.
+    $REDFAB build designs/mem2/top.sv --top top -o build/again/once/mem2 >/dev/null &&
+    $REDFAB build designs/mem2/top.sv --top top -o build/again/twice/mem2 >/dev/null &&
+    cmp build/again/once/mem2/design.json build/again/twice/mem2/design.json &&
+    cmp build/again/once/mem2/world.nbt build/again/twice/mem2/world.nbt &&
+    echo "mem2 builds the same twice"
 }
 
 # In the game (from the traces recorded by design-vanilla above): after every input
