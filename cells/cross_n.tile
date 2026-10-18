@@ -1,0 +1,43 @@
+# The crossing for a routing column three blocks wide: west-east stays at y = 1
+# along the middle row, north-south climbs over it down the middle column, as
+# in the crossing tile (whose comments say why the stones keep the two apart).
+# The flat arm is three blocks, port, centre, port, so a repeater in it sits
+# at the centre under the bridge; the climbing arm has no room for one, and the
+# tile cannot be turned to give it one (that takes five blocks across).
+tile cross_n
+size 3 4 5
+port W io 0 1 2
+port E io 2 1 2
+port N io 1 1 0
+port S io 1 1 4
+function cross
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  - minecraft:redstone_wire
+
+layer 0
+  .G.
+  ...
+  GGG
+  ...
+  .G.
+layer 1
+  .-.
+  .#.
+  ---
+  .#.
+  .-.
+layer 2
+  ...
+  .-.
+  .#.
+  .-.
+  ...
+layer 3
+  ...
+  ...
+  .-.
+  ...
+  ...

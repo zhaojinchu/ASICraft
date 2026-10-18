@@ -1,0 +1,36 @@
+# The wire tile for a routing column three blocks wide: the north-south arm runs
+# down the middle column (x = 1), the west-east arm along the middle row
+# (z = 2). A repeater goes in the arm the signal enters by, as in the wire
+# tile; entering from the west or east, that arm is the centre itself, so only
+# a straight carries one.
+tile wire_n
+size 3 4 5
+port W io 0 1 2
+port E io 2 1 2
+port N io 1 1 0
+port S io 1 1 4
+
+legend
+  C minecraft:glass
+  c minecraft:redstone_wire
+  W minecraft:glass if W
+  w minecraft:redstone_wire if W
+  E minecraft:glass if E
+  e minecraft:redstone_wire if E
+  N minecraft:glass if N
+  n minecraft:redstone_wire if N
+  S minecraft:glass if S
+  s minecraft:redstone_wire if S
+
+layer 0
+  .N.
+  .N.
+  WCE
+  .S.
+  .S.
+layer 1
+  .n.
+  .n.
+  wce
+  .s.
+  .s.

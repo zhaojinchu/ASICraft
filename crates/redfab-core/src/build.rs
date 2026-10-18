@@ -1384,4 +1384,22 @@ mod tests {
         assert_ne!(built.design.placement, "pitch4", "{figures:?}");
         assert_eq!(outputs(&built.design, r#"[{},{},{},{}]"#), r#"[{"q":0},{"q":1},{"q":0},{"q":1}]"#);
     }
+
+    /// Routing columns take the narrow wiring tiles, three blocks wide; gate,
+    /// source and output columns stay a full cell. So a design's footprint is
+    /// five blocks for every other column and three for every routing column,
+    /// and it still computes.
+    #[test]
+    fn routing_columns_are_three_blocks_wide() {
+        let two_cells = NOR2
+            .replace(r#""cells":{"#, r#""cells":{"h":{"type":"NOT","connections":{"A":[4],"Y":[5]}},"#)
+            .replace(r#""y":{"direction":"output","bits":[4]}"#, r#""y":{"direction":"output","bits":[5]}"#);
+        let built = build(&two_cells, "top", "x").unwrap();
+        let routing: i32 = built.design.grid.routing.iter().sum();
+        let others = built.design.grid.cols - routing;
+        assert!(routing >= 2, "{:?}", built.design.grid);
+        assert_eq!(built.design.size[0], others * 5 + routing * 3, "{:?}", built.design.grid);
+        let vectors = r#"[{"a":0,"b":0},{"a":0,"b":1},{"a":1,"b":0},{"a":1,"b":1}]"#;
+        assert_eq!(outputs(&built.design, vectors), r#"[{"y":0},{"y":1},{"y":1},{"y":1}]"#);
+    }
 }

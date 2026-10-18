@@ -1070,4 +1070,50 @@ mod tests {
             }
         }
     }
+
+    /// The narrow family, for routing columns three blocks wide: the wire, the
+    /// upper wire, the crossing and the two ramps parse under the border rules,
+    /// one cell wide and deep. A west-east hop costs three dust steps, a
+    /// north-south one five, a turn four; a repeater entered from the north or
+    /// south reaches every arm (thirteen to a side, twelve straight on), one entered from the west only to the
+    /// east (the centre is its arm, so only a straight carries one); the
+    /// crossing's flat arm carries one and its climbing arm none; the ramps
+    /// climb three blocks west to east and five north to south.
+    #[test]
+    fn the_narrow_tiles_cost_three_steps_across_and_five_along() {
+        let parse = |text: &str| Tile::parse(text).unwrap();
+        let wire = parse(include_str!("../../../cells/wire_n.tile"));
+        let up = parse(include_str!("../../../cells/wire_up_n.tile"));
+        let cross = parse(include_str!("../../../cells/cross_n.tile"));
+        let ramp = parse(include_str!("../../../cells/ramp_n.tile"));
+        let ramp_ns = parse(include_str!("../../../cells/ramp_ns_n.tile"));
+        use Edge::{East, North, South, West};
+        for tile in [&wire, &up, &cross, &ramp, &ramp_ns] {
+            assert_eq!((tile.width, tile.depth, tile.cells()), (3, PITCH, 1), "{}", tile.name);
+        }
+        for tile in [&wire, &up] {
+            assert_eq!(tile.dust_steps(West, East), Some(3), "{}", tile.name);
+            assert_eq!(tile.dust_steps(North, South), Some(5), "{}", tile.name);
+            assert_eq!(tile.dust_steps(West, North), Some(4), "{}", tile.name);
+            assert_eq!(tile.dust_steps(South, East), Some(4), "{}", tile.name);
+            // From a repeater in the north arm: one dust to the centre, then one to
+            // a side port or two to the south one.
+            assert_eq!(tile.repeater_out(North, West), Some(13), "{}", tile.name);
+            assert_eq!(tile.repeater_out(North, East), Some(13), "{}", tile.name);
+            assert_eq!(tile.repeater_out(North, South), Some(12), "{}", tile.name);
+            assert_eq!(tile.repeater_out(West, East), Some(14), "{}", tile.name);
+            assert_eq!(tile.repeater_out(West, North), None, "{}", tile.name);
+        }
+        assert_eq!(cross.dust_steps(West, East), Some(3));
+        assert_eq!(cross.dust_steps(North, South), Some(5));
+        assert_eq!(cross.dust_steps(West, North), None);
+        assert_eq!(cross.repeater_out(West, East), Some(14));
+        assert_eq!(cross.repeater_out(North, South), None);
+        assert_eq!((ramp.port(West).unwrap().pos.y, ramp.port(East).unwrap().pos.y), (1, 3));
+        assert_eq!(ramp.dust_steps(West, East), Some(3));
+        assert_eq!(ramp.dust_steps(East, West), Some(3));
+        assert_eq!((ramp_ns.port(North).unwrap().pos.y, ramp_ns.port(South).unwrap().pos.y), (1, 3));
+        assert_eq!(ramp_ns.dust_steps(North, South), Some(5));
+        assert_eq!(ramp_ns.repeater_out(North, South), None);
+    }
 }
