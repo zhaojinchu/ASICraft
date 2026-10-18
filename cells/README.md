@@ -19,11 +19,11 @@ Lines starting with `#` before `legend` are comments.
 
 Rules every tile follows, so that neighbouring tiles cannot interfere:
 
-- A signal enters or leaves only at the middle of an edge, at y = 1, as redstone dust.
-- No other block touches the tile's border.
+- A signal enters or leaves only at the middle of an edge, as redstone dust, on one of two wire levels: y = 1 (the lower, dust on glass) or y = 3 (the upper, dust on stone at y = 2).
+- No other block touches the tile's border, except the stone an upper port's dust stands on.
 - A tile is written for one orientation; the build may place it rotated by quarter turns. Gates always take inputs on W, N or S and drive E, so they are never rotated.
 - A tile is one cell deep and a whole number of cells wide (`size 10 4 5` for two). Its north and south ports sit on its first cell. A side-locked repeater needs its lock's input one cell in from the border, so a flip-flop takes two cells.
-- Dust and torches stand on glass, never on stone. Powered dust weakly powers the block under it, and stone would pass that on to torches and lamps next to it; glass does not conduct.
+- Lower dust and torches stand on glass, never on stone. Powered dust weakly powers the block under it, and stone would pass that on to torches and lamps next to it; glass does not conduct. Upper dust stands on stone (it has to step onto it at a ramp), which is safe because only wiring tiles have upper ports, so the stone is never beside a torch or lamp; the adjacency check proves it for every pair.
 
 Dust is written without shape or power. The build computes both, with every input off, and writes the finished state.
 
@@ -32,6 +32,8 @@ Dust is written without shape or power. The build computes both, with every inpu
 | `input` | out E | A lever on a stone block. Tests swap the block for a redstone block. An input that nothing reads keeps the lever and has no dust. |
 | `output` | in W | Dust into a lamp. |
 | `wire` | io W E N S | Joins whichever of its edges are used: a straight, a turn, or a fan-out. The build may put a repeater in the arm the signal enters by (the cell next to the port, facing the port): full strength again, 2 to 8 game ticks later. |
+| `wire_up` | io W E N S, upper | The wire tile on the upper level: dust at y = 3, each on a stone. A tile may carry a lower and an upper wire at once (a stack), so two nets cross as two straights, or two turns share a tile; the stone under the upper dust keeps them apart (dust only weakly powers the block it stands on, which the lower dust cannot read, and a conducting block above the lower dust stops it connecting diagonally upward). It may carry a repeater like the wire. Only wiring has upper ports, so no lamp or torch is ever beside the stone. |
+| `ramp` | io W lower, E upper | From one level to the other on stone steps, the way the crossing's arm climbs; turned, it joins any edge's lower port to the opposite edge's upper one. One net's alone, with no room for a repeater. |
 | `cross` | io W E N S | West to east and north to south, not touching. The flat west-east arm may carry a repeater like a wire; the build turns the tile when the other signal is the one that needs it. |
 | `nor` | in W N S, out E | NOR of the used inputs; NOT with one. |
 | `tie_high`, `tie_low` | out E | Constant 1 and constant 0. |
