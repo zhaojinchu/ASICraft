@@ -971,4 +971,59 @@ mod tests {
             assert!(lib.verilog_models().contains(&format!("module {name}(")));
         }
     }
+    /// The second wire level: the upper wire and the ramp each parse under the
+    /// border rule, where the one block allowed on the border besides a port's
+    /// dust is the stone under an upper port. A hop costs five either way and a
+    /// repeater in an upper arm hands on twelve, as on the lower level; the ramp
+    /// joins its lower west port to its upper east port, either way, with no
+    /// room for a repeater. Stacked in one tile, a lower and an upper wire of
+    /// any two shapes are two nets.
+    #[test]
+    fn the_upper_wire_and_the_ramp_keep_the_levels_apart() {
+        let lib = Library::builtin().unwrap();
+        let text = include_str!("../../../cells/wire_up.tile");
+        let up = Tile::parse(text).unwrap();
+        let ramp = Tile::parse(include_str!("../../../cells/ramp.tile")).unwrap();
+        for entry in Edge::ALL {
+            assert_eq!(up.port(entry).unwrap().pos.y, 3, "{entry:?}");
+            for exit in Edge::ALL.into_iter().filter(|e| *e != entry) {
+                assert_eq!(up.dust_steps(entry, exit), Some(5), "upper wire {entry:?} to {exit:?}");
+                assert_eq!(up.repeater_out(entry, exit), Some(12), "upper wire {entry:?} to {exit:?}");
+            }
+        }
+        assert_eq!((ramp.port(Edge::West).unwrap().pos.y, ramp.port(Edge::East).unwrap().pos.y), (1, 3));
+        assert_eq!(ramp.dust_steps(Edge::West, Edge::East), Some(5));
+        assert_eq!(ramp.dust_steps(Edge::East, Edge::West), Some(5));
+        assert_eq!(ramp.repeater_out(Edge::West, Edge::East), None);
+        assert_eq!(ramp.repeater_out(Edge::East, Edge::West), None);
+        // A stone on the border that is not under an upper port is still refused.
+        let stray = text.replacen("layer 2\n  ..N..", "layer 2\n  N.N..", 1);
+        assert_ne!(stray, text);
+        let err = Tile::parse(&stray).unwrap_err();
+        assert!(err.contains("touches the tile border"), "{err}");
+        // Every lower shape under every upper shape: two nets, each joining its own ports.
+        let shapes: Vec<Vec<Edge>> = (1u8..16)
+            .map(|mask| {
+                Edge::ALL.into_iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, e)| e).collect()
+            })
+            .filter(|edges: &Vec<Edge>| edges.len() >= 2)
+            .collect();
+        assert_eq!(shapes.len(), 11);
+        for lower in &shapes {
+            for upper in &shapes {
+                let mut world = World::new((PITCH, HEIGHT, PITCH));
+                for (pos, block) in lib.wire.blocks(lower, 0).into_iter().chain(up.blocks(upper, 0)) {
+                    world.set(pos, block);
+                }
+                let circuit = crate::extract::extract(&world, &[]);
+                let net = |tile: &Tile, edge: Edge| circuit.net_of(tile.port(edge).unwrap().pos);
+                let low = net(&lib.wire, lower[0]);
+                let high = net(&up, upper[0]);
+                assert!(low.is_some() && high.is_some() && low != high, "{lower:?} under {upper:?}");
+                assert!(lower.iter().all(|&e| net(&lib.wire, e) == low), "{lower:?} under {upper:?}");
+                assert!(upper.iter().all(|&e| net(&up, e) == high), "{lower:?} under {upper:?}");
+                assert_eq!(circuit.nets.len(), 2, "{lower:?} under {upper:?}");
+            }
+        }
+    }
 }
