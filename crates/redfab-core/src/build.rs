@@ -1199,4 +1199,36 @@ mod tests {
         assert_eq!(built.design.constants.len(), 2);
         assert_eq!(outputs(&built.design, r#"[{"a":0},{"a":1}]"#), r#"[{"y":1,"z":1},{"y":0,"z":1}]"#);
     }
+    /// A clocked design is laid out in every placement style and keeps the one
+    /// with the least footprint times clock period, the period breaking ties:
+    /// the toggle's clock inverter can sit beside its flip-flop when the rows
+    /// are packed, so a packed style beats the four-row pitch, and the kept
+    /// layout still toggles.
+    #[test]
+    fn a_clocked_design_keeps_the_least_area_times_period() {
+        let netlist = Netlist::from_yosys_json(TOGGLE, "top", &Library::builtin().unwrap()).unwrap();
+        let mut lines: Vec<String> = Vec::new();
+        let (built, problems) =
+            build_unchecked_logged(&netlist, "toggle", Break::None, &mut |l| lines.push(l.to_string())).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        // Each style's line: "  NAME: C x R tiles, X x Z blocks, period P".
+        let figures: Vec<(&str, u32, u32)> = ["pitch4", "packed", "stretched"]
+            .iter()
+            .map(|&name| {
+                let line = lines
+                    .iter()
+                    .find(|l| l.starts_with(&format!("  {name}: ")))
+                    .unwrap_or_else(|| panic!("no {name} layout was tried: {lines:?}"));
+                let words: Vec<&str> = line.split_whitespace().collect();
+                let at = words.iter().position(|w| w.starts_with("blocks")).unwrap();
+                let (x, z): (u32, u32) = (words[at - 3].parse().unwrap(), words[at - 1].parse().unwrap());
+                let period: u32 = line.rsplit("period ").next().unwrap().parse().unwrap();
+                (name, x * z, period)
+            })
+            .collect();
+        let best = figures.iter().min_by_key(|&&(_, area, period)| (area * period, period)).unwrap();
+        assert_eq!(built.design.placement, best.0, "{figures:?}");
+        assert_ne!(built.design.placement, "pitch4", "{figures:?}");
+        assert_eq!(outputs(&built.design, r#"[{},{},{},{}]"#), r#"[{"q":0},{"q":1},{"q":0},{"q":1}]"#);
+    }
 }
