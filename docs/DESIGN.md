@@ -222,7 +222,7 @@ The cost is density, maybe 2–4× worse than hand layout. You chose correctness
 
 ### 4.4 Routing
 
-- **Resources.** Each tile offers an X-track and a Z-track. A straight wire uses one track, a turn or fanout uses both, and a `Cross` tile gives its X-track to one net and its Z-track to another.
+- **Resources.** Each tile offers an X-track and a Z-track on the lower wire level, and the upper level (two wire levels, `docs/PLAN.md`). A straight wire uses one lower track, a turn or fanout both, and a `Cross` tile gives its X-track to one net and its Z-track to another. The upper level is one net's, any shape, above any lower wiring but a crossing (a stack); a ramp takes a net between the levels and holds its whole tile. The router uses the upper level where crossings run out: a net whose signal dies in a run of crossings (whose climbing arm cannot carry a repeater) hops up a level instead.
 - **Clock first.** Route the clock first, as a deterministic spine with repeater taps.
 - **Signals.** Route everything else with **PathFinder**: A* per net and per sink, with a history cost plus a present-congestion cost, then rip-up and re-route over iterations.
 - **Costs.** Crossings get a cost because they add strength loss and maybe delay. Long detours get a cost through strength (repeater count).

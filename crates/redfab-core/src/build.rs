@@ -12,7 +12,7 @@ use crate::layout::{Macro, Placed, Realized};
 use crate::lvs::lvs;
 use crate::netlist::{Driver, Netlist};
 use crate::place::{Style, estimate_routing, gap_count, place};
-use crate::route::{History, RouteFailure, route};
+use crate::route::{History, Level, RouteFailure, route};
 use crate::sim::Sim;
 use crate::structure::structure_file;
 use crate::tile::Library;
@@ -479,11 +479,7 @@ fn finish(candidate: &Candidate, netlist: &Netlist, name: &str, log: Log) -> Res
     let realized = &candidate.realized;
     let timing = &candidate.timing;
     let mut problems = candidate.problems.clone();
-    let repeater_count = layout
-        .tiles
-        .values()
-        .filter(|p| matches!(p, Placed::Repeater { .. } | Placed::Cross { repeater_entry: Some(_), .. }))
-        .count();
+    let repeater_count = layout.repeater_count();
     let (cols, rows) = layout.size();
     let (sx, sy, sz) = candidate.world.size();
     let mut design = Design {
@@ -515,7 +511,7 @@ fn finish(candidate: &Candidate, netlist: &Netlist, name: &str, log: Log) -> Res
         settle_ticks: timing.settle_ticks(),
         timing: timing.clone(),
         placement: candidate.style.name().to_string(),
-        tiles: layout.tiles.len(),
+        tiles: layout.cells_used(),
         grid: Grid { cols, rows, routing: candidate.routing_cols.clone() },
         repeaters: repeater_count,
         hold_fix_rounds: candidate.hold_fix_rounds,
@@ -609,34 +605,38 @@ fn lengthen(
     net: usize,
     sink: (usize, usize),
 ) -> Result<(), String> {
-    let (cell, longer) = lengthening(routed, netlist, net, sink)?;
-    routed.layout.tiles.insert(cell, longer);
+    let (cell, level, longer) = lengthening(routed, netlist, net, sink)?;
+    match level {
+        Level::Upper => routed.layout.upper.insert(cell, longer),
+        Level::Lower => routed.layout.tiles.insert(cell, longer),
+    };
     Ok(())
 }
 
-/// What [`lengthen`] would change: the tile, and what it becomes.
+/// What [`lengthen`] would change: the tile, the level it is on, and what it becomes.
 fn lengthening(
     routed: &crate::route::Routed,
     netlist: &Netlist,
     net: usize,
     sink: (usize, usize),
-) -> Result<(crate::place::Cell, Placed), String> {
+) -> Result<(crate::place::Cell, Level, Placed), String> {
     let index = netlist.sinks_of(net).iter().position(|s| *s == sink).ok_or("not a sink of the net")?;
     let branches = routed.branches.get(&net).ok_or("the net was not routed")?;
     let own = &branches[index];
     let shared = |cell: &crate::place::Cell| {
-        branches.iter().enumerate().any(|(i, b)| i != index && b.iter().any(|(c, _)| c == cell))
+        branches.iter().enumerate().any(|(i, b)| i != index && b.iter().any(|(c, _, _)| c == cell))
     };
     // Tiles of its own first, from the sink back; then the shared ones.
     for only_own in [true, false] {
-        for &(cell, entry) in own.iter().rev() {
+        for &(cell, entry, level) in own.iter().rev() {
             if shared(&cell) == only_own {
                 continue;
             }
-            match routed.layout.tiles.get(&cell).cloned() {
-                Some(Placed::Wire { edges }) => return Ok((cell, Placed::Repeater { edges, entry, delay: 1 })),
+            let map = if level == Level::Upper { &routed.layout.upper } else { &routed.layout.tiles };
+            match map.get(&cell).cloned() {
+                Some(Placed::Wire { edges }) => return Ok((cell, level, Placed::Repeater { edges, entry, delay: 1 })),
                 Some(Placed::Repeater { edges, entry, delay }) if delay < 4 => {
-                    return Ok((cell, Placed::Repeater { edges, entry, delay: delay + 1 }));
+                    return Ok((cell, level, Placed::Repeater { edges, entry, delay: delay + 1 }));
                 }
                 _ => continue,
             }
@@ -1258,18 +1258,19 @@ mod tests {
                 assert!(unlengthenable(&routed, &netlist).is_empty(), "seed {seed}, {}", style.name());
                 for (c, cell) in netlist.cells.iter().enumerate().filter(|(_, cell)| cell.is_dff()) {
                     let net = cell.inputs[0];
-                    let (at, longer) = lengthening(&routed, &netlist, net, (c, 0)).unwrap();
+                    let (at, _, longer) = lengthening(&routed, &netlist, net, (c, 0)).unwrap();
                     assert!(matches!(longer, Placed::Repeater { .. }));
                     let branches = &routed.branches[&net];
                     let index = netlist.sinks_of(net).iter().position(|s| *s == (c, 0)).unwrap();
                     let shared =
-                        branches.iter().enumerate().any(|(i, b)| i != index && b.iter().any(|(t, _)| *t == at));
+                        branches.iter().enumerate().any(|(i, b)| i != index && b.iter().any(|(t, _, _)| *t == at));
                     if shared {
                         shared_fixes += 1;
                         // Only because no tile of its own could take the fix.
-                        assert!(branches[index].iter().all(|(t, _)| {
-                            branches.iter().enumerate().any(|(i, b)| i != index && b.iter().any(|(u, _)| u == t))
-                                || !matches!(routed.layout.tiles.get(t), Some(Placed::Wire { .. }))
+                        assert!(branches[index].iter().all(|(t, _, level)| {
+                            let map = if *level == Level::Upper { &routed.layout.upper } else { &routed.layout.tiles };
+                            branches.iter().enumerate().any(|(i, b)| i != index && b.iter().any(|(u, _, _)| u == t))
+                                || !matches!(map.get(t), Some(Placed::Wire { .. }))
                         }));
                     }
                 }

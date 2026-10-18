@@ -339,21 +339,7 @@ pub fn analyze_sequential(
     // Pick the period: setup from flip-flops, the input window, outputs settled
     // before the next edge, an even number, high and low each at least the minimum.
     let tau = tau_from.max(0);
-    loop {
-        let tau_by = period + tau_by_minus_period.min(0).max(-period); // inputs must settle before the next edge
-        let tau_by = if tau_by_minus_period == i32::MAX { period - 1 } else { tau_by };
-        let outputs_ok = settle_from_edge < period && tau + settle_after_inputs < period;
-        if tau <= tau_by && outputs_ok {
-            break;
-        }
-        period += 2;
-        if period > MAX_PERIOD {
-            return Err(format!("no clock period below {MAX_PERIOD} ticks satisfies the design"));
-        }
-    }
-    if period % 2 == 1 {
-        period += 1;
-    }
+    let period = pick_period(period, tau, tau_by_minus_period, settle_from_edge, settle_after_inputs)?;
     for t in &mut flip_flop_timing {
         if let Some((_, hi)) = t.d_from_flip_flops {
             t.setup_slack = Some(period - (hi as i32 + spec.setup - t.clock_arrival as i32));
@@ -373,6 +359,45 @@ pub fn analyze_sequential(
         hold_violations: violations,
     };
     Ok(Timing { outputs, exhaustive: false, sequential: Some(sequential), input_spacing: 0 })
+}
+
+/// The least time, in game ticks, between the earliest and the latest an input
+/// may change after the edge: one redstone tick, so that a lever landing a tick
+/// late (the live backend's levers can) still meets setup, the margin stage 8
+/// keeps around the flip-flop's own capture.
+pub const MIN_INPUT_WINDOW: i32 = 2;
+
+/// The shortest even period from `least` up at which the inputs may change from
+/// `tau` after the edge for at least [`MIN_INPUT_WINDOW`] ticks and still meet
+/// setup at the next one (an input change may come as late as `period +
+/// tau_by_minus_period`; `i32::MAX` when no input reaches a flip-flop), and
+/// every output settles within the cycle, from the edge and from the input change.
+fn pick_period(
+    least: i32,
+    tau: i32,
+    tau_by_minus_period: i32,
+    settle_from_edge: i32,
+    settle_after_inputs: i32,
+) -> Result<i32, String> {
+    let mut period = least;
+    loop {
+        // An input change may come as late as the next edge, and must come early
+        // enough to reach every flip-flop's D in time for it; when that is before
+        // the edge the inputs change after, only a longer period helps.
+        let tau_by = if tau_by_minus_period == i32::MAX { period - 1 } else { period + tau_by_minus_period.min(0) };
+        let outputs_ok = settle_from_edge < period && tau + settle_after_inputs < period;
+        if tau + MIN_INPUT_WINDOW <= tau_by && outputs_ok {
+            break;
+        }
+        period += 2;
+        if period > MAX_PERIOD {
+            return Err(format!("no clock period below {MAX_PERIOD} ticks satisfies the design"));
+        }
+    }
+    if period % 2 == 1 {
+        period += 1;
+    }
+    Ok(period)
 }
 
 /// Analyzes the circuit of `world`, whose inputs are the `probes` and whose
@@ -1343,5 +1368,27 @@ mod tests {
         let b = Edges { rise: Some((3, 9)), fall: Some((1, 1)) };
         assert_eq!(a.join(b), Edges { rise: Some((2, 9)), fall: Some((1, 1)) });
         assert_eq!(a.shifted(2).inverted(), Edges { rise: None, fall: Some((4, 6)) });
+    }
+
+    /// The period: long enough for an input change to reach every flip-flop in
+    /// time for the next edge, with a window of at least a redstone tick, even
+    /// when that path is longer than the period the flip-flops alone would allow
+    /// (the inputs change after the edge, never before it), and for every output
+    /// to settle within the cycle.
+    #[test]
+    fn an_input_path_longer_than_the_period_lengthens_it() {
+        // mem2 in two wire levels: the flip-flops allow 58 ticks, but an input
+        // reaches a D 74 ticks after it changes, with the clock there at 8 and a
+        // setup of 1, so an input changing at the edge needs a period of 67, and
+        // the window of two ticks 69, 70 even.
+        assert_eq!(pick_period(58, 0, 8 - 1 - 74, 54, 30).unwrap(), 70);
+        // Changing 3 ticks after the edge needs 3 more, 72.
+        assert_eq!(pick_period(58, 3, 8 - 1 - 74, 54, 30).unwrap(), 72);
+        // A short input path leaves the flip-flops' period, rounded up to even.
+        assert_eq!(pick_period(57, 0, 8 - 1 - 20, 54, 30).unwrap(), 58);
+        // No input reaches a flip-flop: only the outputs bind.
+        assert_eq!(pick_period(12, 0, i32::MAX, 30, 40).unwrap(), 42);
+        assert_eq!(pick_period(12, 0, -MAX_PERIOD + MIN_INPUT_WINDOW, 0, 0).unwrap(), MAX_PERIOD);
+        assert!(pick_period(12, 0, -MAX_PERIOD, 0, 0).is_err());
     }
 }
