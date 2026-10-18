@@ -150,7 +150,13 @@ try {
         const plot = await page.evaluate(() => window.redfab.livePlot);
         const design = await page.evaluate(() => window.redfab.design);
         const period = design.timing.sequential.period;
-        const wait = (periods) => sleep((periods * period * 50) + 500);
+        // Waits for the server, not the wall clock: a loaded machine runs the game
+        // slower than 20 ticks a second, and the counter counts game ticks.
+        const serverTick = async () => (await api(base, `/api/plots/${plot.plot}`)).body.tick;
+        const wait = async (periods) => {
+            const until = (await serverTick()) + periods * period + 10;
+            await waitFor(async () => (await serverTick()) >= until, periods * period * 50 * 6 + 5_000, 250);
+        };
         console.log(`counter4: live on the server at plot ${plot.plot}, period ${period} ticks`);
         await page.click('[data-input="en"]');
         await wait(3);
