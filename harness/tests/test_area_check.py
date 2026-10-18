@@ -3,6 +3,7 @@ design, a better one passes, the file has one canonical form, and the committed 
 lists exactly the shipped designs."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -139,6 +140,11 @@ def test_the_committed_baseline_is_canonical_and_lists_exactly_the_shipped_desig
         assert row["cells"] >= 1 and row["tiles"] >= row["cells"], name
         assert ("period" in row) != ("input_spacing" in row), name
         assert row["area"] == row["footprint"][0] * row["footprint"][1], name
+
+
+def test_the_styles_are_the_names_place_rs_gives():
+    source = (ROOT / "crates" / "redfab-core" / "src" / "place.rs").read_text()
+    assert tuple(re.findall(r'Style::\w+ => "(\w+)"', source)) == STYLES
 
 
 def test_a_missing_or_stale_build_is_named(tmp_path: Path):
