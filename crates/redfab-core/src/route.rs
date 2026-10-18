@@ -1039,4 +1039,86 @@ mod tests {
         let steered = route(&library, &netlist, &wide, Some(&steer), &mut log).unwrap();
         assert!(!runs_north_south_in(&steered.layout, first), "steered:\n{}", render(&steered.layout));
     }
+
+    /// A net as a list of tiles, each with the tile it is reached from (`None`
+    /// for the first) and the edges it uses, laid out as plain wire: the tiles,
+    /// the layout and the tree `insert_repeaters` walks.
+    fn wired(net: NetId, hops: &[(Cell, Option<Cell>, &[Edge])]) -> (Tiles, Layout, Tree) {
+        let mut tiles: Tiles = BTreeMap::new();
+        let mut layout = Layout::default();
+        let mut parent: BTreeMap<Node, Option<Node>> = BTreeMap::new();
+        for &(cell, from, edges) in hops {
+            let entry = match from {
+                Some(p) => edge_between(cell, p),
+                None => Edge::West,
+            };
+            tiles.insert(cell, vec![(net, edges.iter().copied().collect(), Some(entry))]);
+            layout.tiles.insert(cell, Placed::Wire { edges: edges.to_vec() });
+            // The track the signal arrives on, and the other one when it turns or forks.
+            let arrives = if matches!(entry, Edge::West | Edge::East) { Track::X } else { Track::Z };
+            let parent_node = from.map(|p| {
+                let leaves = if matches!(edge_between(p, cell), Edge::West | Edge::East) { Track::X } else { Track::Z };
+                (p, leaves)
+            });
+            parent.insert((cell, arrives), parent_node);
+            if edges.iter().any(|&e| e != entry && matches!(e, Edge::West | Edge::East) != (arrives == Track::X)) {
+                let other = if arrives == Track::X { Track::Z } else { Track::X };
+                parent.insert((cell, other), Some((cell, arrives)));
+            }
+        }
+        (tiles, layout, Tree { parent })
+    }
+
+    /// A signal that would die in both branches just below a fork gets one
+    /// repeater in the fork, which reaches both sinks, not one in each branch;
+    /// and no sink gets more repeaters on its path than the walk alone gives it.
+    #[test]
+    fn a_fork_whose_branches_both_die_gets_one_repeater_before_it() {
+        let library = Library::builtin().unwrap();
+        let wire = &library.wire;
+        let step = wire.dust_steps(Edge::West, Edge::East).unwrap();
+        assert_eq!(step, 5, "the arithmetic below assumes five steps a tile");
+        // West to east into a fork at (1, 1), which sends the net north and south;
+        // each branch turns east and ends one tile on.
+        use Edge::{East, North, South, West};
+        let (tiles, mut layout, tree) = wired(
+            7,
+            &[
+                ((0, 1), None, &[West, East]),
+                ((1, 1), Some((0, 1)), &[West, North, South]),
+                ((1, 0), Some((1, 1)), &[South, East]),
+                ((2, 0), Some((1, 0)), &[West, East]),
+                ((1, 2), Some((1, 1)), &[North, East]),
+                ((2, 2), Some((1, 2)), &[West, East]),
+            ],
+        );
+        // Fourteen at the start: nine at the fork, four at the turns, too weak to
+        // reach the sinks a tile further on; a repeater in the fork reaches both.
+        let source = Source { node: ((0, 1), Track::X), entry: West, strength: 14 };
+        let sinks = vec![
+            Sink { node: ((2, 0), Track::X), exit: East, needed_after: 1 },
+            Sink { node: ((2, 2), Track::X), exit: East, needed_after: 1 },
+        ];
+        let counts = insert_repeaters(&library, &mut layout, &tiles, 7, &source, &sinks, &tree).ok().unwrap();
+        let repeaters: Vec<Cell> =
+            layout.tiles.iter().filter(|(_, p)| matches!(p, Placed::Repeater { .. })).map(|(&c, _)| c).collect();
+        assert_eq!(repeaters, vec![(1, 1)], "{:?}", layout.tiles);
+        assert_eq!(counts, vec![1, 1]);
+        // A single branch keeps its repeater as late as it can go.
+        let (tiles, mut layout, tree) = wired(
+            7,
+            &[
+                ((0, 1), None, &[West, East]),
+                ((1, 1), Some((0, 1)), &[West, East]),
+                ((2, 1), Some((1, 1)), &[West, East]),
+                ((3, 1), Some((2, 1)), &[West, East]),
+            ],
+        );
+        let sinks = vec![Sink { node: ((3, 1), Track::X), exit: East, needed_after: 1 }];
+        let counts = insert_repeaters(&library, &mut layout, &tiles, 7, &source, &sinks, &tree).ok().unwrap();
+        let repeaters: Vec<Cell> =
+            layout.tiles.iter().filter(|(_, p)| matches!(p, Placed::Repeater { .. })).map(|(&c, _)| c).collect();
+        assert_eq!(repeaters, vec![(2, 1)]);
+        assert_eq!(counts, vec![1]);
+    }
 }
