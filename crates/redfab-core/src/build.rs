@@ -1339,11 +1339,12 @@ mod tests {
         assert_eq!(built.design.constants.len(), 2);
         assert_eq!(outputs(&built.design, r#"[{"a":0},{"a":1}]"#), r#"[{"y":1,"z":1},{"y":0,"z":1}]"#);
     }
-    /// A clocked design is laid out in every placement style and keeps the one
-    /// with the least footprint times clock period, the period breaking ties:
-    /// the toggle's clock inverter can sit beside its flip-flop when the rows
-    /// are packed, so a packed style beats the four-row pitch, and the kept
-    /// layout still toggles.
+    /// A clocked design is laid out at the four-row pitch and stretched (the
+    /// packed style never won on a clocked design: it ties stretched at best),
+    /// and keeps the one with the least footprint times clock period, the period
+    /// breaking ties: the toggle's clock inverter can sit beside its flip-flop
+    /// when the rows are packed, so stretched beats the four-row pitch, and the
+    /// kept layout still toggles.
     #[test]
     fn a_clocked_design_keeps_the_least_area_times_period() {
         let netlist = Netlist::from_yosys_json(TOGGLE, "top", &Library::builtin().unwrap()).unwrap();
@@ -1352,7 +1353,8 @@ mod tests {
             build_unchecked_logged(&netlist, "toggle", Break::None, &mut |l| lines.push(l.to_string())).unwrap();
         assert!(problems.is_empty(), "{problems:?}");
         // Each style's line: "  NAME: C x R tiles, X x Z blocks, period P".
-        let figures: Vec<(&str, u32, u32)> = ["pitch4", "packed", "stretched"]
+        assert!(!lines.iter().any(|l| l.starts_with("  packed: ")), "{lines:?}");
+        let figures: Vec<(&str, u32, u32)> = ["pitch4", "stretched"]
             .iter()
             .map(|&name| {
                 let line = lines
