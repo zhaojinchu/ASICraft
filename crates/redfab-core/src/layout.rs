@@ -26,6 +26,9 @@ pub enum Placed {
     Cross { rotation: u8, repeater_entry: Option<Edge>, delay: u8 },
     /// Wiring with a repeater in the arm the signal enters by.
     Repeater { edges: Vec<Edge>, entry: Edge, delay: u8 },
+    /// From the lower wire level to the upper one: the lower port on `lower`, the
+    /// upper port on the opposite edge. A ramp is its cell's alone, on both levels.
+    Ramp { lower: Edge },
     /// Constant 1 for `net`; drives east.
     TieHigh { net: usize },
     /// Constant 0 for `net`; drives east.
@@ -50,9 +53,27 @@ impl Placed {
             }
             Placed::Cross { .. } => Edge::ALL.to_vec(),
             Placed::Repeater { edges, .. } => edges.clone(),
+            Placed::Ramp { lower } => vec![*lower],
             Placed::TieHigh { .. } | Placed::TieLow { .. } => vec![Edge::East],
             Placed::Dff { .. } => vec![Edge::West, Edge::North, Edge::East],
         }
+    }
+
+    /// The edges this tile of the lower map uses on the upper wire level: a
+    /// ramp's upper port. (A tile of the upper map uses its [`Placed::edges`] there.)
+    pub fn upper_edges(&self) -> Vec<Edge> {
+        match self {
+            Placed::Ramp { lower } => vec![lower.opposite()],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether wiring may run on the upper level above this tile of the lower
+    /// map: only above wiring, never above a gate, an input, an output, a
+    /// constant or a flip-flop, whose torches and lamps must not be beside the
+    /// upper level's stone, nor above a ramp, which is its cell's alone.
+    pub fn may_be_covered(&self) -> bool {
+        matches!(self, Placed::Wire { .. } | Placed::Repeater { .. })
     }
 
     /// How many grid cells wide the tile is.
@@ -78,19 +99,44 @@ impl Placed {
                 delay: *delay,
             },
             Placed::Repeater { edges, entry, delay } => Variant::repeater(edges, *entry, *delay),
+            Placed::Ramp { lower } => {
+                Variant { rotation: ramp_turn(*lower), ..Variant::new(Kind::Ramp, &[Edge::West, Edge::East]) }
+            }
             Placed::TieHigh { .. } => Variant::new(Kind::TieHigh, &[Edge::East]),
             Placed::TieLow { .. } => Variant::new(Kind::TieLow, &[Edge::East]),
             Placed::Dff { .. } => Variant::new(Kind::Dff, &[Edge::West, Edge::North, Edge::East]),
         }
     }
+
+    /// The tile variant this placement uses in the upper map: the upper wire.
+    pub fn upper_variant(&self) -> Result<Variant, String> {
+        match self {
+            Placed::Wire { edges } => Ok(Variant::new(Kind::WireUp, edges)),
+            Placed::Repeater { edges, entry, delay } => {
+                Ok(Variant { kind: Kind::WireUp, ..Variant::repeater(edges, *entry, *delay) })
+            }
+            other => Err(format!("only wiring runs on the upper level, not {other:?}")),
+        }
+    }
 }
 
-/// Tiles by (column, row). Columns run east, rows run south. Each column has a
-/// width and each row a depth in blocks (every one `PITCH` today), and a tile's
-/// blocks start where the columns and rows before it end.
+/// How far the ramp tile (lower west, upper east as written) is turned so that
+/// its lower port is on `lower`.
+pub fn ramp_turn(lower: Edge) -> u8 {
+    (0..4).find(|&r| Edge::West.rotated(r) == lower).expect("every edge is a turn of the west")
+}
+
+/// Tiles by (column, row), on the lower wire level (gates, inputs, outputs,
+/// constants, flip-flops, wiring and ramps) and the upper one (wiring only).
+/// Columns run east, rows run south. Each column has a width and each row a
+/// depth in blocks (every one `PITCH` today), and a tile's blocks start where
+/// the columns and rows before it end.
 #[derive(Clone, Debug, Default)]
 pub struct Layout {
     pub tiles: BTreeMap<(i32, i32), Placed>,
+    /// The upper wire level: wiring and repeaters above cells of `tiles` that
+    /// hold wiring or nothing (a cell with one of each is a stack).
+    pub upper: BTreeMap<(i32, i32), Placed>,
     /// Blocks per column, west to east.
     pub col_width: Vec<i32>,
     /// Blocks per row, north to south.
@@ -158,13 +204,39 @@ impl Macro {
 impl Layout {
     /// An empty layout whose columns are all `PITCH` wide and rows all `PITCH` deep.
     pub fn uniform(cols: i32, rows: i32) -> Layout {
-        Layout { tiles: BTreeMap::new(), col_width: vec![PITCH; cols as usize], row_depth: vec![PITCH; rows as usize] }
+        Layout {
+            tiles: BTreeMap::new(),
+            upper: BTreeMap::new(),
+            col_width: vec![PITCH; cols as usize],
+            row_depth: vec![PITCH; rows as usize],
+        }
     }
 
     pub fn size(&self) -> (i32, i32) {
-        let cols = self.tiles.iter().map(|(k, p)| k.0 + p.width()).max().unwrap_or(0);
-        let rows = self.tiles.keys().map(|k| k.1).max().map_or(0, |m| m + 1);
+        let cols = self.tiles.iter().chain(&self.upper).map(|(k, p)| k.0 + p.width()).max().unwrap_or(0);
+        let rows = self.tiles.keys().chain(self.upper.keys()).map(|k| k.1).max().map_or(0, |m| m + 1);
         (cols, rows)
+    }
+
+    /// Cells holding anything, on either level.
+    pub fn cells_used(&self) -> usize {
+        self.tiles.keys().chain(self.upper.keys()).collect::<std::collections::BTreeSet<_>>().len()
+    }
+
+    /// Repeaters, on either level.
+    pub fn repeater_count(&self) -> usize {
+        self.tiles
+            .values()
+            .chain(self.upper.values())
+            .filter(|p| matches!(p, Placed::Repeater { .. } | Placed::Cross { repeater_entry: Some(_), .. }))
+            .count()
+    }
+
+    /// The edges used on the upper level at `cell`: its upper wiring's, or a ramp's upper port.
+    fn upper_at(&self, cell: (i32, i32)) -> Vec<Edge> {
+        let mut edges = self.upper.get(&cell).map(Placed::edges).unwrap_or_default();
+        edges.extend(self.tiles.get(&cell).map(Placed::upper_edges).unwrap_or_default());
+        edges
     }
 
     /// Where the tiles start in blocks, by column and by row: the prefix sums of
@@ -187,9 +259,37 @@ impl Layout {
         self.tiles.get(&cell).or_else(|| self.tiles.get(&(cell.0 - 1, cell.1)).filter(|p| p.width() > 1))
     }
 
-    /// Every used edge must face a tile that uses the opposite edge; a signal
-    /// must never run off into nothing or into the side of a tile.
+    /// Every used edge must face a tile that uses the opposite edge on the same
+    /// wire level; a signal must never run off into nothing or into the side of
+    /// a tile. Upper wiring sits only above wiring or nothing.
     pub fn check_ports(&self) -> Result<(), String> {
+        for &(col, row) in self.upper.keys() {
+            if let Some(below) = self.at((col, row))
+                && !below.may_be_covered()
+            {
+                return Err(format!("an upper wire at column {col}, row {row} is above {below:?}"));
+            }
+            for edge in self.upper_at((col, row)) {
+                let (dc, dr) = edge.step();
+                if !self.upper_at((col + dc, row + dr)).contains(&edge.opposite()) {
+                    return Err(format!(
+                        "the upper wire at column {col}, row {row} has an open port on its {} edge",
+                        edge.letter()
+                    ));
+                }
+            }
+        }
+        for (&(col, row), placed) in &self.tiles {
+            for edge in placed.upper_edges() {
+                let (dc, dr) = edge.step();
+                if !self.upper_at((col + dc, row + dr)).contains(&edge.opposite()) {
+                    return Err(format!(
+                        "the ramp at column {col}, row {row} has an open upper port on its {} edge",
+                        edge.letter()
+                    ));
+                }
+            }
+        }
         for (&(col, row), placed) in &self.tiles {
             for edge in placed.edges() {
                 let (dc, dr) = edge.step();
@@ -267,6 +367,12 @@ impl Layout {
                 _ => {}
             }
         }
+        for (&(col, row), placed) in &self.upper {
+            let origin = Pos::new(xs[col as usize], 0, zs[row as usize]);
+            for (pos, block) in placed.upper_variant()?.blocks(library) {
+                world.set(Pos::new(origin.x + pos.x, origin.y + pos.y, origin.z + pos.z), block);
+            }
+        }
         let all = |found: Vec<Option<Pos>>, what: &str| -> Result<Vec<Pos>, String> {
             found.into_iter().enumerate().map(|(i, p)| p.ok_or_else(|| format!("{what} {i} was not placed"))).collect()
         };
@@ -327,7 +433,7 @@ mod tests {
         );
         assert!(m.blocks.iter().all(|(p, _)| m.contains(*p)));
         // A layout whose tables do not cover its tiles cannot be realized.
-        let short = Layout { tiles: layout.tiles.clone(), ..Layout::uniform(1, 1) };
+        let short = Layout { tiles: layout.tiles.clone(), upper: layout.upper.clone(), ..Layout::uniform(1, 1) };
         let Err(err) = short.realize(&library, &netlist) else { panic!("a short table must be refused") };
         assert!(err.contains("widths for 1"), "{err}");
     }
