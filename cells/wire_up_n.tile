@@ -1,0 +1,33 @@
+# The upper wire for a routing column three blocks wide: the narrow wire's dust
+# lifted to y = 3, each dust on a stone at y = 2 (see wire_up).
+tile wire_up_n
+size 3 4 5
+port W io 0 3 2
+port E io 2 3 2
+port N io 1 3 0
+port S io 1 3 4
+
+legend
+  C minecraft:stone
+  c minecraft:redstone_wire
+  W minecraft:stone if W
+  w minecraft:redstone_wire if W
+  E minecraft:stone if E
+  e minecraft:redstone_wire if E
+  N minecraft:stone if N
+  n minecraft:redstone_wire if N
+  S minecraft:stone if S
+  s minecraft:redstone_wire if S
+
+layer 2
+  .N.
+  .N.
+  WCE
+  .S.
+  .S.
+layer 3
+  .n.
+  .n.
+  wce
+  .s.
+  .s.
