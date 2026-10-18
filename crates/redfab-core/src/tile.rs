@@ -16,6 +16,11 @@ pub const HEIGHT: i32 = 4;
 /// The power a torch, a powered repeater or a powered block gives the dust beside it.
 const FULL_POWER: u8 = 15;
 
+/// The heights of the two wire levels: a port's dust is at one of them. The
+/// lower dust stands on glass, the upper on stone.
+pub const LOWER_Y: i32 = 1;
+pub const UPPER_Y: i32 = 3;
+
 /// One of a tile's four edges.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Edge {
@@ -465,12 +470,14 @@ impl Tile {
         let last = PITCH - 1;
         let mid = PITCH / 2;
         for port in &self.ports {
-            // North and south ports sit on the first cell of a wide tile.
+            // North and south ports sit on the first cell of a wide tile; a port is
+            // on the lower wire level (y = 1) or the upper one (y = 3).
+            let y = if port.pos.y == UPPER_Y { UPPER_Y } else { LOWER_Y };
             let expected = match port.edge {
-                Edge::West => Pos::new(0, 1, mid),
-                Edge::East => Pos::new(self.width - 1, 1, mid),
-                Edge::North => Pos::new(mid, 1, 0),
-                Edge::South => Pos::new(mid, 1, last),
+                Edge::West => Pos::new(0, y, mid),
+                Edge::East => Pos::new(self.width - 1, y, mid),
+                Edge::North => Pos::new(mid, y, 0),
+                Edge::South => Pos::new(mid, y, last),
             };
             if port.pos != expected {
                 return Err(format!("{}: port {} must be at {expected}", self.name, port.edge.letter()));
@@ -490,7 +497,9 @@ impl Tile {
             if !on_border || pos.y == 0 {
                 continue; // the floor may reach the border; it is glass
             }
-            let allowed = port_cells.contains(&pos) && matches!(block, Block::Wire(_));
+            // A port's dust, and the stone an upper port's dust stands on.
+            let allowed = (port_cells.contains(&pos) && matches!(block, Block::Wire(_)))
+                || (block == Block::Stone && pos.y == UPPER_Y - 1 && port_cells.contains(&pos.up()));
             if !allowed {
                 return Err(format!("{}: {} at {pos} touches the tile border", self.name, block.name()));
             }
@@ -532,6 +541,9 @@ pub struct Library {
     pub input: Tile,
     pub output: Tile,
     pub wire: Tile,
+    /// The wire on the upper level, and the ramp between the levels.
+    pub wire_up: Tile,
+    pub ramp: Tile,
     pub nor: Tile,
     pub cross: Tile,
     pub tie_high: Tile,
@@ -550,6 +562,8 @@ impl Library {
             input: parse("input", include_str!("../../../cells/input.tile"))?,
             output: parse("output", include_str!("../../../cells/output.tile"))?,
             wire: parse("wire", include_str!("../../../cells/wire.tile"))?,
+            wire_up: parse("wire_up", include_str!("../../../cells/wire_up.tile"))?,
+            ramp: parse("ramp", include_str!("../../../cells/ramp.tile"))?,
             nor: parse("nor", include_str!("../../../cells/nor.tile"))?,
             cross: parse("cross", include_str!("../../../cells/cross.tile"))?,
             tie_high: parse("tie_high", include_str!("../../../cells/tie_high.tile"))?,
@@ -619,6 +633,10 @@ pub enum Kind {
     Input,
     Output,
     Wire,
+    /// Wiring on the upper level.
+    WireUp,
+    /// From the lower level to the upper one: west lower, east upper, before turning.
+    Ramp,
     Nor,
     Cross,
     TieHigh,
@@ -630,10 +648,12 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 9] = [
+    pub const ALL: [Kind; 11] = [
         Kind::Input,
         Kind::Output,
         Kind::Wire,
+        Kind::WireUp,
+        Kind::Ramp,
         Kind::Nor,
         Kind::Cross,
         Kind::TieHigh,
@@ -647,6 +667,8 @@ impl Kind {
             Kind::Input => "input",
             Kind::Output => "output",
             Kind::Wire => "wire",
+            Kind::WireUp => "wire_up",
+            Kind::Ramp => "ramp",
             Kind::Nor => "nor",
             Kind::Cross => "cross",
             Kind::TieHigh => "tie_high",
@@ -698,6 +720,8 @@ impl Variant {
             Kind::Input => &library.input,
             Kind::Output => &library.output,
             Kind::Wire => &library.wire,
+            Kind::WireUp => &library.wire_up,
+            Kind::Ramp => &library.ramp,
             Kind::Nor => &library.nor,
             Kind::Cross => &library.cross,
             Kind::TieHigh => &library.tie_high,
@@ -715,7 +739,7 @@ impl Variant {
     /// A short name, e.g. `wire_WS`, `nor_WN`, `wire_WE_repW_d3`.
     pub fn name(&self) -> String {
         let mut name = self.kind.name().to_string();
-        if matches!(self.kind, Kind::Wire | Kind::Nor) {
+        if matches!(self.kind, Kind::Wire | Kind::WireUp | Kind::Nor) {
             name.push('_');
             name.extend(self.edges.iter().map(|e| e.letter()));
         }
@@ -819,23 +843,31 @@ impl Variant {
         }
     }
 
-    /// Every variant the library offers: wiring with every combination of two or
-    /// more edges, each of those with a repeater on each possible entry, NOR with
-    /// every non-empty set of inputs, and the fixed tiles.
+    /// Every variant the library offers: wiring on each level with every
+    /// combination of two or more edges, each of those with a repeater on each
+    /// possible entry, the ramp turned four ways, NOR with every non-empty set of
+    /// inputs, and the fixed tiles.
     pub fn all() -> Vec<Variant> {
         let mut out = vec![Variant::new(Kind::Input, &[Edge::East]), Variant::new(Kind::Output, &[Edge::West])];
-        for mask in 1u8..16 {
-            let edges: Vec<Edge> =
-                Edge::ALL.iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, e)| *e).collect();
-            if edges.len() >= 2 {
-                out.push(Variant::new(Kind::Wire, &edges));
-                for &entry in &edges {
-                    out.push(Variant::repeater(&edges, entry, 1));
+        // The same wiring on each level.
+        for kind in [Kind::Wire, Kind::WireUp] {
+            for mask in 1u8..16 {
+                let edges: Vec<Edge> =
+                    Edge::ALL.iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, e)| *e).collect();
+                if edges.len() >= 2 {
+                    out.push(Variant::new(kind, &edges));
+                    for &entry in &edges {
+                        out.push(Variant { kind, ..Variant::repeater(&edges, entry, 1) });
+                    }
                 }
             }
+            for delay in 2..=4 {
+                out.push(Variant { kind, ..Variant::repeater(&[Edge::West, Edge::East], Edge::West, delay) });
+            }
         }
-        for delay in 2..=4 {
-            out.push(Variant::repeater(&[Edge::West, Edge::East], Edge::West, delay));
+        // The ramp turned every way: lower west to upper east, lower north to upper south, and so on.
+        for rotation in 0..4 {
+            out.push(Variant { rotation, ..Variant::new(Kind::Ramp, &[Edge::West, Edge::East]) });
         }
         for mask in 1u8..8 {
             let inputs = [Edge::West, Edge::North, Edge::South];
@@ -901,8 +933,9 @@ mod tests {
         assert_eq!(repeater.1.to_string(), "minecraft:repeater[delay=2,facing=north,locked=false,powered=false]");
         assert_eq!(repeater.0, Pos::new(2, 1, 1));
         assert_eq!(turn.blocks(&lib).iter().filter(|(_, b)| matches!(b, Block::Wire(_))).count(), 4);
-        // 2 io tiles, 11 wires + 28 repeater placements + 3 more delays, 7 NORs, 3 crossings, 2 ties
-        assert_eq!(Variant::all().len(), 2 + 11 + 28 + 3 + 7 + 3 + 2 + 2);
+        // 2 io tiles, on each of the two levels 11 wires + 28 repeater placements +
+        // 3 more delays, 4 ramps, 7 NORs, 3 crossings, 2 flip-flops, 2 ties
+        assert_eq!(Variant::all().len(), 2 + 2 * (11 + 28 + 3) + 4 + 7 + 3 + 2 + 2);
     }
 
     #[test]
@@ -951,7 +984,18 @@ mod tests {
     #[test]
     fn every_tile_is_a_cell_deep_and_turns_within_its_footprint() {
         let lib = Library::builtin().unwrap();
-        for tile in [&lib.input, &lib.output, &lib.wire, &lib.nor, &lib.cross, &lib.tie_high, &lib.tie_low, &lib.dff] {
+        for tile in [
+            &lib.input,
+            &lib.output,
+            &lib.wire,
+            &lib.wire_up,
+            &lib.ramp,
+            &lib.nor,
+            &lib.cross,
+            &lib.tie_high,
+            &lib.tie_low,
+            &lib.dff,
+        ] {
             assert_eq!(tile.depth, PITCH, "{}", tile.name);
             assert_eq!(tile.width % PITCH, 0, "{}", tile.name);
         }

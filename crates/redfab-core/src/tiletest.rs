@@ -106,10 +106,11 @@ pub(crate) fn stamp(fixture: &mut Fixture, variant: &Variant, library: &Library)
 pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
     let name = variant.name();
     let doc = match variant.kind {
-        Kind::Wire if variant.repeater_entry.is_some() => {
+        Kind::Wire | Kind::WireUp if variant.repeater_entry.is_some() => {
             "Wire with a repeater: every other port follows the entry after 2 game ticks per setting, and not before."
         }
-        Kind::Wire => "Wiring: driving any used port must power every other used port, at once.",
+        Kind::Wire | Kind::WireUp => "Wiring: driving any used port must power every other used port, at once.",
+        Kind::Ramp => "Ramp: driving either port powers the other, at once, from one wire level to the other.",
         Kind::Nor => "NOR: the output is powered exactly when no input is, 2 game ticks after the inputs change.",
         Kind::Cross if variant.repeater_entry.is_some() => {
             "Crossing with a repeater: the flat axis follows its entry after the delay; the other axis passes at once."
@@ -128,7 +129,7 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
     let delay = variant.delay_ticks(library);
     let mut t = 2;
     match variant.kind {
-        Kind::Wire if variant.repeater_entry.is_some() => {
+        Kind::Wire | Kind::WireUp if variant.repeater_entry.is_some() => {
             let input = hooks.iter().find(|h| h.port.kind == PortKind::In).expect("repeater input");
             let outputs: Vec<&Hookup> = hooks.iter().filter(|h| h.port.kind == PortKind::Out).collect();
             for level in [true, false] {
@@ -140,7 +141,7 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
                 t += delay + 3;
             }
         }
-        Kind::Wire => {
+        Kind::Wire | Kind::WireUp | Kind::Ramp => {
             for driven in &hooks {
                 fx.at(t, driven.driver, on);
                 for other in hooks.iter().filter(|h| h.port.edge != driven.port.edge) {
@@ -228,7 +229,83 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
     fx.finish(delay + 4)
 }
 
-/// Fixtures for every variant, by name.
+/// The fixture that checks a stack, a lower and an upper wire in one tile: each
+/// level does what it does alone (wiring powers its other ports at once; with a
+/// repeater the ports beyond follow the entry after the delay), and driving one
+/// level never powers the other.
+pub fn stack_fixture(lower: &Variant, upper: &Variant, library: &Library) -> Value {
+    let name = format!("stack_{}_over_{}", upper.name(), lower.name());
+    let doc = "Stack: each wire level does what it does alone, and driving one never powers the other.";
+    let mut fx = Fixture::new(name, doc.to_string(), box_for(lower, library));
+    let low = stamp(&mut fx, lower, library);
+    let high = stamp(&mut fx, upper, library);
+    let on = Block::RedstoneBlock;
+    let off = Block::Air;
+    let mut t = 2;
+    let mut longest = 0;
+    for (variant, hooks, other) in [(lower, &low, &high), (upper, &high, &low)] {
+        let delay = variant.delay_ticks(library);
+        longest = longest.max(delay);
+        if variant.repeater_entry.is_some() {
+            let input = hooks.iter().find(|h| h.port.kind == PortKind::In).expect("repeater input");
+            let outputs: Vec<&Hookup> = hooks.iter().filter(|h| h.port.kind == PortKind::Out).collect();
+            for level in [true, false] {
+                fx.at(t, input.driver, if level { on } else { off });
+                for output in &outputs {
+                    fx.powered(t + delay - 1, output.reader, !level);
+                    fx.powered(t + delay, output.reader, level);
+                }
+                for quiet in other.iter() {
+                    fx.powered(t + delay, quiet.reader, false);
+                }
+                t += delay + 3;
+            }
+        } else {
+            for driven in hooks.iter() {
+                fx.at(t, driven.driver, on);
+                for same in hooks.iter().filter(|h| h.port.edge != driven.port.edge) {
+                    fx.powered(t, same.reader, true);
+                }
+                for quiet in other.iter() {
+                    fx.powered(t, quiet.reader, false);
+                }
+                fx.at(t + 3, driven.driver, off);
+                for hook in hooks.iter() {
+                    fx.powered(t + 3, hook.reader, false);
+                }
+                t += 6;
+            }
+        }
+    }
+    fx.finish(longest + 4)
+}
+
+/// The stacks the game checks: every lower wiring shape under every upper one,
+/// and a straight with a repeater on either level under or over every shape of
+/// the other.
+pub fn checked_stacks() -> Vec<(Variant, Variant)> {
+    let shapes: Vec<Vec<Edge>> = (1u8..16)
+        .map(|mask| Edge::ALL.into_iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, e)| e).collect())
+        .filter(|edges: &Vec<Edge>| edges.len() >= 2)
+        .collect();
+    let straight = [Edge::West, Edge::East];
+    let mut out = Vec::new();
+    for lower in &shapes {
+        for upper in &shapes {
+            out.push((Variant::new(Kind::Wire, lower), Variant::new(Kind::WireUp, upper)));
+        }
+    }
+    for shape in &shapes {
+        out.push((Variant::repeater(&straight, Edge::West, 1), Variant::new(Kind::WireUp, shape)));
+        out.push((
+            Variant::new(Kind::Wire, shape),
+            Variant { kind: Kind::WireUp, ..Variant::repeater(&straight, Edge::West, 1) },
+        ));
+    }
+    out
+}
+
+/// Fixtures for every variant, and for the checked stacks, by name.
 pub fn all_variant_fixtures(library: &Library) -> Vec<(String, Value)> {
     let mut out = Vec::new();
     for v in Variant::all() {
@@ -237,6 +314,10 @@ pub fn all_variant_fixtures(library: &Library) -> Vec<(String, Value)> {
         } else {
             out.push((v.name(), variant_fixture(&v, library)));
         }
+    }
+    for (lower, upper) in checked_stacks() {
+        let fixture = stack_fixture(&lower, &upper, library);
+        out.push((fixture["name"].as_str().expect("a fixture has a name").to_string(), fixture));
     }
     out
 }
@@ -267,9 +348,11 @@ impl Rng {
 /// the simulator instead.
 pub fn group_fixture(name: &str, cols: i32, rows: i32, rng: &mut Rng, library: &Library) -> Value {
     let variants = Variant::all();
-    let grid: Vec<Vec<Variant>> =
-        (0..rows).map(|_| (0..cols).map(|_| variants[rng.below(variants.len())].clone()).collect()).collect();
-    let placed = lay_out(&grid, library);
+    let pick = |rng: &mut Rng| {
+        if rng.below(4) == 0 { random_stack(&variants, rng) } else { vec![variants[rng.below(variants.len())].clone()] }
+    };
+    let grid: Vec<Vec<Vec<Variant>>> = (0..rows).map(|_| (0..cols).map(|_| pick(rng)).collect()).collect();
+    let placed = lay_out_stacked(&grid, library);
     let width = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
     let (xs, zs) = grid_origins(width, rows);
     let margin = 2;
@@ -291,7 +374,7 @@ pub fn group_fixture(name: &str, cols: i32, rows: i32, rng: &mut Rng, library: &
             if covered((port_cell.0 + dc, port_cell.1 + dr)) {
                 continue; // whatever is there is part of the test
             }
-            let cell = Pos::new(origin.x + port.pos.x, 1, origin.z + port.pos.z).offset(port.edge.dir());
+            let cell = Pos::new(origin.x + port.pos.x, port.pos.y, origin.z + port.pos.z).offset(port.edge.dir());
             fx.put(cell.down(), Block::Glass);
             fx.put(cell, Block::Wire(crate::block::Wire::DOT));
             if port.kind != PortKind::Out {
@@ -322,7 +405,7 @@ pub fn group_fixture(name: &str, cols: i32, rows: i32, rng: &mut Rng, library: &
     }
     // A short pulse into a repeater comes out stretched to its delay, so a chain of
     // them can take the sum of twice each delay to settle.
-    let stretch: u32 = grid.iter().flatten().map(|v| 2 * v.delay_ticks(library)).sum();
+    let stretch: u32 = grid.iter().flatten().flatten().map(|v| 2 * v.delay_ticks(library)).sum();
     fx.finish(12 + stretch)
 }
 
@@ -347,10 +430,33 @@ pub fn lay_out(grid: &[Vec<Variant>], library: &Library) -> Vec<(Variant, (i32, 
     placed
 }
 
+/// [`lay_out`] for a grid whose cells may hold a stack: the variants of one cell
+/// (a lower and an upper wire) are all placed at it.
+pub fn lay_out_stacked(grid: &[Vec<Vec<Variant>>], library: &Library) -> Vec<(Variant, (i32, i32))> {
+    let mut placed = Vec::new();
+    for (r, row) in grid.iter().enumerate() {
+        let mut c = 0;
+        for cell in row {
+            for variant in cell {
+                placed.push((variant.clone(), (c, r as i32)));
+            }
+            c += cell.iter().map(|v| v.cells(library)).max().unwrap_or(1);
+        }
+    }
+    placed
+}
+
 /// Problems with a grid of placed variants: any way two tiles affect each other
 /// other than through matched ports on a shared edge.
 pub fn adjacency_problems(grid: &[Vec<Variant>], library: &Library) -> Vec<String> {
-    let placed = lay_out(grid, library);
+    let stacked: Vec<Vec<Vec<Variant>>> =
+        grid.iter().map(|row| row.iter().map(|v| vec![v.clone()]).collect()).collect();
+    adjacency_problems_stacked(&stacked, library)
+}
+
+/// [`adjacency_problems`] for a grid whose cells may hold a stack.
+pub fn adjacency_problems_stacked(grid: &[Vec<Vec<Variant>>], library: &Library) -> Vec<String> {
+    let placed = lay_out_stacked(grid, library);
     let rows = grid.len() as i32;
     let cols = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
     let (xs, zs) = grid_origins(cols, rows);
@@ -376,6 +482,7 @@ pub fn problems_in(world: &World, placed: &[(Variant, (i32, i32))], probes: &[Po
     let rows = placed.iter().map(|(_, (_, r))| r + 1).max().unwrap_or(0);
     let cols = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
     let (xs, zs) = grid_origins(cols, rows);
+    // The variants of a stack share a cell; the first of them stands for the tile.
     let tile_of = |pos: Pos| -> usize {
         let (Some(c), Some(r)) = (index_at(&xs, pos.x), index_at(&zs, pos.z)) else { return usize::MAX };
         placed
@@ -387,13 +494,19 @@ pub fn problems_in(world: &World, placed: &[(Variant, (i32, i32))], probes: &[Po
         Some((v, (c, r))) => format!("{} at column {c}, row {r}", v.name()),
         None => "no tile".to_string(),
     };
-    // The port cell of tile `i` on `edge`, if it uses that edge.
-    let port_cell = |i: usize, edge: Edge| -> Option<Pos> {
-        let (v, (c, r)) = &placed[i];
-        v.ports(library)
-            .into_iter()
-            .find(|p| p.edge == edge)
-            .map(|p| Pos::new(c * PITCH + p.pos.x, 1, r * PITCH + p.pos.z))
+    // The port cells of tile `i` on `edge`, one per wire level it uses there.
+    let port_cells = |i: usize, edge: Edge| -> Vec<Pos> {
+        let (_, at) = placed[i];
+        placed
+            .iter()
+            .filter(|(_, other)| *other == at)
+            .flat_map(|(v, (c, r))| {
+                v.ports(library)
+                    .into_iter()
+                    .filter(|p| p.edge == edge)
+                    .map(move |p| Pos::new(c * PITCH + p.pos.x, p.pos.y, r * PITCH + p.pos.z))
+            })
+            .collect()
     };
     let mut problems = Vec::new();
 
@@ -416,12 +529,11 @@ pub fn problems_in(world: &World, placed: &[(Variant, (i32, i32))], probes: &[Po
                 && b != usize::MAX
                 && Edge::ALL.iter().any(|&edge| {
                     let (dx, dz) = edge.step();
-                    match (port_cell(a, edge), port_cell(b, edge.opposite())) {
-                        (Some(pa), Some(pb)) => {
-                            pb == Pos::new(pa.x + dx, pa.y, pa.z + dz) && net.contains(&pa) && net.contains(&pb)
-                        }
-                        _ => false,
-                    }
+                    let theirs = port_cells(b, edge.opposite());
+                    port_cells(a, edge).into_iter().any(|pa| {
+                        let pb = Pos::new(pa.x + dx, pa.y, pa.z + dz);
+                        theirs.contains(&pb) && net.contains(&pa) && net.contains(&pb)
+                    })
                 })
         };
         let mut reached = vec![tiles[0]];
@@ -444,6 +556,29 @@ pub fn problems_in(world: &World, placed: &[(Variant, (i32, i32))], probes: &[Po
             }
         }
     }
+    // The levels of a stack are two nets: none may reach a port of both.
+    for (i, (variant, at)) in placed.iter().enumerate() {
+        for (other, other_at) in placed.iter().skip(i + 1) {
+            if other_at != at {
+                continue;
+            }
+            let nets = |v: &Variant| -> BTreeSet<usize> {
+                v.ports(library)
+                    .iter()
+                    .filter_map(|p| circuit.net_of(Pos::new(at.0 * PITCH + p.pos.x, p.pos.y, at.1 * PITCH + p.pos.z)))
+                    .collect()
+            };
+            if !nets(variant).is_disjoint(&nets(other)) {
+                problems.push(format!(
+                    "a net joins the two wire levels of the stack at column {}, row {} ({} under {})",
+                    at.0,
+                    at.1,
+                    variant.name(),
+                    other.name()
+                ));
+            }
+        }
+    }
     for component in circuit.torches.iter().chain(&circuit.sources) {
         for &other in &component.direct {
             if tile_of(other) != tile_of(component.pos) {
@@ -460,8 +595,59 @@ pub fn problems_in(world: &World, placed: &[(Variant, (i32, i32))], probes: &[Po
     problems
 }
 
-/// Every ordered pair of variants side by side (east and south), plus `quads`
-/// random 2×2 groups. Returns the problems found.
+/// Problems with a stack alone: a lower and an upper wire in one tile must stay
+/// apart whatever repeaters they carry, so no net, and no chain of nets joined
+/// by repeaters, may reach a port of both levels.
+pub fn stack_problems(lower: &Variant, upper: &Variant, library: &Library) -> Vec<String> {
+    let mut world = World::new((PITCH, HEIGHT, PITCH));
+    for (pos, block) in lower.blocks(library).into_iter().chain(upper.blocks(library)) {
+        world.set(pos, block);
+    }
+    stack_problems_in(&world, lower, upper, library)
+}
+
+/// The check behind [`stack_problems`], on a world that may have been tampered with.
+pub fn stack_problems_in(world: &World, lower: &Variant, upper: &Variant, library: &Library) -> Vec<String> {
+    let circuit = extract(world, &[]);
+    // Nets joined through a repeater count as one circuit.
+    let mut parent: Vec<usize> = (0..circuit.nets.len()).collect();
+    fn root(parent: &mut [usize], mut n: usize) -> usize {
+        while parent[n] != n {
+            parent[n] = parent[parent[n]];
+            n = parent[n];
+        }
+        n
+    }
+    for repeater in &circuit.repeaters {
+        for &a in &repeater.reads {
+            for &b in &repeater.drives {
+                let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
+                parent[ra] = rb;
+            }
+        }
+    }
+    let mut circuits = |variant: &Variant| -> BTreeSet<usize> {
+        variant.ports(library).iter().filter_map(|p| circuit.net_of(p.pos)).map(|n| root(&mut parent, n)).collect()
+    };
+    let (low, high) = (circuits(lower), circuits(upper));
+    if low.is_disjoint(&high) {
+        Vec::new()
+    } else {
+        vec![format!("{} under {} join the two wire levels", lower.name(), upper.name())]
+    }
+}
+
+/// A random stack: a lower wire under an upper one, either with or without a repeater.
+fn random_stack(variants: &[Variant], rng: &mut Rng) -> Vec<Variant> {
+    let lowers: Vec<&Variant> = variants.iter().filter(|v| v.kind == Kind::Wire).collect();
+    let uppers: Vec<&Variant> = variants.iter().filter(|v| v.kind == Kind::WireUp).collect();
+    vec![lowers[rng.below(lowers.len())].clone(), uppers[rng.below(uppers.len())].clone()]
+}
+
+/// Every ordered pair of variants side by side (east and south); every lower
+/// wire under every upper one alone; every stack of plain wiring beside every
+/// variant; plus `quads` random 2×2 groups, a third of their cells stacks.
+/// Returns the count of groups checked and the problems found.
 pub fn check_all_adjacency(library: &Library, quads: usize, seed: u64) -> (usize, Vec<String>) {
     let variants = Variant::all();
     let mut problems = Vec::new();
@@ -474,12 +660,43 @@ pub fn check_all_adjacency(library: &Library, quads: usize, seed: u64) -> (usize
             }
         }
     }
+    let lowers: Vec<&Variant> = variants.iter().filter(|v| v.kind == Kind::Wire).collect();
+    let uppers: Vec<&Variant> = variants.iter().filter(|v| v.kind == Kind::WireUp).collect();
+    for lower in &lowers {
+        for upper in &uppers {
+            checked += 1;
+            problems.extend(stack_problems(lower, upper, library));
+        }
+    }
+    for lower in lowers.iter().filter(|v| v.repeater_entry.is_none()) {
+        for upper in uppers.iter().filter(|v| v.repeater_entry.is_none()) {
+            let stack = vec![(*lower).clone(), (*upper).clone()];
+            for other in &variants {
+                let other = vec![other.clone()];
+                for grid in [
+                    vec![vec![stack.clone(), other.clone()]],
+                    vec![vec![other.clone(), stack.clone()]],
+                    vec![vec![stack.clone()], vec![other.clone()]],
+                    vec![vec![other.clone()], vec![stack.clone()]],
+                ] {
+                    checked += 1;
+                    problems.extend(adjacency_problems_stacked(&grid, library));
+                }
+            }
+        }
+    }
     let mut rng = Rng::new(seed);
     for _ in 0..quads {
-        let pick = |rng: &mut Rng| variants[rng.below(variants.len())].clone();
+        let pick = |rng: &mut Rng| {
+            if rng.below(3) == 0 {
+                random_stack(&variants, rng)
+            } else {
+                vec![variants[rng.below(variants.len())].clone()]
+            }
+        };
         let grid = vec![vec![pick(&mut rng), pick(&mut rng)], vec![pick(&mut rng), pick(&mut rng)]];
         checked += 1;
-        problems.extend(adjacency_problems(&grid, library));
+        problems.extend(adjacency_problems_stacked(&grid, library));
     }
     problems.sort();
     problems.dedup();
@@ -540,5 +757,56 @@ mod tests {
             let least = if name.starts_with("dff") { 1 } else { 2 };
             assert!(fixture["expect"].as_array().unwrap().len() >= least, "{name}");
         }
+    }
+
+    /// A stack is two circuits; a dust stair from the lower level up to the
+    /// upper one joins them, inside one tile or across a border, and is caught.
+    #[test]
+    fn a_stair_between_the_wire_levels_is_caught() {
+        let library = Library::builtin().unwrap();
+        let lower = Variant::new(Kind::Wire, &[Edge::North, Edge::South]);
+        let upper = Variant::new(Kind::WireUp, &[Edge::West, Edge::East]);
+        assert!(stack_problems(&lower, &upper, &library).is_empty());
+        let mut world = World::new((PITCH, HEIGHT, PITCH));
+        for (pos, block) in lower.blocks(&library).into_iter().chain(upper.blocks(&library)) {
+            world.set(pos, block);
+        }
+        // From the lower dust at (2, 1, 1) a step up to (1, 2, 1) on a stone, and
+        // from there up to the upper dust at (1, 3, 2).
+        world.set(Pos::new(1, 1, 1), Block::Stone);
+        world.set(Pos::new(1, 2, 1), Block::Wire(Wire::DOT));
+        assert_eq!(stack_problems_in(&world, &lower, &upper, &library).len(), 1);
+
+        // Two stacks side by side, joined only on each level: fine. A stair from
+        // the first's lower east port up to the second's upper west port is a leak.
+        let straight = vec![Variant::new(Kind::Wire, &[Edge::West, Edge::East]), upper.clone()];
+        let grid = vec![vec![straight, vec![lower.clone(), upper.clone()]]];
+        assert!(adjacency_problems_stacked(&grid, &library).is_empty());
+        let placed = lay_out_stacked(&grid, &library);
+        let mut world = World::new((2 * PITCH, HEIGHT, PITCH));
+        for (variant, (c, _)) in &placed {
+            for (pos, block) in variant.blocks(&library) {
+                world.set(Pos::new(c * PITCH + pos.x, pos.y, pos.z), block);
+            }
+        }
+        assert!(problems_in(&world, &placed, &[], &library).is_empty());
+        // A stair from the first tile's lower east port, south and up two levels
+        // into the second tile's upper west port: the merged net still runs
+        // between the tiles only through matched (upper) ports, but the first
+        // stack's two levels are now one net.
+        for (pos, block) in [
+            (Pos::new(4, 0, 3), Block::Glass),
+            (Pos::new(4, 1, 3), Block::Wire(Wire::DOT)),
+            (Pos::new(4, 1, 4), Block::Stone),
+            (Pos::new(4, 2, 4), Block::Wire(Wire::DOT)),
+            (Pos::new(5, 2, 4), Block::Stone),
+            (Pos::new(5, 3, 4), Block::Wire(Wire::DOT)),
+            (Pos::new(5, 2, 3), Block::Stone),
+            (Pos::new(5, 3, 3), Block::Wire(Wire::DOT)),
+        ] {
+            world.set(pos, block);
+        }
+        let problems = problems_in(&world, &placed, &[], &library);
+        assert!(problems.iter().any(|p| p.contains("joins the two wire levels")), "{problems:?}");
     }
 }
