@@ -217,7 +217,8 @@ The cost is density, maybe 2–4× worse than hand layout. You chose correctness
 3. Order each column with barycenter sweeps in both directions, about 4–8 passes.
 4. Assign coordinates: gate column `i` goes to tile column `i·(1+k_i)`, where `k_i` routing columns sit between gate columns. Estimate `k_i` from the max cut between levels and grow it if routing fails.
 5. Place I/O: levers on the west edge, lamps on the east edge, and the register column with its clock spine on the far west.
-6. Rows, by placement style (compaction, step 2). At the four-row pitch every gate takes a north feed row, its own row, a south feed row and a free row. Packed, a gate takes only the rows its pins use: a pin pays for a feed row, so it reads on the west whenever that is nearly as short, two neighbouring gates that would each take the same net on a feed side share one feed tile between them, and a free row is left after every few gates for the nets that must pass the column. The build lays a combinational design out in every style, checks and times each, and keeps the smallest footprint, then the shortest settle, provided its inputs may change as often as under the four-row pitch; a clocked design keeps the four-row pitch until the stretched style (step 3). The styles are tried in a fixed order and ties go to the earlier, so builds stay deterministic.
+6. Rows, by placement style (the compaction stage, `docs/PLAN.md`). At the four-row pitch (`pitch4`) every gate takes a north feed row, its own row, a south feed row and a free row. Packed (`packed`), a gate takes only the rows its pins use: a pin pays for a feed row, so it reads on the west whenever that is nearly as short, two neighbouring gates that would each take the same net on a feed side share one feed tile between them, and a free row is left after every few gates for the nets that must pass the column. Stretched (`stretched`), the rows are packed and then every column shorter than the tallest is drawn out over the tallest's rows, which leaves room for a clocked design's feedback and clock nets to pass. In both packed styles the clock inverter sits halfway down the register column instead of in a gate column of its own.
+7. The pick. The build lays a design out in every style that applies, checks and times each, and keeps the best: for a combinational design (`pitch4` or `packed`) the smallest footprint, then the shortest settle, provided its inputs may change as often as under the four-row pitch; for a clocked design (`pitch4` or `stretched`; `packed` never won on one) the least footprint times clock period, then the shorter period. The styles are tried in a fixed order and ties go to the earlier, so builds stay deterministic. `tests/baselines/area.json` records what every shipped design came to, and the gate fails any build that gets bigger or slower without the baseline being edited in the same commit.
 
 ### 4.4 Routing
 
@@ -225,6 +226,7 @@ The cost is density, maybe 2–4× worse than hand layout. You chose correctness
 - **Clock first.** Route the clock first, as a deterministic spine with repeater taps.
 - **Signals.** Route everything else with **PathFinder**: A* per net and per sink, with a history cost plus a present-congestion cost, then rip-up and re-route over iterations.
 - **Costs.** Crossings get a cost because they add strength loss and maybe delay. Long detours get a cost through strength (repeater count).
+- **Repeaters.** Strength is exact on the grid (each tile's dust steps, read off its file), so repeaters go only where a signal would arrive too weak: first each at the latest tile before the signal dies, which gives every path as few as it can have alone, then per net the fewest the tree allows without any sink getting more on its path than that (one repeater before a fork instead of one in each branch). The run of three straight tiles a repeater reaches is the physics; fewer repeaters come only from shorter wires.
 - **Fallback.** If PathFinder doesn't converge in N iterations, widen the routing columns and retry. Optionally run fiction's `ortho` algorithm as a constructive baseline that always succeeds on combinational partitions. It needs fan-in ≤ 2 and its area grows quadratically, so it's a baseline and a sanity check, not the main engine (Appendix B).
 
 ### 4.5 Timing
@@ -234,7 +236,7 @@ The cost is density, maybe 2–4× worse than hand layout. You chose correctness
 - **Analysis.** Graph-based min/max arrival times over the routed design. Per-DFF clock arrival comes from the spine.
 - **Setup.** `max_arrival(D) + t_setup ≤ T + clk_arrival(dff)`.
 - **Hold.** `min_arrival(D) ≥ clk_arrival(dff) + t_hold`.
-- **Fixing.** Fix hold by raising repeater delays on the offending paths, which costs no area. Fix skew by setting tap repeater delays on the clock spine.
+- **Fixing.** Fix hold by raising repeater delays on the offending paths, which costs no area: a tile of the flip-flop's own D branch first, else one it shares with another sink's path, and a layout that leaves a D path nothing to lengthen is refused. Fix skew by setting tap repeater delays on the clock spine. A period too fast for the burnout budget is lengthened two ticks at a time until no torch turns off more than the budget allows.
 
 ### 4.6 Realize and export
 
