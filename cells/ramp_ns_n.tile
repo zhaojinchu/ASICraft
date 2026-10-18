@@ -1,0 +1,38 @@
+# The ramp for a routing column three blocks wide, north to south: the lower
+# north port, the climb down the middle column on stone steps, the upper south
+# port, five blocks as in the ramp tile (see ramp). Turned half round it runs
+# south to north.
+tile ramp_ns_n
+size 3 4 5
+port N io 1 1 0
+port S io 1 3 4
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  - minecraft:redstone_wire
+
+layer 0
+  .G.
+  .G.
+  ...
+  ...
+  ...
+layer 1
+  .-.
+  .-.
+  .#.
+  ...
+  ...
+layer 2
+  ...
+  ...
+  .-.
+  .#.
+  .#.
+layer 3
+  ...
+  ...
+  ...
+  .-.
+  .-.
