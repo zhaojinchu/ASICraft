@@ -43,7 +43,7 @@ LOWER_IS_BETTER = ("tiles", "area", "chunks", "routing_cols", "repeaters", "sett
 HIGHER_IS_BETTER = ("input_window",)
 MUST_MATCH = ("cells", "placement")
 # The placement styles the build may pick, by the names place.rs gives them.
-STYLES = ("pitch4", "packed")
+STYLES = ("pitch4", "packed", "stretched")
 
 
 class Stale(Exception):

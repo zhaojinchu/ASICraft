@@ -41,18 +41,28 @@ pub enum Style {
     /// A row for each feed side a gate uses and one for the gate, with a free
     /// row after every few gates for the nets that pass the column.
     Packed,
+    /// Packed, then every column shorter than the tallest is stretched over
+    /// the tallest's rows, so that the rows it does not fill stay free for the
+    /// nets that pass it (a clocked design's feedback and clock).
+    Stretched,
 }
 
 impl Style {
     /// Every style, in the order the build tries them.
-    pub const ALL: [Style; 2] = [Style::Pitch4, Style::Packed];
+    pub const ALL: [Style; 3] = [Style::Pitch4, Style::Packed, Style::Stretched];
 
     /// The name a design file records.
     pub fn name(self) -> &'static str {
         match self {
             Style::Pitch4 => "pitch4",
             Style::Packed => "packed",
+            Style::Stretched => "stretched",
         }
+    }
+
+    /// Whether gates take only the rows their pins use.
+    pub fn packs(self) -> bool {
+        self != Style::Pitch4
     }
 
     /// The style a design file names, if any.
@@ -181,20 +191,48 @@ pub fn levels(netlist: &Netlist, drivers: &[Driver]) -> Result<Vec<usize>, Strin
 }
 
 /// The stage of every cell (1 and up, the flip-flop column being stage 1 when
-/// there is one), and how many gaps the placement has.
-fn stages(netlist: &Netlist, level: &[usize]) -> (Vec<usize>, usize) {
+/// there is one), and how many gaps the placement has. In the packed styles
+/// the clock inverters go into the flip-flop column, not by their depth, so
+/// that the clock reaches every flip-flop from beside it.
+fn stages(netlist: &Netlist, level: &[usize], drivers: &[Driver], style: Style) -> (Vec<usize>, usize) {
     let has_dff = netlist.cells.iter().any(|c| c.is_dff());
     let first = if has_dff { 0 } else { 1 };
-    let stage: Vec<usize> = level.iter().map(|&l| l + 1 - first).collect();
+    let mut stage: Vec<usize> = level.iter().map(|&l| l + 1 - first).collect();
+    if style.packs() {
+        for c in clock_inverters(netlist, drivers) {
+            stage[c] = 1;
+        }
+    }
     let gate_columns = stage.iter().copied().max().unwrap_or(0);
     (stage, gate_columns + 1)
 }
 
-/// How many gaps of routing columns the placement of `netlist` has: one more
-/// than its gate columns.
-pub fn gap_count(netlist: &Netlist) -> Result<usize, String> {
-    let level = levels(netlist, &netlist.drivers()?)?;
-    Ok(stages(netlist, &level).1)
+/// The inverters between the clock input and the flip-flops' clock pins (the
+/// one `dfflegalize` adds for a rising-edge clock): a NOT fed by a design
+/// input whose every sink is a flip-flop's clock pin.
+pub fn clock_inverters(netlist: &Netlist, drivers: &[Driver]) -> Vec<usize> {
+    netlist
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| {
+            cell.kind == "NOT"
+                && matches!(drivers[cell.inputs[0]], Driver::Input(_))
+                && netlist
+                    .sinks_of(cell.output)
+                    .iter()
+                    .all(|&(d, pin)| d != usize::MAX && netlist.cells[d].is_dff() && pin == 1)
+        })
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// How many gaps of routing columns the placement of `netlist` in `style` has:
+/// one more than its gate columns.
+pub fn gap_count(netlist: &Netlist, style: Style) -> Result<usize, String> {
+    let drivers = netlist.drivers()?;
+    let level = levels(netlist, &drivers)?;
+    Ok(stages(netlist, &level, &drivers, style).1)
 }
 
 /// Places the netlist with `routing[g]` routing columns in gap `g`, the rows
@@ -203,7 +241,8 @@ pub fn place(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Placeme
     let drivers = netlist.drivers()?;
     let level = levels(netlist, &drivers)?;
     let has_dff = netlist.cells.iter().any(|c| c.is_dff());
-    let (stage, gaps) = stages(netlist, &level);
+    let (stage, gaps) = stages(netlist, &level, &drivers, style);
+    let inverters = if style.packs() { clock_inverters(netlist, &drivers) } else { Vec::new() };
     if routing.len() != gaps {
         return Err(format!("the placement has {gaps} gaps but {} routing widths were given", routing.len()));
     }
@@ -267,13 +306,10 @@ pub fn place(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Placeme
     let crossing_rows =
         (1..gaps).map(|s| 3 * by_stage.get(&s).map_or(0, Vec::len) as i32 + crossing_of_stage[s]).max().unwrap_or(0);
     // One spare row at the bottom: two nets that have to swap rows need a third row to pass.
-    let mut rows = match style {
-        Style::Pitch4 => (4 * gates_per_col).max(crossing_rows + 1),
-        Style::Packed => crossing_rows + 1,
-    }
-    .max(sources + 1)
-    .max(netlist.outputs.len() as i32 + 1)
-    .max(2);
+    let mut rows = if style.packs() { crossing_rows + 1 } else { (4 * gates_per_col).max(crossing_rows + 1) }
+        .max(sources + 1)
+        .max(netlist.outputs.len() as i32 + 1)
+        .max(2);
 
     // Rows: start in index order, then sweep by barycenter a few times.
     let mut row_of_cell = vec![0i32; netlist.cells.len()];
@@ -298,8 +334,11 @@ pub fn place(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Placeme
         }
     };
     for _ in 0..4 {
-        // Gates: by the average row of their drivers.
-        for cells in by_stage.values() {
+        // Gates: by the average row of their drivers, the clock inverters in the
+        // middle of the flip-flop column.
+        // Packed, the first row below each stage.
+        let mut bottoms: Vec<(usize, i32)> = Vec::new();
+        for (&s, cells) in &by_stage {
             let mut order: Vec<(f64, usize)> = cells
                 .iter()
                 .map(|&c| {
@@ -312,28 +351,38 @@ pub fn place(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Placeme
                 })
                 .collect();
             order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
-            match style {
-                Style::Pitch4 => {
-                    for (i, (_, c)) in order.iter().enumerate() {
-                        row_of_cell[*c] = 1 + 4 * i as i32;
-                    }
+            let mut order: Vec<usize> = order.iter().map(|(_, c)| *c).collect();
+            in_the_middle(&mut order, &inverters);
+            if style.packs() {
+                let from: Vec<Vec<f64>> = order
+                    .iter()
+                    .map(|&c| {
+                        netlist.cells[c]
+                            .inputs
+                            .iter()
+                            .map(|&n| driver_row(n, &row_of_cell, &row_of_input, &row_of_tie))
+                            .collect()
+                    })
+                    .collect();
+                let crossing = crossing_of_stage[s];
+                let every = if crossing > 0 { (order.len() as i32 + crossing - 1) / crossing } else { i32::MAX };
+                let bottom = pack_stage(netlist, &order, &from, every, &mut row_of_cell, &mut sides_of_cell);
+                bottoms.push((s, bottom));
+                rows = rows.max(bottom + 1);
+            } else {
+                for (i, &c) in order.iter().enumerate() {
+                    row_of_cell[c] = 1 + 4 * i as i32;
                 }
-                Style::Packed => {
-                    let order: Vec<usize> = order.iter().map(|(_, c)| *c).collect();
-                    let from: Vec<Vec<f64>> = order
-                        .iter()
-                        .map(|&c| {
-                            netlist.cells[c]
-                                .inputs
-                                .iter()
-                                .map(|&n| driver_row(n, &row_of_cell, &row_of_input, &row_of_tie))
-                                .collect()
-                        })
-                        .collect();
-                    let crossing = crossing_of_stage[stage[order[0]]];
-                    let every = if crossing > 0 { (order.len() as i32 + crossing - 1) / crossing } else { i32::MAX };
-                    let bottom = pack_stage(netlist, &order, &from, every, &mut row_of_cell, &mut sides_of_cell);
-                    rows = rows.max(bottom + 1);
+            }
+        }
+        if style == Style::Stretched {
+            // Every stage shorter than the tallest is stretched over the
+            // tallest's rows, uniformly: differences between rows only grow,
+            // so no gate lands on another's row or feed.
+            let tallest = bottoms.iter().map(|&(_, bottom)| bottom).max().unwrap_or(0);
+            for &(s, bottom) in bottoms.iter().filter(|&&(_, bottom)| bottom > 1 && bottom < tallest) {
+                for &c in &by_stage[&s] {
+                    row_of_cell[c] = row_of_cell[c] * (tallest - 1) / (bottom - 1);
                 }
             }
         }
@@ -389,7 +438,7 @@ pub fn place(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Placeme
             pin_edges.push(vec![Edge::West, Edge::North]);
             continue;
         }
-        if style == Style::Packed {
+        if style.packs() {
             pin_edges.push(sides_of_cell[c].clone());
             continue;
         }
@@ -428,15 +477,17 @@ pub fn estimate_routing(netlist: &Netlist, placement: &Placement) -> Vec<i32> {
     for (gap, slot) in estimate.iter_mut().enumerate() {
         let mut spans: Vec<(i32, i32)> = Vec::new();
         for (net, &driver) in drivers.iter().enumerate() {
-            let driver_row = match driver {
-                Driver::Cell(c) => placement.gates[c].1,
-                Driver::Input(i) => placement.inputs[i].1,
+            let (driver_stage, driver_row) = match driver {
+                Driver::Cell(c) => (placement.stages[c], placement.gates[c].1),
+                Driver::Input(i) => (0, placement.inputs[i].1),
                 Driver::Const(_) => match placement.ties.iter().find(|t| t.0 == net) {
-                    Some(t) => t.2.1,
+                    Some(t) => (0, t.2.1),
                     None => continue,
                 },
             };
-            // The rows this net arrives at in the stage east of the gap.
+            // The rows this net arrives at in the stage east of the gap; a net
+            // whose sink is in its driver's own stage (a clock inverter's) turns
+            // round in the gap east of that stage.
             let mut rows: Vec<i32> = Vec::new();
             for (c, pin) in netlist.sinks_of(net) {
                 let (sink_stage, row) = if c == usize::MAX {
@@ -450,7 +501,8 @@ pub fn estimate_routing(netlist: &Netlist, placement: &Placement) -> Vec<i32> {
                     };
                     (placement.stages[c], row)
                 };
-                if sink_stage == gap + 1 {
+                let through = if sink_stage == driver_stage { sink_stage } else { sink_stage - 1 };
+                if through == gap {
                     rows.push(row);
                 }
             }
@@ -474,6 +526,19 @@ pub fn estimate_routing(netlist: &Netlist, placement: &Placement) -> Vec<i32> {
         *slot = density.max(1);
     }
     estimate
+}
+
+/// Moves the cells of `middle` that are in `order` to its middle, keeping the
+/// order of the rest: a clock inverter sits halfway down the flip-flop column,
+/// as near to every flip-flop as one place can be.
+fn in_the_middle(order: &mut Vec<usize>, middle: &[usize]) {
+    let moved: Vec<usize> = order.iter().copied().filter(|c| middle.contains(c)).collect();
+    if moved.is_empty() {
+        return;
+    }
+    order.retain(|c| !middle.contains(c));
+    let at = order.len() / 2;
+    order.splice(at..at, moved);
 }
 
 /// Distinct rows for things listed in the order of their target rows (which
@@ -646,7 +711,7 @@ mod tests {
     #[test]
     fn columns_are_named_stably_and_gaps_have_their_own_width() {
         let netlist = Netlist::from_yosys_json(TWO_LEVELS, "top", &Library::builtin().unwrap()).unwrap();
-        assert_eq!(gap_count(&netlist).unwrap(), 3);
+        assert_eq!(gap_count(&netlist, Style::Pitch4).unwrap(), 3);
         let p = place(&netlist, &[2, 1, 3], Style::Pitch4).unwrap();
         // sources, 2 routing, gate, 1 routing, gate, 3 routing, outputs
         assert_eq!(p.cols, 1 + 2 + 1 + 1 + 1 + 3 + 1);
@@ -747,7 +812,8 @@ mod tests {
             let gates = 4 + rng.below(12);
             let inputs = 2 + rng.below(4);
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, 0);
-            let gaps = gap_count(&netlist).unwrap();
+            let gaps = gap_count(&netlist, Style::Packed).unwrap();
+            assert_eq!(gaps, gap_count(&netlist, Style::Pitch4).unwrap(), "no clock inverter to move");
             let packed = place(&netlist, &vec![1; gaps], Style::Packed).unwrap();
             let pitch4 = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
             let tallest = |p: &Placement| p.gates.iter().map(|g| g.1).max().unwrap_or(0);
@@ -774,6 +840,105 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Stretched, every stage is drawn out over the rows of the tallest: the
+    /// random netlists need no more rows than at the four-row pitch (a short
+    /// stage may reach lower than the four-row pitch puts any gate, but never
+    /// below the tallest stage's own rows), their feed tiles stay free and
+    /// distinct, and a short stage's gate sits lower than packed.
+    #[test]
+    fn stretched_stages_span_the_tallest_and_keep_their_feeds_clear() {
+        for seed in 0..12u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let gates = 4 + rng.below(12);
+            let inputs = 2 + rng.below(4);
+            let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, 0);
+            let gaps = gap_count(&netlist, Style::Stretched).unwrap();
+            let stretched = place(&netlist, &vec![1; gaps], Style::Stretched).unwrap();
+            let pitch4 = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
+            assert!(stretched.rows <= pitch4.rows, "seed {seed}: {} rows against {}", stretched.rows, pitch4.rows);
+            let mut feeds: BTreeMap<Cell, Vec<(usize, Edge)>> = BTreeMap::new();
+            for (c, cell) in netlist.cells.iter().enumerate() {
+                let (col, row) = stretched.gates[c];
+                assert!(row >= 0 && row < stretched.rows, "seed {seed}: gate {c} at row {row}");
+                for (&net, &edge) in cell.inputs.iter().zip(&stretched.pin_edges[c]) {
+                    let feed = match edge {
+                        Edge::North => (col, row - 1),
+                        Edge::South => (col, row + 1),
+                        _ => continue,
+                    };
+                    assert!(stretched.is_free(feed), "seed {seed}: the feed tile {feed:?} of gate {c} is taken");
+                    feeds.entry(feed).or_default().push((net, edge));
+                }
+            }
+            for (feed, users) in feeds {
+                match users.as_slice() {
+                    [_] => {}
+                    [(a, ea), (b, eb)] => assert!(a == b && ea != eb, "seed {seed}: {feed:?} fed by {users:?}"),
+                    _ => panic!("seed {seed}: {feed:?} fed by {users:?}"),
+                }
+            }
+        }
+        // Four inverters in the first stage, one NOR of the last two in the
+        // second: packed, the NOR takes a row near the top with a feed above
+        // it; stretched, the second stage is drawn out over the first's rows,
+        // so it sits lower.
+        let json = r#"{"modules":{"top":{
+            "ports":{"a":{"direction":"input","bits":[2]},"b":{"direction":"input","bits":[3]},
+                     "c":{"direction":"input","bits":[4]},"d":{"direction":"input","bits":[5]},
+                     "y":{"direction":"output","bits":[10]},"v":{"direction":"output","bits":[6]},
+                     "w":{"direction":"output","bits":[7]}},
+            "cells":{"n0":{"type":"NOT","connections":{"A":[2],"Y":[6]}},
+                     "n1":{"type":"NOT","connections":{"A":[3],"Y":[7]}},
+                     "n2":{"type":"NOT","connections":{"A":[4],"Y":[8]}},
+                     "n3":{"type":"NOT","connections":{"A":[5],"Y":[9]}},
+                     "g":{"type":"NOR2","connections":{"A":[9],"B":[8],"Y":[10]}}}}}}"#;
+        let netlist = Netlist::from_yosys_json(json, "top", &Library::builtin().unwrap()).unwrap();
+        let packed = place(&netlist, &[1, 1, 1], Style::Packed).unwrap();
+        let stretched = place(&netlist, &[1, 1, 1], Style::Stretched).unwrap();
+        let g = netlist.cells.iter().position(|c| c.kind == "NOR2").unwrap();
+        assert!(stretched.gates[g].1 > packed.gates[g].1, "{:?} vs {:?}", stretched.gates, packed.gates);
+        assert_eq!(stretched.rows, packed.rows);
+    }
+
+    /// The clock inverter goes into the flip-flop column in the packed styles,
+    /// halfway down it, and stays a gate column of its own at the four-row pitch.
+    #[test]
+    fn the_clock_inverter_sits_beside_the_flip_flops_in_the_packed_styles() {
+        let toggle = r#"{"modules":{"top":{
+            "ports":{"clk":{"direction":"input","bits":[2]},"q":{"direction":"output","bits":[3]}},
+            "cells":{"inv":{"type":"NOT","connections":{"A":[3],"Y":[4]}},
+                     "nclk":{"type":"NOT","connections":{"A":[2],"Y":[5]}},
+                     "ff":{"type":"DFF","connections":{"D":[4],"CLK":[5],"Q":[3]}}}}}}"#;
+        let netlist = Netlist::from_yosys_json(toggle, "top", &Library::builtin().unwrap()).unwrap();
+        let drivers = netlist.drivers().unwrap();
+        let nclk = netlist.cells.iter().position(|c| c.name == "nclk").unwrap();
+        let ff = netlist.cells.iter().position(|c| c.is_dff()).unwrap();
+        assert_eq!(clock_inverters(&netlist, &drivers), vec![nclk]);
+        assert_eq!(gap_count(&netlist, Style::Pitch4).unwrap(), 3);
+        let pitch4 = place(&netlist, &[1, 1, 1], Style::Pitch4).unwrap();
+        assert_ne!(pitch4.gates[nclk].0, pitch4.gates[ff].0);
+        assert_eq!(pitch4.stages[nclk], 2);
+        for style in [Style::Packed, Style::Stretched] {
+            assert_eq!(gap_count(&netlist, style).unwrap(), 3, "{}", style.name());
+            let p = place(&netlist, &[1, 1, 1], style).unwrap();
+            assert_eq!(p.gates[nclk].0, p.gates[ff].0, "{}", style.name());
+            assert_eq!(p.stages[nclk], 1);
+            assert_eq!(p.pin_edges[nclk], vec![Edge::West]);
+            // Its net turns round in the gap east of the column: the estimate counts it there.
+            assert!(estimate_routing(&netlist, &p)[1] >= 1);
+        }
+        // Halfway down: among four flip-flops the inverter comes after the second.
+        let mut order = vec![10, 11, 12, 13, 7];
+        in_the_middle(&mut order, &[7]);
+        assert_eq!(order, vec![10, 11, 7, 12, 13]);
+        let mut order = vec![10, 7];
+        in_the_middle(&mut order, &[7, 8]);
+        assert_eq!(order, vec![7, 10]);
+        let mut untouched = vec![1, 2, 3];
+        in_the_middle(&mut untouched, &[9]);
+        assert_eq!(untouched, vec![1, 2, 3]);
     }
 
     #[test]

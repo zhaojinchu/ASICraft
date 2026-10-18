@@ -21,7 +21,7 @@ From SystemVerilog to a redstone circuit:
                       apply input vectors (clock cycles for a clocked design) in the simulator
   timing DESIGN.json [--paths]
                       the timing report of a built design
-  layout MAPPED.json [--top NAME] [--style pitch4|packed]
+  layout MAPPED.json [--top NAME] [--style pitch4|packed|stretched]
                       place and route a mapped netlist and draw it, one character per tile
   extract DESIGN.json
                       the circuit read back from a design's blocks
@@ -412,12 +412,12 @@ fn pnr_random_command(args: &[String]) -> Result<bool, String> {
     Ok(failures == 0)
 }
 
-/// `redfab layout MAPPED.json [--top NAME] [--style pitch4|packed]`: places and
+/// `redfab layout MAPPED.json [--top NAME] [--style pitch4|packed|stretched]`: places and
 /// routes a mapped netlist in one placement style (the four-row pitch by default)
 /// and prints the layout as one character per tile (I input, O output, G gate,
 /// 1/0 constants, box drawing for wires, double lines for repeaters, ╬ crossing).
 fn layout_command(args: &[String]) -> Result<bool, String> {
-    const USAGE: &str = "usage: redfab layout MAPPED.json [--top NAME] [--style pitch4|packed]";
+    const USAGE: &str = "usage: redfab layout MAPPED.json [--top NAME] [--style pitch4|packed|stretched]";
     let mut mapped = None;
     let mut top = "top".to_string();
     let mut style = redfab_core::place::Style::Pitch4;
@@ -449,7 +449,7 @@ fn layout_command(args: &[String]) -> Result<bool, String> {
         }
         Err(e) => {
             // Show the placement alone, with one routing column.
-            let gaps = redfab_core::place::gap_count(&netlist)?;
+            let gaps = redfab_core::place::gap_count(&netlist, style)?;
             let placement = redfab_core::place::place(&netlist, &vec![1; gaps], style)?;
             let mut layout = redfab_core::layout::Layout::default();
             for (c, &cell) in placement.gates.iter().enumerate() {
