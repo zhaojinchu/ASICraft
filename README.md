@@ -146,29 +146,31 @@ circuit that passed its checks. The ceiling is capacity, not correctness:
 
 | Limit | Value | Where it comes from |
 |---|---|---|
-| Builds at all | about 150 cells with up to 20 inputs, in 2 to 3 minutes natively (random netlists, two seeds each); 100 cells in about 30 s; an 8-bit adder (102 cells, 17 inputs) in 10 s. A 200-cell, 24-input netlist did not finish in 12 minutes | the router's rounds on grids of 10k tiles, then the layout check and timing on 150k-block worlds (`crates/redfab-core/src/route.rs`, `build.rs`) |
+| Builds at all | about 150 cells with up to 20 inputs, in 2 to 3 minutes natively (random netlists, two seeds each); 100 cells in about 30 s; an 8-bit adder (102 cells, 17 inputs) in 13 s. A combinational design is laid out in two placement styles and a clocked one in two (the four-row pitch and stretched) and the better kept, so a build is about twice one layout; the 4-bit CPU of the capacity review (132 cells, clocked) builds in about 4 minutes. A 200-cell, 24-input netlist did not finish in 12 minutes | the router's rounds on grids of 10k tiles, then the layout check and timing on 150k-block worlds (`crates/redfab-core/src/route.rs`, `build.rs`) |
 | Routes inside the playground's 90 s compile limit | about 100 cells (`measuredCells`) | `playground/compile.js` |
-| Fits a plot on the live server | footprint up to 512 x 512 blocks: every shipped design fits, the largest is `adder4` at 250 x 250 | `server/live.mjs` |
+| Fits a plot on the live server | footprint up to 512 x 512 blocks: every shipped design fits, the widest is `adder8` at 485 x 175 | `server/live.mjs` |
 | Inputs | 64 bits | `build.rs` (`MAX_INPUTS`) |
-| Clock period | long: `counter4` needs 92 game ticks (4.6 s) per cycle, `mem2` 116 | repeaters on long feedback paths; a compaction pass is planned |
+| Clock period | long: `counter4` needs 86 game ticks (4.3 s) per cycle, `mem2` 94 | repeaters on long feedback paths; the compaction steps (`docs/PLAN.md`) shortened them, and the two wire levels planned next shorten the wires themselves |
 
-Sizes of the examples and of two larger designs, for scale (cells after
+Sizes of the examples and of larger designs, for scale (cells after
 mapping, blocks, footprint in blocks, clock period in game ticks; every
-example builds in 1 to 7 s from source with the release binary):
+example builds in 1 to 13 s from source with the release binary; the
+register file and the CPU are the capacity review's, not shipped):
 
 | Design | Cells | Blocks | Footprint | Period |
 |---|---|---|---|---|
-| `nor2` | 1 | 75 | 25 x 4 x 15 | |
-| `fa1` (full adder) | 11 | 1106 | 80 x 4 x 70 | |
-| `mul2` | 12 | 1498 | 85 x 4 x 70 | |
-| `lfsr3` | 15 | 3023 | 105 x 4 x 110 | 62 |
-| `counter4` | 26 | 8550 | 180 x 4 x 190 | 92 |
-| `divmod` | 30 | 7399 | 225 x 4 x 120 | |
-| `mem2` (2x2-bit memory) | 31 | 11258 | 170 x 4 x 175 | 116 |
-| `cmp4` | 32 | 3765 | 140 x 4 x 150 | |
-| `adder4` | 49 | 11127 | 250 x 4 x 250 | |
-| 2x4-bit register file | 57 | | 335 x 4 x 310 | |
-| 8-bit adder with carry | 102 | 35227 | 470 x 4 x 490 | |
+| `nor2` | 1 | 75 | 25 x 4 x 10 | |
+| `fa1` (full adder) | 11 | 866 | 75 x 4 x 30 | |
+| `mul2` | 12 | 1378 | 95 x 4 x 40 | |
+| `lfsr3` | 15 | 2743 | 105 x 4 x 70 | 52 |
+| `counter4` | 26 | 7010 | 170 x 4 x 100 | 86 |
+| `divmod` | 30 | 7099 | 230 x 4 x 95 | |
+| `mem2` (2x2-bit memory) | 31 | 8548 | 145 x 4 x 140 | 94 |
+| `cmp4` | 32 | 5015 | 175 x 4 x 95 | |
+| `adder4` | 49 | 9357 | 240 x 4 x 115 | |
+| 2x4-bit register file | 57 | 27954 | 270 x 4 x 255 | 174 |
+| 8-bit adder with carry | 102 | 28867 | 485 x 4 x 175 | |
+| 4-bit CPU, 16-word ROM | 132 | 90446 | 585 x 4 x 410 | 352 |
 
 ## Putting it in your world
 
