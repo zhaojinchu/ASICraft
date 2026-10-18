@@ -1261,4 +1261,27 @@ mod tests {
         assert_eq!(repeaters, vec![(2, 1)]);
         assert_eq!(counts, vec![1]);
     }
+
+    /// Two wire levels: nets that must cross do it as a stack, one on each level
+    /// with ramps between, never through the crossing tile, whose climbing arm
+    /// cannot carry a repeater; the layout still matches the netlist, and the
+    /// braid needs no more routing columns than with crossings.
+    #[test]
+    fn crossing_nets_take_the_two_wire_levels_instead_of_a_crossing_tile() {
+        let netlist = braid(5);
+        let library = Library::builtin().unwrap();
+        let (routed, routing) = crate::build::place_and_route(&library, &netlist, Style::Pitch4).unwrap();
+        assert!(
+            !routed.layout.tiles.values().any(|p| matches!(p, Placed::Cross { .. })),
+            "a crossing tile in the layout"
+        );
+        let realized = routed.layout.realize(&library, &netlist).unwrap();
+        let upper =
+            realized.world.iter().filter(|(pos, b)| pos.y == 3 && matches!(b, crate::block::Block::Wire(_))).count();
+        assert!(upper > 0, "nothing runs on the upper level");
+        let built = crate::build::build_netlist(&netlist, "braid").unwrap();
+        assert!(built.report.contains("layout matches the netlist"));
+        // With crossing tiles the braid routed at 4 and 1 routing columns.
+        assert!(routing.iter().sum::<i32>() <= 5, "{routing:?}");
+    }
 }
