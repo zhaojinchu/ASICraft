@@ -181,7 +181,7 @@
     },
     "init_reg": {
       "cells": 3,
-      "placement": "packed",
+      "placement": "stretched",
       "tiles": 25,
       "cols": 9,
       "rows": 4,
@@ -421,7 +421,7 @@
     },
     "shift2": {
       "cells": 4,
-      "placement": "packed",
+      "placement": "stretched",
       "tiles": 32,
       "cols": 7,
       "rows": 7,

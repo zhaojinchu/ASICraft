@@ -200,9 +200,11 @@ const HOLD_FIX_ROUNDS: usize = 20;
 /// one, in the order they are tried (ties in the pick go to the earlier). The
 /// stretched style measured as a loss on every combinational design (adder8
 /// 455 x 195 against 470 x 180 packed, adder4 its inputs changing every 12
-/// ticks instead of 8), so it is tried for the clocked ones.
+/// ticks instead of 8), and the packed style never won on a clocked one (over
+/// eleven clocked designs it tied stretched at best, with the same layout), so
+/// each kind tries the four-row pitch and the one packed style that can win.
 const COMBINATIONAL_STYLES: &[Style] = &[Style::Pitch4, Style::Packed];
-const CLOCKED_STYLES: &[Style] = &Style::ALL;
+const CLOCKED_STYLES: &[Style] = &[Style::Pitch4, Style::Stretched];
 
 /// [`build_netlist`], but a layout that fails the checks is returned along with
 /// the problems instead of being an error, so it can be looked at.
@@ -213,7 +215,8 @@ pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(B
 /// [`build_unchecked`], telling `log` about each phase.
 ///
 /// Every placement style is taken through placing, routing, the layout check and
-/// timing, and the best layout is kept: for a combinational design the smallest
+/// timing, and the best layout is kept (a combinational design tries pitch4 and
+/// packed, a clocked one pitch4 and stretched): for a combinational design the smallest
 /// footprint, then the shortest settle, provided its inputs may change as often
 /// as under the four-row pitch; for a clocked design the least footprint times
 /// clock period, then the shorter period (counter4 stretched measured half the
@@ -338,11 +341,18 @@ pub fn build_unchecked_logged(
         ),
     };
     let report = format!(
-        "design {name}\n  cells: {}\n  tiles: {} ({} columns x {} rows, {routing_text})\n  repeaters: {}\n  blocks: {} in {sx} x {sy} x {sz}\n{timing_line}{positions}{}",
+        "design {name}\n  cells: {}\n  tiles: {} ({} columns x {} rows, {routing_text})\n  placement: {}{}\n  repeaters: {}\n  blocks: {} in {sx} x {sy} x {sz}\n{timing_line}{positions}{}",
         netlist.cells.len(),
         design.tiles,
         design.grid.cols,
         design.grid.rows,
+        design.placement,
+        if clocked {
+            let rounds = design.hold_fix_rounds;
+            format!(", hold fixes: {rounds} round{}", if rounds == 1 { "" } else { "s" })
+        } else {
+            String::new()
+        },
         design.repeaters,
         design.blocks.len(),
         if problems.is_empty() { "  layout matches the netlist\n" } else { "" },
