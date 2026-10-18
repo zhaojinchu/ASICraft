@@ -13,8 +13,9 @@
 //! Signal strength is exact on the tile grid: dust loses one level per block,
 //! and each tile says what a hop through it costs, what its own driver hands
 //! on and what its pins need ([`Tile::dust_steps`] and the methods beside it,
-//! read off the tile files). From that, repeaters are inserted into straight
-//! tiles wherever a signal would arrive too weak.
+//! read off the tile files). From that, repeaters are inserted wherever a
+//! signal would arrive too weak: each as late as it can go, then, per net, the
+//! fewest the tree allows without any sink getting more on its path.
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
@@ -52,6 +53,10 @@ struct Sink {
 /// dust (the repeater takes the cell next to the port, see `Variant::blocks`),
 /// so any power there is enough.
 const REPEATER_NEEDS: u8 = 1;
+
+/// What a repeater costs in the exact repeater placement: far more than the one
+/// more a repeater in a crossing costs, so that the count decides first.
+const REPEATER_COST: u32 = 1000;
 
 /// The most rounds of negotiation in one run.
 const MAX_ITERATIONS: usize = 200;
@@ -739,6 +744,14 @@ fn shortest_path(graph: &Graph, tree: &[usize], target: usize, cost: impl Fn(usi
 /// Walks the net from its source, converting straight wire tiles into repeaters
 /// where the signal would arrive too weak. Returns the repeater count on the path
 /// to each sink.
+///
+/// The walk places each repeater at the latest tile before the signal dies, so
+/// every path from the source has as few repeaters as it can have on its own;
+/// but below a fork that puts one in each branch where one before the fork
+/// might do for both. So the tree is then solved exactly: the fewest
+/// repeaters such that no sink has more on its path than the walk gave it (no
+/// path gets slower), preferring tiles of the net's own to crossings, and the
+/// walk's choice is kept unless that is fewer.
 fn insert_repeaters(
     library: &Library,
     layout: &mut Layout,
@@ -804,31 +817,33 @@ fn insert_repeaters(
         let node = tree.parent.keys().find(|n| n.0 == cell && tree.parent[n].is_none_or(|p| p.0 != cell))?;
         tree.parent[node].map(|p| p.0)
     };
-    let mut repeaters: BTreeSet<Cell> = BTreeSet::new();
+    // What a hop through `cell` costs from its entry to the port beyond `exit`,
+    // and what a repeater in its entry arm hands on there.
+    let steps = |cell: Cell, at_repeater: bool, exit: Edge, layout: &Layout| -> u8 {
+        let (tile, rotation) = tile_at(cell, at_repeater, layout);
+        tile.dust_steps(unturned(cells[&cell].1, rotation), unturned(exit, rotation))
+            .expect("the tile's dust joins the entry to every edge the net leaves by")
+    };
+    let repeater_out = |cell: Cell, exit: Edge, layout: &Layout| -> u8 {
+        let (tile, rotation) = tile_at(cell, true, layout);
+        tile.repeater_out(unturned(cells[&cell].1, rotation), unturned(exit, rotation))
+            .expect("a repeater in the entry arm reaches every exit")
+    };
     let root = source.node.0;
 
-    loop {
-        // Strength at each cell's entry, in DFS order; stop at the first violation.
+    // The strength at each cell's entry, in DFS order, with `repeaters` placed:
+    // the repeater count on the path to each sink, or the first cell where the
+    // signal arrives too weak.
+    let walk = |repeaters: &BTreeSet<Cell>, layout: &Layout| -> Result<Vec<u32>, Cell> {
         let mut stack = vec![(root, source.strength)];
-        let mut violation: Option<Cell> = None;
         let mut sink_counts = vec![0u32; sinks.len()];
         while let Some((cell, v)) = stack.pop() {
             let at_repeater = repeaters.contains(&cell);
-            let (tile, rotation) = tile_at(cell, at_repeater, layout);
-            // The edges in the tile's own frame.
-            let entry = unturned(cells[&cell].1, rotation);
-            // What the tile costs from its entry to the port beyond `exit`, and what
-            // reaches that port.
-            let steps = |exit: Edge| {
-                tile.dust_steps(entry, unturned(exit, rotation))
-                    .expect("the tile's dust joins the entry to every edge the net leaves by")
-            };
             let out = |exit: Edge| {
                 if at_repeater {
-                    tile.repeater_out(entry, unturned(exit, rotation))
-                        .expect("a repeater in the entry arm reaches every exit")
+                    repeater_out(cell, exit, layout)
                 } else {
-                    v.saturating_sub(steps(exit))
+                    v.saturating_sub(steps(cell, false, exit, layout))
                 }
             };
             let mut needed = if at_repeater { REPEATER_NEEDS } else { 1 };
@@ -836,15 +851,15 @@ fn insert_repeaters(
             if !at_repeater {
                 // Every child's port must still see one level.
                 for child in &children {
-                    needed = needed.max(1 + steps(edge_between(cell, *child)));
+                    needed = needed.max(1 + steps(cell, false, edge_between(cell, *child), layout));
                 }
             }
             for (i, sink) in sinks.iter().enumerate() {
                 if sink.node.0 == cell {
-                    if at_repeater {
-                        // The pin reads the repeater's own output dust: always strong enough.
-                    } else {
-                        needed = needed.max(sink.needed_after + steps(sink.exit));
+                    if !at_repeater {
+                        // At a repeater the pin reads the repeater's own output dust,
+                        // which is always strong enough.
+                        needed = needed.max(sink.needed_after + steps(cell, false, sink.exit, layout));
                     }
                     // Count repeaters on the path to this sink.
                     let mut c = Some(cell);
@@ -857,19 +872,128 @@ fn insert_repeaters(
                 }
             }
             if v < needed {
-                violation = Some(cell);
-                break;
+                return Err(cell);
             }
             for child in children {
                 stack.push((child, out(edge_between(cell, child))));
             }
         }
-        let Some(bad) = violation else {
-            for &cell in &repeaters {
-                let placed = repeater_tile(cell, layout);
-                layout.tiles.insert(cell, placed);
+        Ok(sink_counts)
+    };
+
+    // The exact solution over the tree. For each cell, the strength at its entry
+    // and the repeaters already on the path above it: the least cost of the
+    // subtree (a repeater costs `REPEATER_COST`, one more in a crossing), when no
+    // sink may have more repeaters on its path than `budget` gives it. Every leaf
+    // of the tree is a sink, so a path with more repeaters than the largest
+    // budget can be cut short.
+    let fewest_repeaters = |budget: &[u32], layout: &Layout| -> Option<(BTreeSet<Cell>, u32)> {
+        let most = budget.iter().copied().max().unwrap_or(0) as usize;
+        let width = most + 1;
+        // Cells, every one after its parent.
+        let mut order = vec![root];
+        let mut i = 0;
+        while i < order.len() {
+            order.extend(child_cells(order[i]));
+            i += 1;
+        }
+        struct Hop {
+            children: Vec<Cell>,
+            /// Per child: the dust steps to its port without a repeater, and
+            /// what a repeater in this cell's entry arm hands on there.
+            plain: Vec<u8>,
+            repeated: Vec<u8>,
+            /// Least strength at the entry without a repeater.
+            needed: u8,
+            /// The sinks here.
+            sinks: Vec<usize>,
+            /// The cost of a repeater here, if one can go here.
+            repeater: Option<u32>,
+        }
+        let mut hops: BTreeMap<Cell, Hop> = BTreeMap::new();
+        for &cell in &order {
+            let children = child_cells(cell);
+            let plain: Vec<u8> = children.iter().map(|&c| steps(cell, false, edge_between(cell, c), layout)).collect();
+            let here: Vec<usize> = (0..sinks.len()).filter(|&i| sinks[i].node.0 == cell).collect();
+            let needed = plain
+                .iter()
+                .map(|s| 1 + s)
+                .chain(here.iter().map(|&i| sinks[i].needed_after + steps(cell, false, sinks[i].exit, layout)))
+                .fold(1, u8::max);
+            let repeater = can_repeat(cell, layout).then(|| REPEATER_COST + u32::from(tiles[&cell].len() > 1));
+            let repeated = if repeater.is_some() {
+                children.iter().map(|&c| repeater_out(cell, edge_between(cell, c), layout)).collect()
+            } else {
+                Vec::new()
+            };
+            hops.insert(cell, Hop { children, plain, repeated, needed, sinks: here, repeater });
+        }
+        const INFEASIBLE: u32 = u32::MAX;
+        let at = |v: u8, r: usize| usize::from(v) * width + r;
+        let mut best: BTreeMap<Cell, Vec<u32>> = BTreeMap::new();
+        // The cost of each choice at a cell: without a repeater, and with one.
+        let choices = |hop: &Hop, best: &BTreeMap<Cell, Vec<u32>>, v: u8, r: usize| -> (u32, u32) {
+            let sum = |strengths: &[u8], r: usize, base: u32| {
+                hop.children.iter().zip(strengths).try_fold(base, |total, (child, &out)| {
+                    let cost = best[child][at(out, r)];
+                    (cost != INFEASIBLE).then(|| total.saturating_add(cost))
+                })
+            };
+            let within = |r: usize| hop.sinks.iter().all(|&i| r <= budget[i] as usize);
+            let plain = if v >= hop.needed && within(r) {
+                let after: Vec<u8> = hop.plain.iter().map(|s| v - s).collect();
+                sum(&after, r, 0).unwrap_or(INFEASIBLE)
+            } else {
+                INFEASIBLE
+            };
+            let repeated = match hop.repeater {
+                Some(cost) if v >= REPEATER_NEEDS && r < most && within(r + 1) => {
+                    sum(&hop.repeated, r + 1, cost).unwrap_or(INFEASIBLE)
+                }
+                _ => INFEASIBLE,
+            };
+            (plain, repeated)
+        };
+        for &cell in order.iter().rev() {
+            let hop = &hops[&cell];
+            let mut table = vec![INFEASIBLE; 16 * width];
+            for v in 0..16u8 {
+                for r in 0..width {
+                    let (plain, repeated) = choices(hop, &best, v, r);
+                    table[at(v, r)] = plain.min(repeated);
+                }
             }
-            return Ok(sink_counts);
+            best.insert(cell, table);
+        }
+        let total = best[&root][at(source.strength.min(15), 0)];
+        if total == INFEASIBLE {
+            return None;
+        }
+        // Down from the root, without a repeater wherever that costs no more.
+        let mut chosen = BTreeSet::new();
+        let mut stack = vec![(root, source.strength.min(15), 0usize)];
+        while let Some((cell, v, r)) = stack.pop() {
+            let hop = &hops[&cell];
+            let (plain, repeated) = choices(hop, &best, v, r);
+            if plain <= repeated {
+                for (&child, s) in hop.children.iter().zip(&hop.plain) {
+                    stack.push((child, v - s, r));
+                }
+            } else {
+                chosen.insert(cell);
+                for (&child, &out) in hop.children.iter().zip(&hop.repeated) {
+                    stack.push((child, out, r + 1));
+                }
+            }
+        }
+        Some((chosen, total))
+    };
+
+    let mut repeaters: BTreeSet<Cell> = BTreeSet::new();
+    let counts = loop {
+        let bad = match walk(&repeaters, layout) {
+            Ok(counts) => break counts,
+            Err(bad) => bad,
         };
         // Place a repeater at the latest tile on the way here that can take one and
         // is not one already, including this tile itself; but a tile of this net's
@@ -915,7 +1039,23 @@ fn insert_repeaters(
                 return Err(Dies { path });
             }
         }
+    };
+
+    // The exact solution, kept when it costs less than the walk's (fewer
+    // repeaters, or as many in fewer crossings) and the walk confirms it.
+    let walked = repeaters.iter().map(|&c| REPEATER_COST + u32::from(tiles[&c].len() > 1)).sum::<u32>();
+    let (repeaters, counts) = match fewest_repeaters(&counts, layout) {
+        Some((fewer, cost)) if cost < walked => match walk(&fewer, layout) {
+            Ok(fewer_counts) => (fewer, fewer_counts),
+            Err(_) => (repeaters, counts),
+        },
+        _ => (repeaters, counts),
+    };
+    for &cell in &repeaters {
+        let placed = repeater_tile(cell, layout);
+        layout.tiles.insert(cell, placed);
     }
+    Ok(counts)
 }
 
 /// How a crossing is turned to carry a repeater for a net entering it by `entry`:
