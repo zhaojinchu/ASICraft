@@ -12,6 +12,9 @@ use crate::world::World;
 /// Blocks per tile edge, and the height every tile fits in.
 pub const PITCH: i32 = 5;
 pub const HEIGHT: i32 = 4;
+/// The width of a routing column: the narrow wiring tiles are this wide and
+/// `PITCH` deep.
+pub const NARROW: i32 = 3;
 
 /// The power a torch, a powered repeater or a powered block gives the dust beside it.
 const FULL_POWER: u8 = 15;
@@ -149,9 +152,9 @@ impl Tile {
         self.ports.iter().find(|p| p.edge == edge)
     }
 
-    /// How many cells wide the tile is.
+    /// How many cells wide the tile is: one for a narrow tile.
     pub fn cells(&self) -> i32 {
-        self.width / PITCH
+        (self.width + PITCH - 1) / PITCH
     }
 
     /// What a signal loses crossing the tile from the `entry` port to the port of
@@ -252,9 +255,12 @@ impl Tile {
                 ("tile", _) => name = Some(words.get(1).ok_or_else(|| at("tile needs a name".into()))?.to_string()),
                 ("size", _) => {
                     let size = pos_at(1)?;
-                    if size.x % PITCH != 0 || size.x < PITCH || (size.y, size.z) != (HEIGHT, PITCH) {
+                    if (size.x % PITCH != 0 && size.x != NARROW)
+                        || size.x < NARROW
+                        || (size.y, size.z) != (HEIGHT, PITCH)
+                    {
                         return Err(at(format!(
-                            "tiles are a whole number of cells wide: W {HEIGHT} {PITCH} with W a multiple of {PITCH}"
+                            "tiles are {NARROW} wide or a whole number of cells: W {HEIGHT} {PITCH} with W {NARROW} or a multiple of {PITCH}"
                         )));
                     }
                     width = size.x;
@@ -469,6 +475,8 @@ impl Tile {
     fn validate(&self) -> Result<(), String> {
         let last = PITCH - 1;
         let mid = PITCH / 2;
+        // North and south ports at the middle of the first cell: of the tile, when it is narrow.
+        let mid_x = self.width.min(PITCH) / 2;
         for port in &self.ports {
             // North and south ports sit on the first cell of a wide tile; a port is
             // on the lower wire level (y = 1) or the upper one (y = 3).
@@ -476,8 +484,8 @@ impl Tile {
             let expected = match port.edge {
                 Edge::West => Pos::new(0, y, mid),
                 Edge::East => Pos::new(self.width - 1, y, mid),
-                Edge::North => Pos::new(mid, y, 0),
-                Edge::South => Pos::new(mid, y, last),
+                Edge::North => Pos::new(mid_x, y, 0),
+                Edge::South => Pos::new(mid_x, y, last),
             };
             if port.pos != expected {
                 return Err(format!("{}: port {} must be at {expected}", self.name, port.edge.letter()));
@@ -546,6 +554,13 @@ pub struct Library {
     pub ramp: Tile,
     pub nor: Tile,
     pub cross: Tile,
+    /// The wiring of a routing column, `NARROW` wide: the wire on each level,
+    /// the crossing, and the ramp west to east and north to south.
+    pub wire_n: Tile,
+    pub wire_up_n: Tile,
+    pub cross_n: Tile,
+    pub ramp_n: Tile,
+    pub ramp_ns_n: Tile,
     pub tie_high: Tile,
     pub tie_low: Tile,
     /// The flip-flop, and the other candidate characterized in stage 8.
@@ -566,6 +581,11 @@ impl Library {
             ramp: parse("ramp", include_str!("../../../cells/ramp.tile"))?,
             nor: parse("nor", include_str!("../../../cells/nor.tile"))?,
             cross: parse("cross", include_str!("../../../cells/cross.tile"))?,
+            wire_n: parse("wire_n", include_str!("../../../cells/wire_n.tile"))?,
+            wire_up_n: parse("wire_up_n", include_str!("../../../cells/wire_up_n.tile"))?,
+            cross_n: parse("cross_n", include_str!("../../../cells/cross_n.tile"))?,
+            ramp_n: parse("ramp_n", include_str!("../../../cells/ramp_n.tile"))?,
+            ramp_ns_n: parse("ramp_ns_n", include_str!("../../../cells/ramp_ns_n.tile"))?,
             tie_high: parse("tie_high", include_str!("../../../cells/tie_high.tile"))?,
             tie_low: parse("tie_low", include_str!("../../../cells/tie_low.tile"))?,
             dff: parse("dff", include_str!("../../../cells/dff.tile"))?,
@@ -637,6 +657,14 @@ pub enum Kind {
     WireUp,
     /// From the lower level to the upper one: west lower, east upper, before turning.
     Ramp,
+    /// The same three, `NARROW` wide, for routing columns; and the narrow
+    /// crossing and the narrow ramp north to south (a narrow tile turns only
+    /// half round, so north-south needs a file of its own).
+    WireN,
+    WireUpN,
+    RampN,
+    RampNsN,
+    CrossN,
     Nor,
     Cross,
     TieHigh,
@@ -648,12 +676,17 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 11] = [
+    pub const ALL: [Kind; 16] = [
         Kind::Input,
         Kind::Output,
         Kind::Wire,
         Kind::WireUp,
         Kind::Ramp,
+        Kind::WireN,
+        Kind::WireUpN,
+        Kind::RampN,
+        Kind::RampNsN,
+        Kind::CrossN,
         Kind::Nor,
         Kind::Cross,
         Kind::TieHigh,
@@ -669,6 +702,11 @@ impl Kind {
             Kind::Wire => "wire",
             Kind::WireUp => "wire_up",
             Kind::Ramp => "ramp",
+            Kind::WireN => "wire_n",
+            Kind::WireUpN => "wire_up_n",
+            Kind::RampN => "ramp_n",
+            Kind::RampNsN => "ramp_ns_n",
+            Kind::CrossN => "cross_n",
             Kind::Nor => "nor",
             Kind::Cross => "cross",
             Kind::TieHigh => "tie_high",
@@ -722,6 +760,11 @@ impl Variant {
             Kind::Wire => &library.wire,
             Kind::WireUp => &library.wire_up,
             Kind::Ramp => &library.ramp,
+            Kind::WireN => &library.wire_n,
+            Kind::WireUpN => &library.wire_up_n,
+            Kind::RampN => &library.ramp_n,
+            Kind::RampNsN => &library.ramp_ns_n,
+            Kind::CrossN => &library.cross_n,
             Kind::Nor => &library.nor,
             Kind::Cross => &library.cross,
             Kind::TieHigh => &library.tie_high,
@@ -739,7 +782,7 @@ impl Variant {
     /// A short name, e.g. `wire_WS`, `nor_WN`, `wire_WE_repW_d3`.
     pub fn name(&self) -> String {
         let mut name = self.kind.name().to_string();
-        if matches!(self.kind, Kind::Wire | Kind::WireUp | Kind::Nor) {
+        if matches!(self.kind, Kind::Wire | Kind::WireUp | Kind::WireN | Kind::WireUpN | Kind::Nor) {
             name.push('_');
             name.extend(self.edges.iter().map(|e| e.letter()));
         }
@@ -795,7 +838,7 @@ impl Variant {
                         Edge::East => 3,
                     },
                     // West-east and north-south never meet.
-                    Kind::Cross => u8::from(matches!(p.edge, Edge::North | Edge::South)),
+                    Kind::Cross | Kind::CrossN => u8::from(matches!(p.edge, Edge::North | Edge::South)),
                     // D, the clock and Q are three nets.
                     Kind::Dff | Kind::DffAlt => match p.edge {
                         Edge::West => 0,
@@ -807,7 +850,7 @@ impl Variant {
                 let kind = match (self.repeater_entry, p.kind) {
                     // With a repeater the entry port is an input and the ports it feeds
                     // are outputs; in a crossing the other axis is unaffected.
-                    (Some(entry), PortKind::Io) if self.kind == Kind::Cross => {
+                    (Some(entry), PortKind::Io) if matches!(self.kind, Kind::Cross | Kind::CrossN) => {
                         if p.edge == entry {
                             PortKind::In
                         } else if p.edge == entry.opposite() {
@@ -868,6 +911,36 @@ impl Variant {
         // The ramp turned every way: lower west to upper east, lower north to upper south, and so on.
         for rotation in 0..4 {
             out.push(Variant { rotation, ..Variant::new(Kind::Ramp, &[Edge::West, Edge::East]) });
+        }
+        // The narrow family: wiring on each level, with a repeater entered from the
+        // north or south in any shape and from the west or east in a straight only
+        // (that arm is the centre); the crossing, with a repeater in its flat arm;
+        // the ramps turned half round.
+        for kind in [Kind::WireN, Kind::WireUpN] {
+            for mask in 1u8..16 {
+                let edges: Vec<Edge> =
+                    Edge::ALL.iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, e)| *e).collect();
+                if edges.len() < 2 {
+                    continue;
+                }
+                out.push(Variant::new(kind, &edges));
+                let straight = edges == [Edge::West, Edge::East];
+                for &entry in edges.iter().filter(|e| straight || matches!(e, Edge::North | Edge::South)) {
+                    out.push(Variant { kind, ..Variant::repeater(&edges, entry, 1) });
+                }
+            }
+            for delay in 2..=4 {
+                out.push(Variant { kind, ..Variant::repeater(&[Edge::West, Edge::East], Edge::West, delay) });
+                out.push(Variant { kind, ..Variant::repeater(&[Edge::North, Edge::South], Edge::North, delay) });
+            }
+        }
+        out.push(Variant::new(Kind::CrossN, &Edge::ALL));
+        for entry in [Edge::West, Edge::East] {
+            out.push(Variant { kind: Kind::CrossN, ..Variant::repeater(&Edge::ALL, entry, 1) });
+        }
+        for rotation in [0, 2] {
+            out.push(Variant { rotation, ..Variant::new(Kind::RampN, &[Edge::West, Edge::East]) });
+            out.push(Variant { rotation, ..Variant::new(Kind::RampNsN, &[Edge::North, Edge::South]) });
         }
         for mask in 1u8..8 {
             let inputs = [Edge::West, Edge::North, Edge::South];
@@ -934,8 +1007,12 @@ mod tests {
         assert_eq!(repeater.0, Pos::new(2, 1, 1));
         assert_eq!(turn.blocks(&lib).iter().filter(|(_, b)| matches!(b, Block::Wire(_))).count(), 4);
         // 2 io tiles, on each of the two levels 11 wires + 28 repeater placements +
-        // 3 more delays, 4 ramps, 7 NORs, 3 crossings, 2 flip-flops, 2 ties
-        assert_eq!(Variant::all().len(), 2 + 2 * (11 + 28 + 3) + 4 + 7 + 3 + 2 + 2);
+        // 3 more delays, 4 ramps, 7 NORs, 3 crossings, 2 flip-flops, 2 ties; and
+        // the narrow family: on each level 11 wires + 16 repeater placements (the
+        // north and south arms of every shape, the west and east of the straight)
+        // + 6 more delays, the crossing and its 2 repeaters, 4 ramps
+        let narrow = 2 * (11 + 16 + 6) + 3 + 4;
+        assert_eq!(Variant::all().len(), 2 + 2 * (11 + 28 + 3) + 4 + 7 + 3 + 2 + 2 + narrow);
     }
 
     #[test]

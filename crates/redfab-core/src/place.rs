@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 
 use crate::netlist::{Driver, NetId, Netlist};
-use crate::tile::{Edge, PITCH};
+use crate::tile::{Edge, NARROW, PITCH};
 
 /// A tile position: (column, row). Columns run east, rows run south.
 pub type Cell = (i32, i32);
@@ -451,7 +451,8 @@ pub fn place(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Placeme
     Ok(Placement {
         cols,
         rows,
-        col_width: vec![PITCH; cols as usize],
+        // Routing columns take the narrow wiring tiles; gates, sources and outputs a full cell.
+        col_width: columns.iter().map(|c| if matches!(c, Column::Routing { .. }) { NARROW } else { PITCH }).collect(),
         row_depth: vec![PITCH; rows as usize],
         gates,
         widths,
@@ -725,8 +726,11 @@ mod tests {
         assert_eq!(p.gates[0].0, 3);
         assert_eq!(p.gates[1].0, 5);
         assert_eq!(p.outputs[0].0, 9);
-        // Every column is a cell wide and every row a cell deep.
-        assert_eq!(p.col_width, vec![PITCH; p.cols as usize]);
+        // A routing column is narrow; every other column is a cell wide, and every row a cell deep.
+        let widths: Vec<i32> =
+            p.columns.iter().map(|c| if matches!(c, Column::Routing { .. }) { NARROW } else { PITCH }).collect();
+        assert_eq!(p.col_width, widths);
+        assert_eq!(p.col_width[..4], [PITCH, NARROW, NARROW, PITCH]);
         assert_eq!(p.row_depth, vec![PITCH; p.rows as usize]);
         // Widening the middle gap moves the later columns but keeps their names.
         let q = place(&netlist, &[2, 2, 3], Style::Pitch4).unwrap();

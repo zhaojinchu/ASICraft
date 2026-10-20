@@ -106,16 +106,20 @@ pub(crate) fn stamp(fixture: &mut Fixture, variant: &Variant, library: &Library)
 pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
     let name = variant.name();
     let doc = match variant.kind {
-        Kind::Wire | Kind::WireUp if variant.repeater_entry.is_some() => {
+        Kind::Wire | Kind::WireUp | Kind::WireN | Kind::WireUpN if variant.repeater_entry.is_some() => {
             "Wire with a repeater: every other port follows the entry after 2 game ticks per setting, and not before."
         }
-        Kind::Wire | Kind::WireUp => "Wiring: driving any used port must power every other used port, at once.",
-        Kind::Ramp => "Ramp: driving either port powers the other, at once, from one wire level to the other.",
+        Kind::Wire | Kind::WireUp | Kind::WireN | Kind::WireUpN => {
+            "Wiring: driving any used port must power every other used port, at once."
+        }
+        Kind::Ramp | Kind::RampN | Kind::RampNsN => {
+            "Ramp: driving either port powers the other, at once, from one wire level to the other."
+        }
         Kind::Nor => "NOR: the output is powered exactly when no input is, 2 game ticks after the inputs change.",
-        Kind::Cross if variant.repeater_entry.is_some() => {
+        Kind::Cross | Kind::CrossN if variant.repeater_entry.is_some() => {
             "Crossing with a repeater: the flat axis follows its entry after the delay; the other axis passes at once."
         }
-        Kind::Cross => "Crossing: west drives east only, north drives south only, at once.",
+        Kind::Cross | Kind::CrossN => "Crossing: west drives east only, north drives south only, at once.",
         Kind::TieHigh => "Constant 1: the output is always powered.",
         Kind::TieLow => "Constant 0: the output is never powered.",
         Kind::Input => "Input: the output is powered while the probe block is a redstone block.",
@@ -129,7 +133,7 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
     let delay = variant.delay_ticks(library);
     let mut t = 2;
     match variant.kind {
-        Kind::Wire | Kind::WireUp if variant.repeater_entry.is_some() => {
+        Kind::Wire | Kind::WireUp | Kind::WireN | Kind::WireUpN if variant.repeater_entry.is_some() => {
             let input = hooks.iter().find(|h| h.port.kind == PortKind::In).expect("repeater input");
             let outputs: Vec<&Hookup> = hooks.iter().filter(|h| h.port.kind == PortKind::Out).collect();
             for level in [true, false] {
@@ -141,7 +145,7 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
                 t += delay + 3;
             }
         }
-        Kind::Wire | Kind::WireUp | Kind::Ramp => {
+        Kind::Wire | Kind::WireUp | Kind::Ramp | Kind::WireN | Kind::WireUpN | Kind::RampN | Kind::RampNsN => {
             for driven in &hooks {
                 fx.at(t, driven.driver, on);
                 for other in hooks.iter().filter(|h| h.port.edge != driven.port.edge) {
@@ -154,7 +158,7 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
                 t += 6;
             }
         }
-        Kind::Cross if variant.repeater_entry.is_some() => {
+        Kind::Cross | Kind::CrossN if variant.repeater_entry.is_some() => {
             let input = hooks.iter().find(|h| h.port.kind == PortKind::In).expect("entry");
             let output = hooks.iter().find(|h| h.port.kind == PortKind::Out).expect("exit");
             let others: Vec<&Hookup> = hooks.iter().filter(|h| h.port.kind == PortKind::Io).collect();
@@ -167,7 +171,7 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
                 t += delay + 3;
             }
         }
-        Kind::Cross => {
+        Kind::Cross | Kind::CrossN => {
             let hook = |edge: Edge| hooks.iter().find(|h| h.port.edge == edge).expect("cross has all ports");
             let (w, e, n, s) = (hook(Edge::West), hook(Edge::East), hook(Edge::North), hook(Edge::South));
             for (west_on, north_on) in [(true, false), (false, true), (true, true), (false, false)] {
@@ -282,7 +286,9 @@ pub fn stack_fixture(lower: &Variant, upper: &Variant, library: &Library) -> Val
 
 /// The stacks the game checks: every lower wiring shape under every upper one,
 /// and a straight with a repeater on either level under or over every shape of
-/// the other.
+/// the other; and in the narrow family, which differs only in being three
+/// blocks across, every shape under and over a straight that crosses it, and
+/// the two repeater straights stacked.
 pub fn checked_stacks() -> Vec<(Variant, Variant)> {
     let shapes: Vec<Vec<Edge>> = (1u8..16)
         .map(|mask| Edge::ALL.into_iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, e)| e).collect())
@@ -302,6 +308,14 @@ pub fn checked_stacks() -> Vec<(Variant, Variant)> {
             Variant { kind: Kind::WireUp, ..Variant::repeater(&straight, Edge::West, 1) },
         ));
     }
+    let along = [Edge::North, Edge::South];
+    for shape in &shapes {
+        out.push((Variant::new(Kind::WireN, shape), Variant::new(Kind::WireUpN, &along)));
+        out.push((Variant::new(Kind::WireN, &along), Variant::new(Kind::WireUpN, shape)));
+    }
+    let n_repeater = |kind: Kind, edges: &[Edge], entry: Edge| Variant { kind, ..Variant::repeater(edges, entry, 1) };
+    out.push((n_repeater(Kind::WireN, &straight, Edge::West), n_repeater(Kind::WireUpN, &along, Edge::North)));
+    out.push((n_repeater(Kind::WireN, &along, Edge::South), n_repeater(Kind::WireUpN, &straight, Edge::East)));
     out
 }
 
@@ -348,13 +362,15 @@ impl Rng {
 /// the simulator instead.
 pub fn group_fixture(name: &str, cols: i32, rows: i32, rng: &mut Rng, library: &Library) -> Value {
     let variants = Variant::all();
-    let pick = |rng: &mut Rng| {
-        if rng.below(4) == 0 { random_stack(&variants, rng) } else { vec![variants[rng.below(variants.len())].clone()] }
-    };
-    let grid: Vec<Vec<Vec<Variant>>> = (0..rows).map(|_| (0..cols).map(|_| pick(rng)).collect()).collect();
+    // Each column narrow or not, the same all the way down, as in a layout.
+    let narrow_col: Vec<bool> = (0..cols).map(|_| rng.below(3) == 0).collect();
+    let wide = !narrow_col.contains(&true);
+    let grid: Vec<Vec<Vec<Variant>>> = (0..rows)
+        .map(|_| (0..cols as usize).map(|c| random_cell(&variants, narrow_col[c], wide, rng, library)).collect())
+        .collect();
     let placed = lay_out_stacked(&grid, library);
     let width = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
-    let (xs, zs) = grid_origins(width, rows);
+    let (xs, zs) = grid_origins(&placed, library);
     let margin = 2;
     let size = [xs[width as usize] + 2 * margin, HEIGHT, zs[rows as usize] + 2 * margin];
     let mut fx = Fixture::new(name.to_string(), format!("{cols}x{rows} random tiles"), size);
@@ -409,11 +425,26 @@ pub fn group_fixture(name: &str, cols: i32, rows: i32, rng: &mut Rng, library: &
     fx.finish(12 + stretch)
 }
 
-/// Where the cells of a `cols` x `rows` grid of fixture tiles start in blocks:
-/// every column a cell wide and every row a cell deep, as the layout's own table
-/// says it (`layout::origins`).
-fn grid_origins(cols: i32, rows: i32) -> (Vec<i32>, Vec<i32>) {
-    (origins(&vec![PITCH; cols as usize]), origins(&vec![PITCH; rows as usize]))
+/// Where the cells of a grid of placed fixture tiles start in blocks: each
+/// column as wide as the tiles in it (a narrow tile's `NARROW`, every other
+/// `PITCH`), every row a cell deep, as the layout's own table says it
+/// (`layout::origins`). Tiles above one another share their column's width.
+fn grid_origins(placed: &[(Variant, (i32, i32))], library: &Library) -> (Vec<i32>, Vec<i32>) {
+    let cols = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
+    let rows = placed.iter().map(|(_, (_, r))| r + 1).max().unwrap_or(0);
+    let mut widths = vec![PITCH; cols as usize];
+    for (v, (c, _)) in placed {
+        let width = v.tile(library).width;
+        if width < PITCH {
+            widths[*c as usize] = width;
+        }
+    }
+    (origins(&widths), origins(&vec![PITCH; rows as usize]))
+}
+
+/// Whether a variant's tile is narrow, for a routing column.
+fn narrow(variant: &Variant, library: &Library) -> bool {
+    variant.tile(library).width < PITCH
 }
 
 /// Each variant of a grid with the cell it starts at: a row's tiles follow one
@@ -459,7 +490,7 @@ pub fn adjacency_problems_stacked(grid: &[Vec<Vec<Variant>>], library: &Library)
     let placed = lay_out_stacked(grid, library);
     let rows = grid.len() as i32;
     let cols = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
-    let (xs, zs) = grid_origins(cols, rows);
+    let (xs, zs) = grid_origins(&placed, library);
     let mut world = World::new((xs[cols as usize], HEIGHT, zs[rows as usize]));
     let mut probes = Vec::new();
     for (variant, (c, r)) in &placed {
@@ -479,9 +510,7 @@ pub fn problems_in(world: &World, placed: &[(Variant, (i32, i32))], probes: &[Po
     let circuit = extract(world, probes);
     // Which placed tile a position belongs to, by index: its cell by the grid's
     // origin table, then the tile covering that cell.
-    let rows = placed.iter().map(|(_, (_, r))| r + 1).max().unwrap_or(0);
-    let cols = placed.iter().map(|(v, (c, _))| c + v.cells(library)).max().unwrap_or(0);
-    let (xs, zs) = grid_origins(cols, rows);
+    let (xs, zs) = grid_origins(placed, library);
     // The variants of a stack share a cell; the first of them stands for the tile.
     let tile_of = |pos: Pos| -> usize {
         let (Some(c), Some(r)) = (index_at(&xs, pos.x), index_at(&zs, pos.z)) else { return usize::MAX };
@@ -504,7 +533,8 @@ pub fn problems_in(world: &World, placed: &[(Variant, (i32, i32))], probes: &[Po
                 v.ports(library)
                     .into_iter()
                     .filter(|p| p.edge == edge)
-                    .map(move |p| Pos::new(c * PITCH + p.pos.x, p.pos.y, r * PITCH + p.pos.z))
+                    .map(|p| Pos::new(xs[*c as usize] + p.pos.x, p.pos.y, zs[*r as usize] + p.pos.z))
+                    .collect::<Vec<_>>()
             })
             .collect()
     };
@@ -565,7 +595,9 @@ pub fn problems_in(world: &World, placed: &[(Variant, (i32, i32))], probes: &[Po
             let nets = |v: &Variant| -> BTreeSet<usize> {
                 v.ports(library)
                     .iter()
-                    .filter_map(|p| circuit.net_of(Pos::new(at.0 * PITCH + p.pos.x, p.pos.y, at.1 * PITCH + p.pos.z)))
+                    .filter_map(|p| {
+                        circuit.net_of(Pos::new(xs[at.0 as usize] + p.pos.x, p.pos.y, zs[at.1 as usize] + p.pos.z))
+                    })
                     .collect()
             };
             if !nets(variant).is_disjoint(&nets(other)) {
@@ -637,11 +669,25 @@ pub fn stack_problems_in(world: &World, lower: &Variant, upper: &Variant, librar
     }
 }
 
-/// A random stack: a lower wire under an upper one, either with or without a repeater.
-fn random_stack(variants: &[Variant], rng: &mut Rng) -> Vec<Variant> {
-    let lowers: Vec<&Variant> = variants.iter().filter(|v| v.kind == Kind::Wire).collect();
-    let uppers: Vec<&Variant> = variants.iter().filter(|v| v.kind == Kind::WireUp).collect();
+/// A random stack: a lower wire under an upper one, either with or without a
+/// repeater, narrow or not.
+fn random_stack(variants: &[Variant], narrow: bool, rng: &mut Rng) -> Vec<Variant> {
+    let (low, high) = if narrow { (Kind::WireN, Kind::WireUpN) } else { (Kind::Wire, Kind::WireUp) };
+    let lowers: Vec<&Variant> = variants.iter().filter(|v| v.kind == low).collect();
+    let uppers: Vec<&Variant> = variants.iter().filter(|v| v.kind == high).collect();
     vec![lowers[rng.below(lowers.len())].clone(), uppers[rng.below(uppers.len())].clone()]
+}
+
+/// A random cell of a grid: a stack a quarter of the time, else any variant;
+/// narrow ones in a narrow column, and a two-cell tile only when `wide` (a grid
+/// with no narrow column, where it cannot push a row out of line).
+fn random_cell(variants: &[Variant], narrow_col: bool, wide: bool, rng: &mut Rng, library: &Library) -> Vec<Variant> {
+    if rng.below(4) == 0 {
+        return random_stack(variants, narrow_col, rng);
+    }
+    let fit: Vec<&Variant> =
+        variants.iter().filter(|v| narrow(v, library) == narrow_col && (wide || v.cells(library) == 1)).collect();
+    vec![fit[rng.below(fit.len())].clone()]
 }
 
 /// Every ordered pair of variants side by side (east and south); every lower
@@ -654,47 +700,55 @@ pub fn check_all_adjacency(library: &Library, quads: usize, seed: u64) -> (usize
     let mut checked = 0;
     for a in &variants {
         for b in &variants {
-            for grid in [vec![vec![a.clone(), b.clone()]], vec![vec![a.clone()], vec![b.clone()]]] {
+            checked += 1;
+            problems.extend(adjacency_problems(&[vec![a.clone(), b.clone()]], library));
+            // One above the other only in a column of one width.
+            if narrow(a, library) == narrow(b, library) && a.cells(library) == b.cells(library) {
                 checked += 1;
-                problems.extend(adjacency_problems(&grid, library));
+                problems.extend(adjacency_problems(&[vec![a.clone()], vec![b.clone()]], library));
             }
         }
     }
-    let lowers: Vec<&Variant> = variants.iter().filter(|v| v.kind == Kind::Wire).collect();
-    let uppers: Vec<&Variant> = variants.iter().filter(|v| v.kind == Kind::WireUp).collect();
-    for lower in &lowers {
-        for upper in &uppers {
-            checked += 1;
-            problems.extend(stack_problems(lower, upper, library));
+    for (low, high) in [(Kind::Wire, Kind::WireUp), (Kind::WireN, Kind::WireUpN)] {
+        let lowers: Vec<&Variant> = variants.iter().filter(|v| v.kind == low).collect();
+        let uppers: Vec<&Variant> = variants.iter().filter(|v| v.kind == high).collect();
+        for lower in &lowers {
+            for upper in &uppers {
+                checked += 1;
+                problems.extend(stack_problems(lower, upper, library));
+            }
         }
-    }
-    for lower in lowers.iter().filter(|v| v.repeater_entry.is_none()) {
-        for upper in uppers.iter().filter(|v| v.repeater_entry.is_none()) {
-            let stack = vec![(*lower).clone(), (*upper).clone()];
-            for other in &variants {
-                let other = vec![other.clone()];
-                for grid in [
-                    vec![vec![stack.clone(), other.clone()]],
-                    vec![vec![other.clone(), stack.clone()]],
-                    vec![vec![stack.clone()], vec![other.clone()]],
-                    vec![vec![other.clone()], vec![stack.clone()]],
-                ] {
-                    checked += 1;
-                    problems.extend(adjacency_problems_stacked(&grid, library));
+        for lower in lowers.iter().filter(|v| v.repeater_entry.is_none()) {
+            for upper in uppers.iter().filter(|v| v.repeater_entry.is_none()) {
+                let stack = vec![(*lower).clone(), (*upper).clone()];
+                for other in &variants {
+                    let column = narrow(other, library) == narrow(lower, library) && other.cells(library) == 1;
+                    let other = vec![other.clone()];
+                    let mut grids =
+                        vec![vec![vec![stack.clone(), other.clone()]], vec![vec![other.clone(), stack.clone()]]];
+                    if column {
+                        grids.push(vec![vec![stack.clone()], vec![other.clone()]]);
+                        grids.push(vec![vec![other.clone()], vec![stack.clone()]]);
+                    }
+                    for grid in grids {
+                        checked += 1;
+                        problems.extend(adjacency_problems_stacked(&grid, library));
+                    }
                 }
             }
         }
     }
     let mut rng = Rng::new(seed);
     for _ in 0..quads {
-        let pick = |rng: &mut Rng| {
-            if rng.below(3) == 0 {
-                random_stack(&variants, rng)
-            } else {
-                vec![variants[rng.below(variants.len())].clone()]
-            }
+        let narrow_col = [rng.below(3) == 0, rng.below(3) == 0];
+        let wide = !narrow_col.contains(&true);
+        let row = |rng: &mut Rng| {
+            vec![
+                random_cell(&variants, narrow_col[0], wide, rng, library),
+                random_cell(&variants, narrow_col[1], wide, rng, library),
+            ]
         };
-        let grid = vec![vec![pick(&mut rng), pick(&mut rng)], vec![pick(&mut rng), pick(&mut rng)]];
+        let grid = vec![row(&mut rng), row(&mut rng)];
         checked += 1;
         problems.extend(adjacency_problems_stacked(&grid, library));
     }

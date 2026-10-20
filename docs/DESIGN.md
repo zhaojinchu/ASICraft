@@ -201,7 +201,7 @@ Any failure in step 7 fails the build. You never ship a schematic the tool hasn'
 
 ### 4.2 The tile grid (the central decision)
 
-- **Tiles.** The world is a 2D grid of tiles at a fixed pitch (P × P blocks horizontally, H blocks tall). Pick P and H after you've built the NOR3, crossing and DFF tiles in-game; expect P around 4–6.
+- **Tiles.** The world is a 2D grid of tiles at a fixed pitch (P × P blocks horizontally, H blocks tall). Pick P and H after you've built the NOR3, crossing and DFF tiles in-game; expect P around 4–6. (Built: P = 5, H = 4, and each column has its own width: routing columns take the narrow wiring tiles, 3 × 5, whose crossing climbs only north to south. Two wire levels share the height, y = 1 and y = 3.)
 - **Tile kinds.** `Empty`, `Gate(lib cell, part)` (multi-tile cells allowed), `Wire(from, to)` (straight or turn), `Repeater(from, to, delay)`, `Fanout(from, {to…})`, `Cross(x-net, z-net)`, `Input(lever)`, `Output(lamp)`, `ClockSpine`.
 - **Port contract.** A signal crosses a tile edge only at the midpoint of that edge, at a fixed Y, as dust. The outer ring of each tile is air except at those midpoints. That makes any two tiles that share a matched port, or share no port at all, non-interacting **by construction**.
 - **Proving it.** The contract is a *theorem* about the library: for every tile and every pair of adjacent tile kinds, the extracted connectivity equals the intended connectivity. The harness checks this exhaustively once per library change, and the claim gets checked instead of assumed.
