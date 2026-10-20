@@ -633,8 +633,11 @@ fn lengthening(
                 continue;
             }
             let map = if level == Level::Upper { &routed.layout.upper } else { &routed.layout.tiles };
+            let width = routed.layout.col_width.get(cell.0 as usize).copied().unwrap_or(crate::tile::PITCH);
             match map.get(&cell).cloned() {
-                Some(Placed::Wire { edges }) => return Ok((cell, level, Placed::Repeater { edges, entry, delay: 1 })),
+                Some(Placed::Wire { edges }) if crate::layout::can_carry_repeater(width, &edges, entry) => {
+                    return Ok((cell, level, Placed::Repeater { edges, entry, delay: 1 }));
+                }
                 Some(Placed::Repeater { edges, entry, delay }) if delay < 4 => {
                     return Ok((cell, level, Placed::Repeater { edges, entry, delay: delay + 1 }));
                 }

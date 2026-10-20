@@ -131,6 +131,14 @@ const REPEATER_NEEDS: u8 = 1;
 /// more a repeater in a crossing costs, so that the count decides first.
 const REPEATER_COST: u32 = 1000;
 
+/// What a hop costs the router that makes a crossing in a narrow column, against
+/// one for a plain hop and two for a ramp: the crossing's climbing net can take
+/// no repeater there (the tile cannot turn), so a vertical run across many dies,
+/// and is cheaper on the upper level. Measured over adder8, adder4, counter4 and
+/// mem2 at 2, 3, 4, 6, 8 and 100: 4 gave the least footprint in all but counter4,
+/// and above it the router stalls more often than it gains.
+const NARROW_CROSSING_COST: f64 = 4.0;
+
 /// The most rounds of negotiation in one run.
 const MAX_ITERATIONS: usize = 200;
 /// Rounds without the number of contended tracks falling below its best so far
@@ -499,12 +507,10 @@ fn realize_trees(
         } else {
             match insert_repeaters(library, &mut layout, &by_net[net], source, sinks, tree) {
                 Ok(counts) => counts,
-                Err(Dies { path }) => {
-                    // The tiles on the way that could not take a repeater: crossings and ramps.
-                    let mine = &by_net[net];
-                    let stuck = path
+                Err(Dies { stuck }) => {
+                    // The nodes it used in the tiles on the way that could not take a repeater.
+                    let stuck = stuck
                         .iter()
-                        .filter(|cell| mine[*cell].3 || matches!(mine[*cell].2, At::Ramp(_)))
                         .flat_map(|cell| tree.parent.keys().filter(|n| n.0 == *cell).copied().collect::<Vec<_>>())
                         .collect();
                     died.push((net_index, stuck));
@@ -542,9 +548,11 @@ fn realize_trees(
     Ok(Routed { layout, repeaters: repeater_counts, branches, rounds: 0 })
 }
 
-/// A signal that could not be kept alive: the tiles from the source to where it died.
+/// A signal that could not be kept alive: the tiles on the way from the source
+/// to where it died that could not take a repeater (crossings taken, ramps, and
+/// in a narrow column the turns entered from the west or east).
 struct Dies {
-    path: Vec<Cell>,
+    stuck: Vec<Cell>,
 }
 
 /// A text picture of a layout: one character per tile. A tile with wiring on
@@ -660,6 +668,9 @@ struct Graph {
     /// Per slot, whether its tile can hold a crossing: the crossing's north-south
     /// arm climbs over the west-east one, which takes a row five blocks deep.
     crossable: Vec<bool>,
+    /// Per slot, whether its tile is in a narrow column, where a crossing's
+    /// climbing net can never take a repeater (the tile cannot turn).
+    narrow: Vec<bool>,
 }
 
 impl Graph {
@@ -670,6 +681,7 @@ impl Graph {
         let mut slots = Vec::new();
         let mut base = Vec::new();
         let mut crossable = Vec::new();
+        let mut narrow = Vec::new();
         for row in 0..placement.rows {
             for col in 0..placement.cols {
                 if !placement.is_free((col, row)) {
@@ -679,6 +691,7 @@ impl Graph {
                 for slot in [Slot::LowerX, Slot::LowerZ, Slot::Upper] {
                     slot_of.push(((col, row), slot));
                     crossable.push(placement.row_depth.get(row as usize).is_some_and(|&d| d >= PITCH));
+                    narrow.push(placement.col_width.get(col as usize).is_some_and(|&w| w < PITCH));
                 }
                 for track in Track::ALL {
                     index.insert(((col, row), track), nodes.len());
@@ -733,7 +746,7 @@ impl Graph {
             };
             neighbours[i] = candidates.into_iter().filter_map(|n| index.get(&n).copied()).collect();
         }
-        Graph { nodes, index, neighbours, slots, base, slot_of, crossable }
+        Graph { nodes, index, neighbours, slots, base, slot_of, crossable, narrow }
     }
 }
 
@@ -846,8 +859,6 @@ impl<'a> Negotiation<'a> {
                     self.holders[slot].retain(|&n| n != k);
                 }
                 let start = lookup(source.node)?;
-                let mut tree = vec![start];
-                let mut parent: BTreeMap<usize, Option<usize>> = BTreeMap::from([(start, None)]);
                 let mut targets: Vec<usize> = sinks.iter().map(|s| lookup(s.node)).collect::<Result<_, _>>()?;
                 // The pins are on the lower level, so the net stays off the upper
                 // level of its own sinks' tiles, or a branch passing over one would
@@ -859,50 +870,53 @@ impl<'a> Negotiation<'a> {
                     (ca.0 - cb.0).abs() + (ca.1 - cb.1).abs()
                 };
                 targets.sort_by_key(|&t| dist(start, t));
-                for target in targets {
-                    if tree.contains(&target) {
-                        continue;
+                let (holders, history, penalties, present_factor) =
+                    (&self.holders, &self.history, &self.penalties[k], self.present_factor);
+                let (tree, parent) = grow_tree(graph, start, targets, |node| {
+                    let (cell, track) = graph.nodes[node];
+                    if track.slots().contains(&Slot::Upper) && sink_cells.contains(&cell) {
+                        return f64::INFINITY;
                     }
-                    let (holders, history, penalties, present_factor) =
-                        (&self.holders, &self.history, &self.penalties[k], self.present_factor);
-                    let path = shortest_path(graph, &tree, target, |node| {
-                        let (cell, track) = graph.nodes[node];
-                        if track.slots().contains(&Slot::Upper) && sink_cells.contains(&cell) {
-                            return f64::INFINITY;
-                        }
-                        // This net's own slots are not among the holders now.
-                        let slots = &graph.slots[node];
-                        let base = graph.base[node];
-                        let held = |slot: Slot| !holders[base + slot as usize].is_empty();
-                        let mut overuse = slots.iter().map(|&s| holders[s].len()).max().unwrap_or(0);
-                        // A crossing under an upper wire: taking the upper level above a
-                        // crossing, or a lower track that makes one under an upper wire.
-                        let crossable = graph.crossable[base];
-                        let crossing_under = match track {
-                            Track::UpperX | Track::UpperZ => crossed(holders, base),
-                            Track::X => (held(Slot::Upper) || !crossable) && held(Slot::LowerZ),
-                            Track::Z => (held(Slot::Upper) || !crossable) && held(Slot::LowerX),
-                            Track::Ramp(_) => false,
+                    // This net's own slots are not among the holders now.
+                    let slots = &graph.slots[node];
+                    let base = graph.base[node];
+                    let held = |slot: Slot| !holders[base + slot as usize].is_empty();
+                    let mut overuse = slots.iter().map(|&s| holders[s].len()).max().unwrap_or(0);
+                    // A crossing under an upper wire: taking the upper level above a
+                    // crossing, or a lower track that makes one under an upper wire.
+                    let crossable = graph.crossable[base];
+                    let crossing_under = match track {
+                        Track::UpperX | Track::UpperZ => crossed(holders, base),
+                        Track::X => (held(Slot::Upper) || !crossable) && held(Slot::LowerZ),
+                        Track::Z => (held(Slot::Upper) || !crossable) && held(Slot::LowerX),
+                        Track::Ramp(_) => false,
+                    };
+                    if crossing_under {
+                        overuse = overuse.max(1);
+                    }
+                    let past: f64 = slots.iter().map(|&s| history[s]).sum();
+                    let penalty = penalties.get(&node).copied().unwrap_or(0.0);
+                    // A ramp holds its whole tile, and costs a tile more; a crossing in
+                    // a narrow column, whose climbing net can take no repeater there,
+                    // costs more again, so that runs across many take the upper level.
+                    let narrow_crossing = graph.narrow[base]
+                        && match track {
+                            Track::X => held(Slot::LowerZ),
+                            Track::Z => held(Slot::LowerX),
+                            _ => false,
                         };
-                        if crossing_under {
-                            overuse = overuse.max(1);
-                        }
-                        let past: f64 = slots.iter().map(|&s| history[s]).sum();
-                        let penalty = penalties.get(&node).copied().unwrap_or(0.0);
-                        // A ramp holds its whole tile, and costs a tile more.
-                        let cost = if matches!(track, Track::Ramp(_)) { 2.0 } else { 1.0 };
-                        (cost + past + penalty + jitter(k, node)) * (1.0 + present_factor * overuse as f64)
-                    })
-                    .ok_or_else(|| {
-                        Stuck::Unroutable(format!("net cannot reach the tile at {:?}", graph.nodes[target].0))
-                    })?;
-                    for window in path.windows(2) {
-                        if let std::collections::btree_map::Entry::Vacant(slot) = parent.entry(window[1]) {
-                            slot.insert(Some(window[0]));
-                            tree.push(window[1]);
-                        }
-                    }
-                }
+                    let cost = if matches!(track, Track::Ramp(_)) {
+                        2.0
+                    } else if narrow_crossing {
+                        NARROW_CROSSING_COST
+                    } else {
+                        1.0
+                    };
+                    (cost + past + penalty + jitter(k, node)) * (1.0 + present_factor * overuse as f64)
+                })
+                .map_err(|target| {
+                    Stuck::Unroutable(format!("net cannot reach the tile at {:?}", graph.nodes[target].0))
+                })?;
                 let held: BTreeSet<usize> = tree.iter().flat_map(|&node| graph.slots[node].iter().copied()).collect();
                 for &slot in &held {
                     self.holders[slot].push(k);
@@ -957,6 +971,46 @@ fn jitter(net: usize, node: usize) -> f64 {
     h ^= h >> 31;
     h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
     (h >> 40) as f64 / (1u64 << 24) as f64 * 1e-3
+}
+
+/// A net's tree: from `start` to each of `targets` in turn along the cheapest
+/// path by `cost`, every node with the node it was reached from. A branch can
+/// wall in a later target (the net never enters a tile it holds, and an upper
+/// wire has no way down in its own tile); then the tree starts again with that
+/// target first, as many times as there are targets. Fails with a target no
+/// path reaches.
+fn grow_tree(
+    graph: &Graph,
+    start: usize,
+    mut targets: Vec<usize>,
+    cost: impl Fn(usize) -> f64,
+) -> Result<(Vec<usize>, BTreeMap<usize, Option<usize>>), usize> {
+    let mut restarts = 0;
+    'grow: loop {
+        let mut tree = vec![start];
+        let mut parent: BTreeMap<usize, Option<usize>> = BTreeMap::from([(start, None)]);
+        for i in 0..targets.len() {
+            let target = targets[i];
+            if tree.contains(&target) {
+                continue;
+            }
+            let Some(path) = shortest_path(graph, &tree, target, &cost) else {
+                if i == 0 || restarts == targets.len() {
+                    return Err(target);
+                }
+                restarts += 1;
+                targets[..=i].rotate_right(1);
+                continue 'grow;
+            };
+            for window in path.windows(2) {
+                if let std::collections::btree_map::Entry::Vacant(slot) = parent.entry(window[1]) {
+                    slot.insert(Some(window[0]));
+                    tree.push(window[1]);
+                }
+            }
+        }
+        return Ok((tree, parent));
+    }
 }
 
 /// A* from every node of `tree` (cost 0) to `target`, with the distance in
@@ -1071,7 +1125,12 @@ fn insert_repeaters(
             matches!(layout.tiles.get(&cell), Some(Placed::Cross { repeater_entry: None, .. }))
                 && (!turns || layout.col_width.get(cell.0 as usize).is_some_and(|&w| w >= PITCH))
         }
-        _ => true,
+        // In a narrow column the west and east arms are the centre: a straight only.
+        _ => {
+            let (edges, entry, _, _) = &cells[&cell];
+            let width = layout.col_width.get(cell.0 as usize).copied().unwrap_or(PITCH);
+            crate::layout::can_carry_repeater(width, &edges.iter().copied().collect::<Vec<_>>(), *entry)
+        }
     };
     let repeater_tile = |cell: Cell| -> Placed {
         let (edges, entry, _, crossed) = &cells[&cell];
@@ -1089,10 +1148,20 @@ fn insert_repeaters(
     // about to carry, belongs to a net running north-south. Repeaters of this
     // net are placed after the walk, so the one it is about to carry is read
     // from `at_repeater`.
+    let narrow = |cell: Cell| layout.col_width.get(cell.0 as usize).is_some_and(|&w| w < PITCH);
     let tile_at = |cell: Cell, at_repeater: bool| -> (&Tile, u8) {
+        let narrow = narrow(cell);
         match cells[&cell].2 {
+            // A narrow ramp turns only half round: its own file for each axis.
+            At::Ramp(lower) if narrow => match lower {
+                Edge::West => (&library.ramp_n, 0),
+                Edge::East => (&library.ramp_n, 2),
+                Edge::North => (&library.ramp_ns_n, 0),
+                Edge::South => (&library.ramp_ns_n, 2),
+            },
             At::Ramp(lower) => (&library.ramp, crate::layout::ramp_turn(lower)),
-            At::Level(Level::Upper) => (&library.wire_up, 0),
+            At::Level(Level::Upper) => (if narrow { &library.wire_up_n } else { &library.wire_up }, 0),
+            At::Level(Level::Lower) if crossing(cell) && narrow => (&library.cross_n, 0),
             At::Level(Level::Lower) if crossing(cell) => match (at_repeater, layout.tiles.get(&cell)) {
                 (true, Some(Placed::Cross { repeater_entry: None, .. })) => {
                     (&library.cross, cross_turn_for(cells[&cell].1))
@@ -1100,7 +1169,7 @@ fn insert_repeaters(
                 (_, Some(Placed::Cross { rotation, .. })) => (&library.cross, *rotation),
                 _ => (&library.cross, 0),
             },
-            At::Level(Level::Lower) => (&library.wire, 0),
+            At::Level(Level::Lower) => (if narrow { &library.wire_n } else { &library.wire }, 0),
         }
     };
     let parent_cell = |cell: Cell| -> Option<Cell> {
@@ -1321,8 +1390,7 @@ fn insert_repeaters(
                 while let Some(p) = parent_cell(*path.last().expect("non-empty")) {
                     path.push(p);
                 }
-                path.reverse();
-                return Err(Dies { path });
+                return Err(Dies { stuck: path.into_iter().filter(|&c| !can_repeat(c)).collect() });
             }
         }
     };
@@ -1408,6 +1476,67 @@ mod tests {
         })
     }
 
+    /// A net never enters a tile it already holds, and an upper wire has no way
+    /// down in its own tile, so an upper branch to the nearer sink can wall in a
+    /// farther one: here the cheap way from (0, 1) to the sink at (0, 3) climbs
+    /// at (1, 1), runs round on the upper level through (2, 1) and (2, 3), and
+    /// comes down at (1, 3); the gates at (1, 2) and (3, 2) close the other
+    /// sides of the sink at (2, 2), whose upper level its own net may not take.
+    /// The net then routes again with the walled-in sink first, and reaches
+    /// both; a sink that no path reaches even first is still named.
+    #[test]
+    fn a_branch_that_walls_in_a_later_sink_is_routed_again_with_that_sink_first() {
+        let placement = Placement {
+            cols: 5,
+            rows: 5,
+            col_width: vec![PITCH; 5],
+            row_depth: vec![PITCH; 5],
+            gates: vec![(1, 2), (3, 2)],
+            widths: vec![1, 1],
+            pin_edges: vec![vec![], vec![]],
+            inputs: vec![],
+            outputs: vec![],
+            ties: vec![],
+            routing: vec![5],
+            columns: (0..5).map(|offset| Column::Routing { gap: 0, offset }).collect(),
+            stages: vec![1, 1],
+        };
+        let graph = Graph::new(&placement);
+        let node = |cell: Cell, track: Track| graph.index[&(cell, track)];
+        let ring: BTreeSet<Cell> = [(2, 1), (3, 1), (4, 1), (4, 2), (4, 3), (3, 3), (2, 3)].into_iter().collect();
+        let cost = |n: usize| {
+            let (cell, track) = graph.nodes[n];
+            match track {
+                _ if cell == (2, 2) => {
+                    if track.slots().contains(&Slot::Upper) {
+                        f64::INFINITY
+                    } else {
+                        1.0
+                    }
+                }
+                Track::Ramp(Edge::West) if cell == (1, 1) || cell == (1, 3) => 2.0,
+                Track::Ramp(_) => f64::INFINITY,
+                Track::UpperX | Track::UpperZ if ring.contains(&cell) => 1.0,
+                Track::UpperX | Track::UpperZ => f64::INFINITY,
+                _ if cell == (0, 1) || cell == (0, 3) => 1.0,
+                _ => 100.0,
+            }
+        };
+        let (start, near, walled) = (node((0, 1), Track::X), node((0, 3), Track::X), node((2, 2), Track::X));
+        let (tree, parent) = grow_tree(&graph, start, vec![near, walled], cost).expect("both sinks reached");
+        for sink in [near, walled] {
+            assert!(tree.contains(&sink), "{:?} is in the tree", graph.nodes[sink]);
+            let mut at = sink;
+            while let Some(Some(up)) = parent.get(&at) {
+                at = *up;
+            }
+            assert_eq!(at, start, "{:?} leads back to the source", graph.nodes[sink]);
+        }
+        let shut = node((4, 4), Track::X);
+        let walls = |n: usize| if graph.nodes[n].0 == (4, 3) || graph.nodes[n].0 == (3, 4) { f64::INFINITY } else { 1.0 };
+        assert_eq!(grow_tree(&graph, start, vec![near, shut], walls), Err(shut));
+    }
+
     #[test]
     fn a_gap_too_narrow_is_given_up_after_stalling_and_named() {
         let netlist = braid(5);
@@ -1440,12 +1569,11 @@ mod tests {
         // survives the widening, and only where there was contention.
         assert!(history.costs.values().all(|&c| c > 0.0));
         assert!(history.costs.keys().any(|(column, _, _)| matches!(column, Column::Routing { gap: 0, .. })));
-        // Widened to the estimate, the placement routes, cold and from the history.
-        let wide = place(&netlist, &estimate, Style::Pitch4).unwrap();
-        let cold = route(&library, &netlist, &wide, None, &mut log).unwrap();
-        let warm = route(&library, &netlist, &wide, Some(&history), &mut log).unwrap();
-        assert!(cold.rounds > 0 && warm.rounds > 0);
-        assert_eq!(cold.layout.size(), warm.layout.size());
+        // Widened as the build widens it (from the estimate, a gap at a time,
+        // each attempt seeded with what the last learned), the placement routes.
+        let (built, widths) = crate::build::place_and_route(&library, &netlist, Style::Pitch4).unwrap();
+        assert!(widths.iter().zip(&estimate).all(|(w, e)| w >= e), "{widths:?} against {estimate:?}");
+        assert!(built.rounds > 0);
     }
 
     #[test]
