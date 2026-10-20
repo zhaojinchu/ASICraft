@@ -6,6 +6,15 @@ use crate::block::Block;
 use crate::geom::Pos;
 use crate::netlist::Netlist;
 use crate::tile::{Edge, HEIGHT, Kind, Library, PITCH, Variant};
+
+/// Whether wiring in a column `width` blocks wide can carry a repeater entered
+/// by `entry` joining `edges`: in a narrow column the arm entered from the west
+/// or east is the centre itself, so only a straight can.
+pub fn can_carry_repeater(width: i32, edges: &[Edge], entry: Edge) -> bool {
+    width >= PITCH
+        || matches!(entry, Edge::North | Edge::South)
+        || edges.iter().all(|e| matches!(e, Edge::West | Edge::East))
+}
 use crate::world::World;
 
 /// What occupies one grid position.
@@ -117,6 +126,39 @@ impl Placed {
             }
             other => Err(format!("only wiring runs on the upper level, not {other:?}")),
         }
+    }
+
+    /// The variant this placement uses in a column `width` blocks wide: in a
+    /// narrow routing column the narrow family (the crossing only unturned, the
+    /// ramps by the axis they climb along).
+    pub fn variant_in(&self, width: i32, upper: bool) -> Result<Variant, String> {
+        let wide = if upper { self.upper_variant()? } else { self.variant() };
+        if width >= PITCH {
+            return Ok(wide);
+        }
+        let kind = match (wide.kind, self) {
+            (Kind::Wire, _) => Kind::WireN,
+            (Kind::WireUp, _) => Kind::WireUpN,
+            (Kind::Cross, _) if wide.rotation == 0 => Kind::CrossN,
+            (Kind::Ramp, Placed::Ramp { lower: Edge::West | Edge::East }) => Kind::RampN,
+            (Kind::Ramp, Placed::Ramp { .. }) => Kind::RampNsN,
+            _ => return Err(format!("no tile {width} blocks wide for {self:?}")),
+        };
+        if let Some(entry) = wide.repeater_entry
+            && !can_carry_repeater(width, &wide.edges, entry)
+            && kind != Kind::CrossN
+        {
+            return Err(format!("a repeater entered by {entry:?} in a narrow {self:?}"));
+        }
+        let (edges, rotation) = match self {
+            Placed::Ramp { lower } => {
+                let along_x = matches!(lower, Edge::West | Edge::East);
+                let edges = if along_x { vec![Edge::West, Edge::East] } else { vec![Edge::North, Edge::South] };
+                (edges, if matches!(lower, Edge::West | Edge::North) { 0 } else { 2 })
+            }
+            _ => (wide.edges.clone(), 0),
+        };
+        Ok(Variant { kind, edges, rotation, ..wide })
     }
 }
 
@@ -325,7 +367,7 @@ impl Layout {
         for (&(col, row), placed) in &self.tiles {
             let origin = Pos::new(xs[col as usize], 0, zs[row as usize]);
             let at = |p: Pos| Pos::new(origin.x + p.x, origin.y + p.y, origin.z + p.z);
-            let variant = placed.variant();
+            let variant = placed.variant_in(self.col_width[col as usize], false)?;
             let tile = variant.tile(library);
             let mut blocks = variant.blocks(library);
             if let Placed::Dff { init, .. } = placed {
@@ -369,7 +411,7 @@ impl Layout {
         }
         for (&(col, row), placed) in &self.upper {
             let origin = Pos::new(xs[col as usize], 0, zs[row as usize]);
-            for (pos, block) in placed.upper_variant()?.blocks(library) {
+            for (pos, block) in placed.variant_in(self.col_width[col as usize], true)?.blocks(library) {
                 world.set(Pos::new(origin.x + pos.x, origin.y + pos.y, origin.z + pos.z), block);
             }
         }
@@ -417,14 +459,18 @@ mod tests {
         let (routed, _) = place_and_route(&library, &netlist, crate::place::Style::Pitch4).unwrap();
         let layout = &routed.layout;
         let (cols, rows) = layout.size();
-        assert_eq!(layout.col_width, vec![PITCH; layout.col_width.len()]);
+        // Routing columns are narrow, every other column and every row a cell.
+        assert!(layout.col_width.iter().all(|&w| w == PITCH || w == crate::tile::NARROW));
+        assert!(layout.col_width.contains(&crate::tile::NARROW));
+        assert_eq!(layout.row_depth, vec![PITCH; layout.row_depth.len()]);
         assert!(layout.col_width.len() >= cols as usize && layout.row_depth.len() >= rows as usize);
         let realized = layout.realize(&library, &netlist).unwrap();
-        assert_eq!(realized.world.size(), (cols * PITCH, HEIGHT, rows * PITCH));
+        let xs = origins(&layout.col_width[..cols as usize]);
+        assert_eq!(realized.world.size(), (xs[cols as usize], HEIGHT, rows * PITCH));
         // The flip-flop sits at its cell's corner and covers two cells by one.
         let (&(col, row), _) = layout.tiles.iter().find(|(_, p)| matches!(p, Placed::Dff { .. })).unwrap();
         let [m] = realized.macros.as_slice() else { panic!("one flip-flop") };
-        assert_eq!(m.origin, Pos::new(col * PITCH, 0, row * PITCH));
+        assert_eq!(m.origin, Pos::new(xs[col as usize], 0, row * PITCH));
         assert_eq!((m.width, m.extent), (2, (2 * PITCH, PITCH)));
         assert!(m.contains(m.origin) && m.contains(Pos::new(m.origin.x + 9, 3, m.origin.z + 4)));
         assert!(
