@@ -1,0 +1,19 @@
+# Constant 1 for a row three blocks deep (see tie_high).
+tile tie_high_s
+size 5 4 3
+port E out 4 1 1
+function high
+
+legend
+  G minecraft:glass
+  T minecraft:redstone_torch
+  - minecraft:redstone_wire
+
+layer 0
+  .....
+  ..GGG
+  .....
+layer 1
+  .....
+  ..T--
+  .....

@@ -1,0 +1,35 @@
+# The crossing for a row three blocks deep: the crossing tile turned a quarter,
+# north-south flat at y = 1 down the middle column, west-east climbing over it
+# along the middle row (whose comments say why the stones keep the two apart).
+# The flat arm is three blocks, port, centre, port, so a repeater in it sits at
+# the centre under the bridge; the climbing arm has no room for one, and the
+# tile cannot be turned to give it one (that takes five blocks of depth).
+tile cross_s
+size 5 4 3
+port W io 0 1 1
+port E io 4 1 1
+port N io 2 1 0
+port S io 2 1 2
+function cross
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  - minecraft:redstone_wire
+
+layer 0
+  ..G..
+  G.G.G
+  ..G..
+layer 1
+  ..-..
+  -#-#-
+  ..-..
+layer 2
+  .....
+  .-#-.
+  .....
+layer 3
+  .....
+  ..-..
+  .....

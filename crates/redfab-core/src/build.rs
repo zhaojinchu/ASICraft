@@ -1388,6 +1388,24 @@ mod tests {
         assert_eq!(outputs(&built.design, r#"[{},{},{},{}]"#), r#"[{"q":0},{"q":1},{"q":0},{"q":1}]"#);
     }
 
+    /// Rows are three blocks deep, except a row a flip-flop sits in, which
+    /// stays a full cell: so a combinational design's footprint is three blocks
+    /// a row, and a clocked one's three a row and two more for each flip-flop
+    /// row; both still compute.
+    #[test]
+    fn rows_are_three_blocks_deep_but_where_a_flip_flop_sits() {
+        let two_cells = NOR2
+            .replace(r#""cells":{"#, r#""cells":{"h":{"type":"NOT","connections":{"A":[4],"Y":[5]}},"#)
+            .replace(r#""y":{"direction":"output","bits":[4]}"#, r#""y":{"direction":"output","bits":[5]}"#);
+        let built = build(&two_cells, "top", "x").unwrap();
+        assert_eq!(built.design.size[2], built.design.grid.rows * 3, "{:?}", built.design.grid);
+        let vectors = r#"[{"a":0,"b":0},{"a":0,"b":1},{"a":1,"b":0},{"a":1,"b":1}]"#;
+        assert_eq!(outputs(&built.design, vectors), r#"[{"y":0},{"y":1},{"y":1},{"y":1}]"#);
+        let toggle = build(TOGGLE, "top", "t").unwrap();
+        assert_eq!(toggle.design.size[2], toggle.design.grid.rows * 3 + 2, "{:?}", toggle.design.grid);
+        assert_eq!(outputs(&toggle.design, r#"[{},{},{},{}]"#), r#"[{"q":0},{"q":1},{"q":0},{"q":1}]"#);
+    }
+
     /// Routing columns take the narrow wiring tiles, three blocks wide; gate,
     /// source and output columns stay a full cell. So a design's footprint is
     /// five blocks for every other column and three for every routing column,
