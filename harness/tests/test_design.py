@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.design import SIM_SAMPLE, all_vectors, sampled_vectors, sim_vectors
+from harness.design import SIM_SAMPLE, all_vectors, every_pair_walk, sampled_vectors, sim_vectors
 
 MODULE = {"ports": {"a": {"direction": "input", "bits": [2, 3, 4]}, "b": {"direction": "input", "bits": [5, 6, 7]},
                     "y": {"direction": "output", "bits": [8]}}}
@@ -139,3 +139,12 @@ def test_wide_designs_are_simulated_on_a_fixed_sample():
         assert vectors[2 + i] == {n: int(n == name) for n in names}, "each bit alone"
     assert len({tuple(v.values()) for v in vectors}) == SIM_SAMPLE, "no vector twice"
     assert sim_vectors(wide)[0] == vectors, "the same sample every run"
+
+
+def test_the_worst_case_walk_steps_between_every_ordered_pair_once():
+    vectors = [{"a": a, "b": b, "c": c} for a in (0, 1) for b in (0, 1) for c in (0, 1)]
+    walk = every_pair_walk(vectors)
+    assert len(walk) == 8 * 7 + 1 and walk[0] == walk[-1] == vectors[0]
+    steps = [(vectors.index(x), vectors.index(y)) for x, y in zip(walk, walk[1:])]
+    assert sorted(steps) == sorted((i, j) for i in range(8) for j in range(8) if i != j)
+    assert every_pair_walk([]) == [] and every_pair_walk(vectors[:1]) == vectors[:1]
