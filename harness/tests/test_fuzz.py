@@ -1,7 +1,7 @@
 """The fuzz run's bookkeeping: fixed seeds by default, and dropped arrangements are named."""
 
 from harness.fuzz import VERIFY_SEED, consistent_traces, parse_args
-from harness.tiles import DEFAULT_SEED
+from harness.tiles import DEFAULT_SEED, MAX_BATCH_PLOTS, SHORT_TICKS, batches
 from harness.tiles import parse_args as tiles_parse_args
 from harness.trace import Fixture, Trace
 
@@ -36,3 +36,24 @@ def test_the_seeds_are_fixed_unless_asked_for():
     assert isinstance(parse_args(["verify", "--seed", "random"]).seed, int)
     assert tiles_parse_args(["verify"]).seed == DEFAULT_SEED == 1
     assert tiles_parse_args(["verify", "--serial"]).serial and not tiles_parse_args(["verify"]).serial
+
+
+def test_tile_fixtures_run_in_batches_of_similar_length():
+    def fixture(name: str, ticks: int) -> Fixture:
+        return Fixture(name=name, doc="", size=(5, 4, 5), placement="update", blocks={}, events=[], ticks=ticks)
+
+    # As the library has them: hundreds of short fixtures and a few long sweeps.
+    fxs = [fixture(f"wire_{i:03}", 20 + i % 30) for i in range(370)]
+    fxs += [fixture(f"group_{i}", 60 + 10 * i) for i in range(14)]
+    fxs += [fixture(f"sweep_{t}", t) for t in (196, 196, 548, 548, 758, 758, 1252, 1252)]
+    out = batches(fxs)
+    assert sorted(f.name for batch in out for f in batch) == sorted(f.name for f in fxs)
+    for batch in out:
+        assert 3 * len(batch) <= MAX_BATCH_PLOTS
+        ticks = [f.ticks for f in batch]
+        assert ticks == sorted(ticks) and ticks[-1] <= 2 * max(ticks[0], SHORT_TICKS), ticks
+    # The long sweeps no longer keep the short fixtures ticking: the plot-ticks run
+    # are a small part of everything stepped for the longest fixture.
+    stepped = sum(3 * len(batch) * batch[-1].ticks for batch in out)
+    assert stepped * 8 < 3 * len(fxs) * 1252, stepped
+    assert batches([]) == []
