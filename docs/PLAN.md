@@ -383,6 +383,10 @@ Measured against step 3, with the baseline re-recorded: summed block-area over t
 
 The plan's step 4 was two north-south trunks per routing column, the channel estimate halved. Measured twice, and a loss both times. With rows a cell deep (2026-10-18, before step 3b): shipped area 159,380 to 157,380, the capacity designs 336,195 to 374,040, builds three times slower. With rows three deep (on 3e281c3): shipped 115,089 to 122,220, capacity 298,037 to 324,689, every design built in 1,718 s against 503, and divmod, signed_sub, mul4 and regfile2x4 fell back on the four-row pitch. Why: a routing column's tile in a shallow row is three by three, where no crossing fits, so a net crossing a column's trunk does it as a stack, one on each level; a column with a trunk on each level leaves the nets that must pass it no way through, and the router, given half the columns, widens the gaps back one attempt at a time and ends wider. What it converges to on its own is one trunk per column on one level with the west-east stubs on the other (adder8's routing columns hold a tile in 25 of 35 rows on average, none near empty). Two trunks a column would need a crossing in a three-block tile, which cannot be built (the climbing arm takes five blocks). Not pursued.
 
+### Two wire levels, the game proof (2026-10-23)
+
+`./check --vanilla` on 2280efe (the stage as it stands: narrow columns, shallow rows, the router with levels): all 58 checks pass in 3,170 s, among them `tiles-vanilla` (583 fixtures), `design-vanilla`, `timing-traces`, `adder4-exhaustive`, `cycles-vanilla`, `negatives-vanilla`, `mechanics-modded`, `design-live`, and `live-vanilla`, owed since the compaction stage's step 6 (it timed out under memory pressure then; the tile runs now take 11 minutes instead of three hours, which left the machine room). The stage's steps 1 to 3b and 5 are done; step 4 was measured and not taken. Summed block-area over the 23 shipped designs, stage to stage: 252,350 after the compaction stage, 214,625 after step 2, 159,380 after step 3, 115,089 after step 3b; adder8 485 x 175 to 357 x 105.
+
 ---
 
 
