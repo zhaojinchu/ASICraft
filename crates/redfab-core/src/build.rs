@@ -634,8 +634,9 @@ fn lengthening(
             }
             let map = if level == Level::Upper { &routed.layout.upper } else { &routed.layout.tiles };
             let width = routed.layout.col_width.get(cell.0 as usize).copied().unwrap_or(crate::tile::PITCH);
+            let depth = routed.layout.row_depth.get(cell.1 as usize).copied().unwrap_or(crate::tile::PITCH);
             match map.get(&cell).cloned() {
-                Some(Placed::Wire { edges }) if crate::layout::can_carry_repeater(width, &edges, entry) => {
+                Some(Placed::Wire { edges }) if crate::layout::can_carry_repeater(width, depth, &edges, entry) => {
                     return Ok((cell, level, Placed::Repeater { edges, entry, delay: 1 }));
                 }
                 Some(Placed::Repeater { edges, entry, delay }) if delay < 4 => {
@@ -826,8 +827,13 @@ pub fn place_and_route_logged(
     ));
     let mut history: Option<History> = None;
     let mut last = String::new();
+    // Shallow rows made a cell deep because signals kept dying in them.
+    let mut deepened: BTreeSet<i32> = BTreeSet::new();
     for attempt in 1..=MAX_ROUTING_ATTEMPTS {
-        let placement = place(netlist, &routing, style)?;
+        let mut placement = place(netlist, &routing, style)?;
+        for &row in &deepened {
+            placement.row_depth[row as usize] = crate::tile::PITCH;
+        }
         log(&format!(
             "routing attempt {attempt}: {} columns x {} rows, routing columns {}",
             placement.cols,
@@ -886,10 +892,26 @@ pub fn place_and_route_logged(
                 ));
                 history = Some(learned);
             }
+            Err(RouteFailure::Dying { rows, history: learned }) => {
+                let deepen = rows_to_deepen(&rows);
+                deepened.extend(&deepen);
+                last = format!("signals kept dying in {} shallow rows", rows.len());
+                log(&format!("  {last}; making rows {} a cell deep", list(&deepen)));
+                history = Some(learned);
+            }
             Err(e) => return Err(e.to_string()),
         }
     }
     Err(format!("routing failed after {MAX_ROUTING_ATTEMPTS} attempts: {last}"))
+}
+
+/// The shallow rows to make a cell deep after signals kept dying in them: every
+/// one that holds a fair share (a quarter of the most) of the tiles the dying
+/// signals could not take a repeater in, as the gaps a congested run names are
+/// widened. `rows` is per row that count, most first.
+fn rows_to_deepen(rows: &[(i32, usize)]) -> Vec<i32> {
+    let most = rows.first().map_or(0, |&(_, n)| n);
+    rows.iter().filter(|&&(_, n)| n * 4 >= most).map(|&(row, _)| row).collect()
 }
 
 fn list<T: std::fmt::Display>(items: &[T]) -> String {
@@ -1386,6 +1408,16 @@ mod tests {
         assert_eq!(built.design.placement, best.0, "{figures:?}");
         assert_ne!(built.design.placement, "pitch4", "{figures:?}");
         assert_eq!(outputs(&built.design, r#"[{},{},{},{}]"#), r#"[{"q":0},{"q":1},{"q":0},{"q":1}]"#);
+    }
+
+    /// Where signals keep dying in shallow rows, the build makes a cell deep
+    /// the rows that hold a fair share of the tiles they could not take a
+    /// repeater in: a quarter of the most or more.
+    #[test]
+    fn the_rows_signals_keep_dying_in_are_made_a_cell_deep() {
+        assert_eq!(rows_to_deepen(&[(7, 12), (3, 5), (9, 3), (2, 2)]), vec![7, 3, 9]);
+        assert_eq!(rows_to_deepen(&[(4, 1)]), vec![4]);
+        assert_eq!(rows_to_deepen(&[]), Vec::<i32>::new());
     }
 
     /// Rows are three blocks deep, except a row a flip-flop sits in, which
