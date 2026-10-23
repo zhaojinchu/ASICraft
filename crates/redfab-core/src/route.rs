@@ -122,11 +122,6 @@ struct Sink {
     needed_after: u8,
 }
 
-/// What a repeater needs at the port it sits behind: it reads that port's own
-/// dust (the repeater takes the cell next to the port, see `Variant::blocks`),
-/// so any power there is enough.
-const REPEATER_NEEDS: u8 = 1;
-
 /// What a repeater costs in the exact repeater placement: far more than the one
 /// more a repeater in a crossing costs, so that the count decides first.
 const REPEATER_COST: u32 = 1000;
@@ -138,6 +133,13 @@ const REPEATER_COST: u32 = 1000;
 /// mem2 at 2, 3, 4, 6, 8 and 100: 4 gave the least footprint in all but counter4,
 /// and above it the router stalls more often than it gains.
 const NARROW_CROSSING_COST: f64 = 4.0;
+
+/// The most crossings in a row a net may climb in a narrow column, where the
+/// climbing arm can take no repeater: twelve after a repeater in a narrow
+/// straight, five lost in each crossing, and the tile after them needs at
+/// least one (pinned against the tile files by a test). The negotiation counts
+/// a longer run as contended.
+const MAX_CLIMBED: usize = 2;
 
 /// The most rounds of negotiation in one run.
 const MAX_ITERATIONS: usize = 200;
@@ -819,8 +821,9 @@ impl<'a> Negotiation<'a> {
     }
 
     /// The slots wanted by more than one net: held by several, the upper slots
-    /// above a crossing, and the lower tracks of a tile crossed that cannot
-    /// hold a crossing.
+    /// above a crossing, the lower tracks of a tile crossed that cannot hold a
+    /// crossing, and both lower tracks of every tile of a run of narrow
+    /// crossings longer than one net can climb.
     fn overused(&self) -> Vec<usize> {
         let mut out: BTreeSet<usize> = (0..self.holders.len()).filter(|&i| self.holders[i].len() > 1).collect();
         for (i, &(_, slot)) in self.graph.slot_of.iter().enumerate() {
@@ -832,6 +835,13 @@ impl<'a> Negotiation<'a> {
             }
             if !self.graph.crossable[i] {
                 out.extend([i - 2, i - 1]);
+            }
+            let base = i - Slot::Upper as usize;
+            if let [climber] = self.holders[base + Slot::LowerZ as usize][..]
+                && self.graph.narrow[base]
+                && climbed(self.graph, &self.holders, base, climber) > MAX_CLIMBED
+            {
+                out.extend([base + Slot::LowerX as usize, base + Slot::LowerZ as usize]);
             }
         }
         out.into_iter().collect()
@@ -892,6 +902,15 @@ impl<'a> Negotiation<'a> {
                         Track::Ramp(_) => false,
                     };
                     if crossing_under {
+                        overuse = overuse.max(1);
+                    }
+                    // A west-east track across a narrow column's north-south net that
+                    // would make it climb more crossings in a row than it can.
+                    if track == Track::X
+                        && graph.narrow[base]
+                        && let [climber] = holders[base + Slot::LowerZ as usize][..]
+                        && climbed(graph, holders, base, climber) > MAX_CLIMBED
+                    {
                         overuse = overuse.max(1);
                     }
                     let past: f64 = slots.iter().map(|&s| history[s]).sum();
@@ -962,6 +981,30 @@ impl<'a> Negotiation<'a> {
     }
 }
 
+/// How many crossings in a row net `climber` climbs through the narrow tile
+/// whose first slot is `base`, counting that tile as one: it and the tiles
+/// above and below it in its column where `climber` holds the north-south track
+/// and another net the west-east one.
+fn climbed(graph: &Graph, holders: &[Vec<usize>], base: usize, climber: usize) -> usize {
+    let (col, row) = graph.slot_of[base].0;
+    let crossed_below_climber = |row: i32| {
+        graph.index.get(&((col, row), Track::X)).is_some_and(|&node| {
+            let b = graph.base[node];
+            let x = &holders[b + Slot::LowerX as usize];
+            graph.narrow[b] && holders[b + Slot::LowerZ as usize] == [climber] && !x.is_empty() && !x.contains(&climber)
+        })
+    };
+    let mut run = 1;
+    for step in [-1, 1] {
+        let mut r = row + step;
+        while crossed_below_climber(r) {
+            run += 1;
+            r += step;
+        }
+    }
+    run
+}
+
 /// A tiny cost that differs per net and node, so that nets with several
 /// equally short paths (every staircase between two rows is one) do not all
 /// pick the same one and then have to be pried apart. Deterministic, so the
@@ -972,6 +1015,9 @@ fn jitter(net: usize, node: usize) -> f64 {
     h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
     (h >> 40) as f64 / (1u64 << 24) as f64 * 1e-3
 }
+
+/// A net's tree as it grows: its nodes, and each node with the node it was reached from.
+type Grown = (Vec<usize>, BTreeMap<usize, Option<usize>>);
 
 /// A net's tree: from `start` to each of `targets` in turn along the cheapest
 /// path by `cost`, every node with the node it was reached from. A branch can
@@ -984,7 +1030,7 @@ fn grow_tree(
     start: usize,
     mut targets: Vec<usize>,
     cost: impl Fn(usize) -> f64,
-) -> Result<(Vec<usize>, BTreeMap<usize, Option<usize>>), usize> {
+) -> Result<Grown, usize> {
     let mut restarts = 0;
     'grow: loop {
         let mut tree = vec![start];
@@ -1186,7 +1232,20 @@ fn insert_repeaters(
     let repeater_out = |cell: Cell, exit: Edge| -> u8 {
         let (tile, rotation) = tile_at(cell, true);
         tile.repeater_out(unturned(cells[&cell].1, rotation), unturned(exit, rotation))
-            .expect("a repeater in the entry arm reaches every exit")
+            .expect("a repeater the tile can carry reaches every exit")
+    };
+    // What the entry port must carry for a repeater here to switch: any power
+    // where it reads the port's own dust, more where it stands further in (a
+    // narrow turn's, in the arm it leaves by).
+    let repeater_needs = |cell: Cell, exits: &mut dyn Iterator<Item = Edge>| -> u8 {
+        let (tile, rotation) = tile_at(cell, true);
+        let entry = unturned(cells[&cell].1, rotation);
+        exits
+            .map(|exit| {
+                tile.repeater_needs(entry, unturned(exit, rotation))
+                    .expect("a repeater the tile can carry reaches every exit")
+            })
+            .fold(1, u8::max)
     };
     let root = source.node.0;
 
@@ -1201,8 +1260,14 @@ fn insert_repeaters(
             let out = |exit: Edge| {
                 if at_repeater { repeater_out(cell, exit) } else { v.saturating_sub(steps(cell, exit)) }
             };
-            let mut needed = if at_repeater { REPEATER_NEEDS } else { 1 };
             let children = child_cells(cell);
+            let mut needed = if at_repeater {
+                let exits = children.iter().map(|&c| edge_between(cell, c));
+                let sinks_here = sinks.iter().filter(|s| s.node.0 == cell).map(|s| s.exit);
+                repeater_needs(cell, &mut exits.chain(sinks_here))
+            } else {
+                1
+            };
             if !at_repeater {
                 // Every child's port must still see one level.
                 for child in &children {
@@ -1262,8 +1327,10 @@ fn insert_repeaters(
             needed: u8,
             /// The sinks here.
             sinks: Vec<usize>,
-            /// The cost of a repeater here, if one can go here.
+            /// The cost of a repeater here, if one can go here, and what the
+            /// entry must carry for it.
             repeater: Option<u32>,
+            repeater_needs: u8,
         }
         let mut hops: BTreeMap<Cell, Hop> = BTreeMap::new();
         for &cell in &order {
@@ -1276,12 +1343,14 @@ fn insert_repeaters(
                 .chain(here.iter().map(|&i| sinks[i].needed_after + steps(cell, sinks[i].exit)))
                 .fold(1, u8::max);
             let repeater = can_repeat(cell).then(|| REPEATER_COST + u32::from(crossing(cell)));
-            let repeated = if repeater.is_some() {
-                children.iter().map(|&c| repeater_out(cell, edge_between(cell, c))).collect()
+            let (repeated, repeater_needs) = if repeater.is_some() {
+                let exits = children.iter().map(|&c| edge_between(cell, c));
+                let needs = repeater_needs(cell, &mut exits.clone().chain(here.iter().map(|&i| sinks[i].exit)));
+                (exits.map(|exit| repeater_out(cell, exit)).collect(), needs)
             } else {
-                Vec::new()
+                (Vec::new(), 1)
             };
-            hops.insert(cell, Hop { children, plain, repeated, needed, sinks: here, repeater });
+            hops.insert(cell, Hop { children, plain, repeated, needed, sinks: here, repeater, repeater_needs });
         }
         const INFEASIBLE: u32 = u32::MAX;
         let at = |v: u8, r: usize| usize::from(v) * width + r;
@@ -1302,7 +1371,7 @@ fn insert_repeaters(
                 INFEASIBLE
             };
             let repeated = match hop.repeater {
-                Some(cost) if v >= REPEATER_NEEDS && r < most && within(r + 1) => {
+                Some(cost) if v >= hop.repeater_needs && r < most && within(r + 1) => {
                     sum(&hop.repeated, r + 1, cost).unwrap_or(INFEASIBLE)
                 }
                 _ => INFEASIBLE,
@@ -1597,6 +1666,22 @@ mod tests {
         }
     }
 
+    /// How many narrow crossings a net may climb in a row follows from the
+    /// tiles: what a repeater hands on in a narrow straight, or in a narrow turn
+    /// from the west, less the one the tile after the run needs, in crossings.
+    #[test]
+    fn the_crossings_a_net_may_climb_follow_from_the_narrow_tiles() {
+        let lib = Library::builtin().unwrap();
+        let crossing = lib.cross_n.dust_steps(Edge::North, Edge::South).unwrap();
+        for after in [
+            lib.wire_n.repeater_out(Edge::North, Edge::South).unwrap(),
+            lib.wire_n.repeater_out(Edge::West, Edge::North).unwrap(),
+        ] {
+            let needed_after = lib.wire_n.repeater_needs(Edge::North, Edge::South).unwrap();
+            assert_eq!(usize::from((after - needed_after) / crossing), MAX_CLIMBED, "{after} after a repeater");
+        }
+    }
+
     #[test]
     fn a_gap_too_narrow_is_given_up_after_stalling_and_named() {
         let netlist = braid(5);
@@ -1621,8 +1706,12 @@ mod tests {
         assert_eq!(tracks.len(), users.len());
         assert!(users.iter().all(|u| u.len() >= 2), "{users:?}");
         let mut per_gap = vec![0usize; gaps];
+        // The free tiles of the outputs' column are routing room too, in no gap,
+        // which the widening passes over.
         for (cell, _) in &tracks {
-            per_gap[narrow.gap_of(cell.0).expect("contended tracks are not in the output column")] += 1;
+            if let Some(gap) = narrow.gap_of(cell.0) {
+                per_gap[gap] += 1;
+            }
         }
         assert_eq!(per_gap.iter().position(|&n| n == *per_gap.iter().max().unwrap()), Some(0), "{per_gap:?}");
         // The history carries what was learned, named by column so that it
