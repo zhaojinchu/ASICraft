@@ -1,0 +1,33 @@
+# NOR of one to three inputs in a row three blocks deep: as the NOR tile, each
+# used input's dust points into the stone block, and the torch on the block's
+# east face is lit only while none of them is powered; the north and south
+# inputs are the port's own dust, right beside the stone.
+tile nor_s
+size 5 4 3
+port W in 0 1 1
+port N in 2 1 0
+port S in 2 1 2
+port E out 4 1 1
+function nor
+delay 2
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  > minecraft:redstone_wall_torch[facing=east]
+  e minecraft:redstone_wire
+  W minecraft:glass if W
+  w minecraft:redstone_wire if W
+  N minecraft:glass if N
+  n minecraft:redstone_wire if N
+  S minecraft:glass if S
+  s minecraft:redstone_wire if S
+
+layer 0
+  ..N..
+  WW..G
+  ..S..
+layer 1
+  ..n..
+  ww#>e
+  ..s..

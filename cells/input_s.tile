@@ -1,0 +1,24 @@
+# The input tile for a row three blocks deep (see input).
+tile input_s
+size 5 4 3
+port E out 4 1 1
+probe 1 1 1
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  / minecraft:lever[face=floor,facing=east,powered=false]
+  - minecraft:redstone_wire if E
+
+layer 0
+  .....
+  ..GGG
+  .....
+layer 1
+  .....
+  .#---
+  .....
+layer 2
+  .....
+  ./...
+  .....

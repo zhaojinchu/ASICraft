@@ -1,0 +1,28 @@
+# The ramp three blocks by three, north to south (see ramp_ns_s). Turned half
+# round it runs south to north.
+tile ramp_ns_sq
+size 3 4 3
+port N io 1 1 0
+port S io 1 3 2
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  - minecraft:redstone_wire
+
+layer 0
+  .G.
+  ...
+  ...
+layer 1
+  .-.
+  .#.
+  ...
+layer 2
+  ...
+  .-.
+  .#.
+layer 3
+  ...
+  ...
+  .-.

@@ -1,0 +1,30 @@
+# The wire tile for a routing column three blocks wide in a row three blocks
+# deep: every arm is the centre's neighbour, a hop either way costs three dust
+# steps, and a repeater fits only a straight, at the centre.
+tile wire_sq
+size 3 4 3
+port W io 0 1 1
+port E io 2 1 1
+port N io 1 1 0
+port S io 1 1 2
+
+legend
+  C minecraft:glass
+  c minecraft:redstone_wire
+  W minecraft:glass if W
+  w minecraft:redstone_wire if W
+  E minecraft:glass if E
+  e minecraft:redstone_wire if E
+  N minecraft:glass if N
+  n minecraft:redstone_wire if N
+  S minecraft:glass if S
+  s minecraft:redstone_wire if S
+
+layer 0
+  .N.
+  WCE
+  .S.
+layer 1
+  .n.
+  wce
+  .s.

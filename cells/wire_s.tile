@@ -1,0 +1,33 @@
+# The wire tile for a row three blocks deep: the west-east arm along the middle
+# row (z = 1), the north-south arm down the middle column (x = 2), so a hop
+# along the row costs five dust steps and one across it three. A repeater goes
+# in the arm the signal enters by, as in the wire tile; entering from the north
+# or south, that arm is the centre itself, so a straight carries it there and a
+# turn in the arm it leaves by, next to that port.
+tile wire_s
+size 5 4 3
+port W io 0 1 1
+port E io 4 1 1
+port N io 2 1 0
+port S io 2 1 2
+
+legend
+  C minecraft:glass
+  c minecraft:redstone_wire
+  W minecraft:glass if W
+  w minecraft:redstone_wire if W
+  E minecraft:glass if E
+  e minecraft:redstone_wire if E
+  N minecraft:glass if N
+  n minecraft:redstone_wire if N
+  S minecraft:glass if S
+  s minecraft:redstone_wire if S
+
+layer 0
+  ..N..
+  WWCEE
+  ..S..
+layer 1
+  ..n..
+  wwcee
+  ..s..

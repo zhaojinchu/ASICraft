@@ -1,0 +1,29 @@
+# The ramp for a row three blocks deep, west to east: the ramp tile's climb
+# along the middle row, five blocks (see ramp). Turned half round it runs east
+# to west.
+tile ramp_s
+size 5 4 3
+port W io 0 1 1
+port E io 4 3 1
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  - minecraft:redstone_wire
+
+layer 0
+  .....
+  GG...
+  .....
+layer 1
+  .....
+  --#..
+  .....
+layer 2
+  .....
+  ..-##
+  .....
+layer 3
+  .....
+  ...--
+  .....

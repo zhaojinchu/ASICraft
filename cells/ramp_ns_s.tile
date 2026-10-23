@@ -1,0 +1,30 @@
+# The ramp for a row three blocks deep, north to south: the lower north port,
+# one dust on a stone step at y = 2, the upper south port on a stone, three
+# blocks down the middle column (see ramp_n). Turned half round it runs south
+# to north.
+tile ramp_ns_s
+size 5 4 3
+port N io 2 1 0
+port S io 2 3 2
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  - minecraft:redstone_wire
+
+layer 0
+  ..G..
+  .....
+  .....
+layer 1
+  ..-..
+  ..#..
+  .....
+layer 2
+  .....
+  ..-..
+  ..#..
+layer 3
+  .....
+  .....
+  ..-..
