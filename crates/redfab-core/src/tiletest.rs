@@ -287,8 +287,10 @@ pub fn stack_fixture(lower: &Variant, upper: &Variant, library: &Library) -> Val
 /// The stacks the game checks: every lower wiring shape under every upper one,
 /// and a straight with a repeater on either level under or over every shape of
 /// the other; and in the narrow family, which differs only in being three
-/// blocks across, every shape under and over a straight that crosses it, and
-/// the two repeater straights stacked.
+/// blocks across, every shape under and over a straight that crosses it, the
+/// two repeater straights stacked, and each turn from the west or east, whose
+/// repeater stands in the arm it leaves by, under and over the straight along
+/// that arm.
 pub fn checked_stacks() -> Vec<(Variant, Variant)> {
     let shapes: Vec<Vec<Edge>> = (1u8..16)
         .map(|mask| Edge::ALL.into_iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, e)| e).collect())
@@ -316,6 +318,13 @@ pub fn checked_stacks() -> Vec<(Variant, Variant)> {
     let n_repeater = |kind: Kind, edges: &[Edge], entry: Edge| Variant { kind, ..Variant::repeater(edges, entry, 1) };
     out.push((n_repeater(Kind::WireN, &straight, Edge::West), n_repeater(Kind::WireUpN, &along, Edge::North)));
     out.push((n_repeater(Kind::WireN, &along, Edge::South), n_repeater(Kind::WireUpN, &straight, Edge::East)));
+    for entry in [Edge::West, Edge::East] {
+        for exit in [Edge::North, Edge::South] {
+            let turn = [entry, exit];
+            out.push((n_repeater(Kind::WireN, &turn, entry), Variant::new(Kind::WireUpN, &along)));
+            out.push((Variant::new(Kind::WireN, &along), n_repeater(Kind::WireUpN, &turn, entry)));
+        }
+    }
     out
 }
 

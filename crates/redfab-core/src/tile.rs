@@ -139,10 +139,14 @@ pub struct Tile {
     /// `layers[y][z][x]`
     layers: Vec<Vec<Vec<char>>>,
     /// The strength model read off the dust once the file is parsed; see
-    /// [`Tile::dust_steps`], [`Tile::repeater_out`], [`Tile::source_out`] and
-    /// [`Tile::port_needs`].
+    /// [`Tile::dust_steps`], [`Tile::repeater_out`], [`Tile::repeater_needs`],
+    /// [`Tile::repeater_place`], [`Tile::source_out`] and [`Tile::port_needs`].
     steps: BTreeMap<(Edge, Edge), u8>,
     repeater_outs: BTreeMap<(Edge, Edge), u8>,
+    repeater_needs: BTreeMap<(Edge, Edge), u8>,
+    /// Per entry and exit: where a repeater carrying the signal between them
+    /// stands, and the edge its input faces.
+    repeater_places: BTreeMap<(Edge, Edge), (Pos, Edge)>,
     source_outs: BTreeMap<Edge, u8>,
     needs: BTreeMap<Edge, u8>,
 }
@@ -166,11 +170,32 @@ impl Tile {
     }
 
     /// The power at the port of the neighbouring tile beyond `exit` when a
-    /// repeater sits in the `entry` arm (in the cell next to the port, as
-    /// [`Variant::blocks`] puts it): full power at the dust in front of the
-    /// repeater, one less per step. `None` when that dust does not reach `exit`.
+    /// repeater carries the signal from `entry` (where [`Tile::repeater_place`]
+    /// puts it): full power at the dust in front of the repeater, one less per
+    /// step. `None` when no repeater can.
     pub fn repeater_out(&self, entry: Edge, exit: Edge) -> Option<u8> {
         self.repeater_outs.get(&(entry, exit)).copied()
+    }
+
+    /// What the `entry` port must carry for that repeater to switch: one more
+    /// than the dust steps from the port to the dust behind the repeater (one
+    /// in its entry arm, where it reads the port's own dust).
+    pub fn repeater_needs(&self, entry: Edge, exit: Edge) -> Option<u8> {
+        self.repeater_needs.get(&(entry, exit)).copied()
+    }
+
+    /// Where a repeater carrying the signal from `entry` to every one of
+    /// `exits` stands, before rotation, and the edge its input faces: the dust
+    /// next to the entry port, the entry arm's own, when the dust in front of it
+    /// leads on to every exit; where that cell is the centre the arms meet in
+    /// (the west and east arms of a narrow tile), a straight still carries it
+    /// there, and a turn carries it in the arm it leaves by, next to that port,
+    /// reading the centre. `None` when no one repeater serves every exit, as
+    /// for a fan-out from such a centre.
+    pub fn repeater_place(&self, entry: Edge, exits: &[Edge]) -> Option<(Pos, Edge)> {
+        let mut places = exits.iter().map(|&exit| self.repeater_places.get(&(entry, exit)).copied());
+        let first = places.next()??;
+        places.all(|p| p == Some(first)).then_some(first)
     }
 
     /// The power at the port of the neighbouring tile beyond `exit` from the
@@ -363,6 +388,8 @@ impl Tile {
             layers,
             steps: BTreeMap::new(),
             repeater_outs: BTreeMap::new(),
+            repeater_needs: BTreeMap::new(),
+            repeater_places: BTreeMap::new(),
             source_outs: BTreeMap::new(),
             needs: BTreeMap::new(),
         };
@@ -445,6 +472,21 @@ impl Tile {
                 }
                 if let Some(&d) = from_repeater.get(&exit_pos) {
                     self.repeater_outs.insert((entry, exit), FULL_POWER.saturating_sub(d + 1));
+                    self.repeater_needs.insert((entry, exit), 1);
+                    self.repeater_places.insert((entry, exit), (inner, entry));
+                    continue;
+                }
+                // Otherwise the dust next to the exit port, reading the dust
+                // behind it, which the entry must reach around it.
+                let last = exit_pos.offset(exit.dir().opposite());
+                let behind = last.offset(exit.dir().opposite());
+                if !wires.contains(&last) || !wires.contains(&behind) {
+                    continue;
+                }
+                if let Some(&d) = distances(&[entry_pos], Some(last)).get(&behind) {
+                    self.repeater_outs.insert((entry, exit), FULL_POWER - 1);
+                    self.repeater_needs.insert((entry, exit), d + 1);
+                    self.repeater_places.insert((entry, exit), (last, exit.opposite()));
                 }
             }
             if kind == PortKind::In {
@@ -809,10 +851,12 @@ impl Variant {
             }
         }
         if let Some(entry) = self.repeater_entry {
-            // The cell next to the entry port, one step towards the centre.
-            let port = tile.port(entry).expect("the repeater's entry is a port of the tile");
-            let inner = rotate_pos_in(port.pos.offset(entry.dir().opposite()), self.rotation, tile.width, tile.depth);
-            let facing = entry.rotated(self.rotation).dir();
+            // Where the tile puts it: as a rule the cell next to the entry port.
+            let (at, input) = tile
+                .repeater_place(entry, &self.repeater_exits())
+                .expect("a repeater variant has a place for its repeater");
+            let inner = rotate_pos_in(at, self.rotation, tile.width, tile.depth);
+            let facing = input.rotated(self.rotation).dir();
             for (pos, block) in &mut blocks {
                 if *pos == inner {
                     *block = Block::Repeater { facing, delay: self.delay, locked: false, powered: false };
@@ -820,6 +864,16 @@ impl Variant {
             }
         }
         blocks
+    }
+
+    /// The edges a repeater entered by `repeater_entry` must reach (named before
+    /// rotation): every other used edge, or in a crossing the one straight on.
+    pub fn repeater_exits(&self) -> Vec<Edge> {
+        let Some(entry) = self.repeater_entry else { return Vec::new() };
+        match self.kind {
+            Kind::Cross | Kind::CrossN => vec![entry.opposite()],
+            _ => self.edges.iter().copied().filter(|&e| e != entry).collect(),
+        }
     }
 
     /// The used ports after rotation, with their internal net numbers.
@@ -913,9 +967,10 @@ impl Variant {
             out.push(Variant { rotation, ..Variant::new(Kind::Ramp, &[Edge::West, Edge::East]) });
         }
         // The narrow family: wiring on each level, with a repeater entered from the
-        // north or south in any shape and from the west or east in a straight only
-        // (that arm is the centre); the crossing, with a repeater in its flat arm;
-        // the ramps turned half round.
+        // north or south in any shape, and from the west or east in a straight or
+        // a turn (that arm is the centre: a turn carries it in the arm it leaves
+        // by); the crossing, with a repeater in its flat arm; the ramps turned
+        // half round.
         for kind in [Kind::WireN, Kind::WireUpN] {
             for mask in 1u8..16 {
                 let edges: Vec<Edge> =
@@ -924,8 +979,7 @@ impl Variant {
                     continue;
                 }
                 out.push(Variant::new(kind, &edges));
-                let straight = edges == [Edge::West, Edge::East];
-                for &entry in edges.iter().filter(|e| straight || matches!(e, Edge::North | Edge::South)) {
+                for &entry in edges.iter().filter(|&&e| crate::layout::can_carry_repeater(NARROW, &edges, e)) {
                     out.push(Variant { kind, ..Variant::repeater(&edges, entry, 1) });
                 }
             }
@@ -1241,6 +1295,30 @@ mod tests {
             // A fan-out entered from the west has no single place for a repeater.
             for shape in ["WNS", "WEN", "WES", "WENS"] {
                 assert!(!names.contains(&format!("{}_{shape}_repW_d1", kind.name())), "{shape}");
+            }
+        }
+        // That repeater reads the centre, a step in from the port, so the port
+        // must carry two; one in its entry arm reads the port's own dust.
+        assert_eq!(lib.wire_n.repeater_needs(West, North), Some(2));
+        assert_eq!(lib.wire_up_n.repeater_needs(East, South), Some(2));
+        assert_eq!(lib.wire_n.repeater_needs(West, East), Some(1));
+        assert_eq!(lib.wire_n.repeater_needs(North, West), Some(1));
+        assert_eq!(lib.wire.repeater_needs(West, North), Some(1));
+        // The rule the router and the hold fixer ask agrees with the tile file
+        // for every narrow shape and entry.
+        for mask in 1u8..16 {
+            let edges: Vec<Edge> =
+                Edge::ALL.iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, e)| *e).collect();
+            if edges.len() < 2 {
+                continue;
+            }
+            for &entry in &edges {
+                let exits: Vec<Edge> = edges.iter().copied().filter(|&e| e != entry).collect();
+                assert_eq!(
+                    crate::layout::can_carry_repeater(NARROW, &edges, entry),
+                    lib.wire_n.repeater_place(entry, &exits).is_some(),
+                    "{edges:?} entered by {entry:?}"
+                );
             }
         }
         assert!(crate::layout::can_carry_repeater(NARROW, &[West, North], West));

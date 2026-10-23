@@ -9,11 +9,11 @@ use crate::tile::{Edge, HEIGHT, Kind, Library, PITCH, Variant};
 
 /// Whether wiring in a column `width` blocks wide can carry a repeater entered
 /// by `entry` joining `edges`: in a narrow column the arm entered from the west
-/// or east is the centre itself, so only a straight can.
+/// or east is the centre itself, so a straight carries it there and a turn in
+/// the arm it leaves by, but a fan-out has no one place for it
+/// ([`crate::tile::Tile::repeater_place`], which a test holds this to).
 pub fn can_carry_repeater(width: i32, edges: &[Edge], entry: Edge) -> bool {
-    width >= PITCH
-        || matches!(entry, Edge::North | Edge::South)
-        || edges.iter().all(|e| matches!(e, Edge::West | Edge::East))
+    width >= PITCH || matches!(entry, Edge::North | Edge::South) || edges.len() == 2
 }
 use crate::world::World;
 
