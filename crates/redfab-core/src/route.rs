@@ -1533,8 +1533,68 @@ mod tests {
             assert_eq!(at, start, "{:?} leads back to the source", graph.nodes[sink]);
         }
         let shut = node((4, 4), Track::X);
-        let walls = |n: usize| if graph.nodes[n].0 == (4, 3) || graph.nodes[n].0 == (3, 4) { f64::INFINITY } else { 1.0 };
+        let walls =
+            |n: usize| if graph.nodes[n].0 == (4, 3) || graph.nodes[n].0 == (3, 4) { f64::INFINITY } else { 1.0 };
         assert_eq!(grow_tree(&graph, start, vec![near, shut], walls), Err(shut));
+    }
+
+    /// A crossing's climbing net can take no repeater in a narrow column, and
+    /// loses five levels in each, so a net that climbs three in a row has nowhere
+    /// to be repeated (twelve after a repeater, seven, two, and the third needs
+    /// six). Such a run counts as contended, both tracks of each of its tiles, so
+    /// that the negotiation moves a net off it; two in a row do not, nor three
+    /// with a gap, nor three in a column five blocks wide, whose crossings turn
+    /// to give the climbing net the flat arm.
+    #[test]
+    fn three_narrow_crossings_climbed_in_a_row_by_one_net_are_contended() {
+        let placement = |width: i32| Placement {
+            cols: 3,
+            rows: 6,
+            col_width: vec![width; 3],
+            row_depth: vec![PITCH; 6],
+            gates: vec![],
+            widths: vec![],
+            pin_edges: vec![],
+            inputs: vec![],
+            outputs: vec![],
+            ties: vec![],
+            routing: vec![3],
+            columns: (0..3).map(|offset| Column::Routing { gap: 0, offset }).collect(),
+            stages: vec![],
+        };
+        let nets: Vec<(NetId, Source, Vec<Sink>)> = (0..5)
+            .map(|k| (k, Source { node: ((0, k as i32), Track::X), entry: Edge::West, strength: 15 }, vec![]))
+            .collect();
+        let narrow = crate::tile::NARROW;
+        for (width, crossed, contended) in [
+            (narrow, vec![1, 2, 3], true),
+            (narrow, vec![2, 3, 4], true),
+            (narrow, vec![1, 2], false),
+            (narrow, vec![1, 2, 4], false),
+            (PITCH, vec![1, 2, 3], false),
+        ] {
+            let placement = placement(width);
+            let graph = Graph::new(&placement);
+            let mut negotiation = Negotiation::new(&graph, &nets, vec![0.0; graph.slot_of.len()]);
+            let base = |row: i32| graph.base[graph.index[&((1, row), Track::X)]];
+            // Net 0 runs down column 1 from row 0 to row 5; nets 1 on cross it in the rows given.
+            for row in 0..6 {
+                negotiation.holders[base(row) + Slot::LowerZ as usize].push(0);
+            }
+            for (k, &row) in crossed.iter().enumerate() {
+                negotiation.holders[base(row) + Slot::LowerX as usize].push(k + 1);
+            }
+            let overused: BTreeSet<usize> = negotiation.overused().into_iter().collect();
+            let expected: BTreeSet<usize> = if contended {
+                crossed
+                    .iter()
+                    .flat_map(|&row| [base(row) + Slot::LowerX as usize, base(row) + Slot::LowerZ as usize])
+                    .collect()
+            } else {
+                BTreeSet::new()
+            };
+            assert_eq!(overused, expected, "width {width}, crossings in rows {crossed:?}");
+        }
     }
 
     #[test]

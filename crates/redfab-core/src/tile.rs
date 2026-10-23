@@ -1008,10 +1008,11 @@ mod tests {
         assert_eq!(turn.blocks(&lib).iter().filter(|(_, b)| matches!(b, Block::Wire(_))).count(), 4);
         // 2 io tiles, on each of the two levels 11 wires + 28 repeater placements +
         // 3 more delays, 4 ramps, 7 NORs, 3 crossings, 2 flip-flops, 2 ties; and
-        // the narrow family: on each level 11 wires + 16 repeater placements (the
-        // north and south arms of every shape, the west and east of the straight)
-        // + 6 more delays, the crossing and its 2 repeaters, 4 ramps
-        let narrow = 2 * (11 + 16 + 6) + 3 + 4;
+        // the narrow family: on each level 11 wires + 20 repeater placements (the
+        // north and south arms of every shape, the west and east of the straight
+        // and of the four turns) + 6 more delays, the crossing and its 2
+        // repeaters, 4 ramps
+        let narrow = 2 * (11 + 20 + 6) + 3 + 4;
         assert_eq!(Variant::all().len(), 2 + 2 * (11 + 28 + 3) + 4 + 7 + 3 + 2 + 2 + narrow);
     }
 
@@ -1152,10 +1153,12 @@ mod tests {
     /// upper wire, the crossing and the two ramps parse under the border rules,
     /// one cell wide and deep. A west-east hop costs three dust steps, a
     /// north-south one five, a turn four; a repeater entered from the north or
-    /// south reaches every arm (thirteen to a side, twelve straight on), one entered from the west only to the
-    /// east (the centre is its arm, so only a straight carries one); the
-    /// crossing's flat arm carries one and its climbing arm none; the ramps
-    /// climb three blocks west to east and five north to south.
+    /// south reaches every arm (thirteen to a side, twelve straight on); one
+    /// entered from the west sits in the centre, which is its arm, and reaches
+    /// the east (fourteen), or for a turn sits in the arm the signal leaves by,
+    /// next to that port (fourteen beyond it); the crossing's flat arm carries
+    /// one and its climbing arm none; the ramps climb three blocks west to east
+    /// and five north to south.
     #[test]
     fn the_narrow_tiles_cost_three_steps_across_and_five_along() {
         let parse = |text: &str| Tile::parse(text).unwrap();
@@ -1179,7 +1182,8 @@ mod tests {
             assert_eq!(tile.repeater_out(North, East), Some(13), "{}", tile.name);
             assert_eq!(tile.repeater_out(North, South), Some(12), "{}", tile.name);
             assert_eq!(tile.repeater_out(West, East), Some(14), "{}", tile.name);
-            assert_eq!(tile.repeater_out(West, North), None, "{}", tile.name);
+            assert_eq!(tile.repeater_out(West, North), Some(14), "{}", tile.name);
+            assert_eq!(tile.repeater_out(East, South), Some(14), "{}", tile.name);
         }
         assert_eq!(cross.dust_steps(West, East), Some(3));
         assert_eq!(cross.dust_steps(North, South), Some(5));
@@ -1192,5 +1196,56 @@ mod tests {
         assert_eq!((ramp_ns.port(North).unwrap().pos.y, ramp_ns.port(South).unwrap().pos.y), (1, 3));
         assert_eq!(ramp_ns.dust_steps(North, South), Some(5));
         assert_eq!(ramp_ns.repeater_out(North, South), None);
+    }
+
+    /// In a narrow tile the cell next to the west or east port is the centre,
+    /// where the arms meet, so a repeater there can only pass the signal straight
+    /// on. A turn from there carries its repeater in the arm it leaves by
+    /// instead, next to that port, facing back towards the centre it reads;
+    /// a fan-out from the west or east has no single place for one.
+    #[test]
+    fn a_narrow_turn_entered_from_the_west_carries_its_repeater_in_the_arm_it_leaves_by() {
+        let lib = Library::builtin().unwrap();
+        use Edge::{East, North, South, West};
+        for (kind, y) in [(Kind::WireN, 1), (Kind::WireUpN, 3)] {
+            let turn = Variant { kind, ..Variant::repeater(&[West, North], West, 1) };
+            let ports = turn.ports(&lib);
+            assert_eq!(
+                ports.iter().map(|p| (p.edge, p.kind)).collect::<Vec<_>>(),
+                vec![(West, PortKind::In), (North, PortKind::Out)]
+            );
+            let blocks = turn.blocks(&lib);
+            let repeaters: Vec<&(Pos, Block)> =
+                blocks.iter().filter(|(_, b)| matches!(b, Block::Repeater { .. })).collect();
+            assert_eq!(repeaters.len(), 1, "{}", turn.name());
+            assert_eq!(repeaters[0].0, Pos::new(1, y, 1), "{}", turn.name());
+            assert_eq!(
+                repeaters[0].1.to_string(),
+                "minecraft:repeater[delay=1,facing=south,locked=false,powered=false]",
+                "{}",
+                turn.name()
+            );
+            // The west port, the centre and the north port stay dust.
+            let wires = blocks.iter().filter(|(_, b)| matches!(b, Block::Wire(_))).count();
+            assert_eq!(wires, 3, "{}", turn.name());
+            // Turned half round it is an east-to-south turn with the repeater in the south arm.
+            let back = Variant { rotation: 2, ..turn.clone() };
+            let repeater = back.blocks(&lib).into_iter().find(|(_, b)| matches!(b, Block::Repeater { .. })).unwrap();
+            assert_eq!(repeater.0, Pos::new(1, y, 3), "{}", back.name());
+            let names: Vec<String> = Variant::all().iter().map(Variant::name).collect();
+            for shape in ["WN", "WS", "EN", "ES"] {
+                let entry = &shape[..1];
+                let name = format!("{}_{shape}_rep{entry}_d1", kind.name());
+                assert!(names.contains(&name), "{name} is a variant");
+            }
+            // A fan-out entered from the west has no single place for a repeater.
+            for shape in ["WNS", "WEN", "WES", "WENS"] {
+                assert!(!names.contains(&format!("{}_{shape}_repW_d1", kind.name())), "{shape}");
+            }
+        }
+        assert!(crate::layout::can_carry_repeater(NARROW, &[West, North], West));
+        assert!(crate::layout::can_carry_repeater(NARROW, &[East, South], East));
+        assert!(!crate::layout::can_carry_repeater(NARROW, &[West, North, South], West));
+        assert!(!crate::layout::can_carry_repeater(NARROW, &[West, East, North], West));
     }
 }
