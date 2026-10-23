@@ -1,0 +1,28 @@
+# The ramp three blocks by three, west to east (see ramp_n). Turned half round
+# it runs east to west.
+tile ramp_sq
+size 3 4 3
+port W io 0 1 1
+port E io 2 3 1
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  - minecraft:redstone_wire
+
+layer 0
+  ...
+  G..
+  ...
+layer 1
+  ...
+  -#.
+  ...
+layer 2
+  ...
+  .-#
+  ...
+layer 3
+  ...
+  ..-
+  ...

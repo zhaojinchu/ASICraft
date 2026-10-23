@@ -1,0 +1,19 @@
+# The output tile for a row three blocks deep (see output).
+tile output_s
+size 5 4 3
+port W in 0 1 1
+lamp 3 1 1
+
+legend
+  G minecraft:glass
+  L minecraft:redstone_lamp
+  - minecraft:redstone_wire
+
+layer 0
+  .....
+  GGG..
+  .....
+layer 1
+  .....
+  ---L.
+  .....

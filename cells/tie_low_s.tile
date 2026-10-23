@@ -1,0 +1,18 @@
+# Constant 0 for a row three blocks deep (see tie_low).
+tile tie_low_s
+size 5 4 3
+port E out 4 1 1
+function low
+
+legend
+  G minecraft:glass
+  - minecraft:redstone_wire
+
+layer 0
+  .....
+  ...GG
+  .....
+layer 1
+  .....
+  ...--
+  .....
