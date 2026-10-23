@@ -387,6 +387,16 @@ The plan's step 4 was two north-south trunks per routing column, the channel est
 
 `./check --vanilla` on 2280efe (the stage as it stands: narrow columns, shallow rows, the router with levels): all 58 checks pass in 3,170 s, among them `tiles-vanilla` (583 fixtures), `design-vanilla`, `timing-traces`, `adder4-exhaustive`, `cycles-vanilla`, `negatives-vanilla`, `mechanics-modded`, `design-live`, and `live-vanilla`, owed since the compaction stage's step 6 (it timed out under memory pressure then; the tile runs now take 11 minutes instead of three hours, which left the machine room). The stage's steps 1 to 3b and 5 are done; step 4 was measured and not taken. Summed block-area over the 23 shipped designs, stage to stage: 252,350 after the compaction stage, 214,625 after step 2, 159,380 after step 3, 115,089 after step 3b; adder8 485 x 175 to 357 x 105.
 
+### Where the area goes now, and what could come next (2026-10-23, for a decision)
+
+Every row no flip-flop sits in is three blocks deep, so the depth is the row count; the width is where the room is. Routing columns are 52 to 71 % of every design's width (adder8: 84 of its 105 tile columns, 252 of 357 blocks; adder4 64 %, divmod 64 %, cmp4 59 %, param_add 52 %), and they are well used: adder8's hold a tile in 25 of 35 rows on average, none near empty, and about 70 % of every grid holds a tile. For adder8 the channel-density estimate, a rough lower bound for its placement, sums to 67 routing columns against the 84 the router ends with, so a perfect router would save about a fifth of the width and no more; beyond that it is the placement. Three directions, none started:
+
+1. Placement for channel density: order the rows of each gate column, and choose each gate's pin sides, to shorten the vertical spans that the channel estimate counts (today's barycenter sweeps order by connection, not by span). Measurable on the estimate alone before any routing; the likely next step.
+2. Fewer gate columns: today a gate's column is its logic level, so an 8-bit ripple adder has 20 gaps, each at least one routing column and a five-block gate column with a few gates in it. Folding levels into shared columns where the nets allow would cut the gaps; a larger change, with feedback routing westward to think through.
+3. A router pass that gives columns back: after a design routes, try each gap one column narrower with what the run learned, keep what still routes. Bounded by the fifth above, and slow (a routing attempt per gap); better as an option of the command line than in the playground's 90 s.
+
+Not compaction, and waiting on decisions that are yours: stage 13 (putting the playground online), and pushing these commits (main is ahead of origin by everything since ca960b1).
+
 ---
 
 
