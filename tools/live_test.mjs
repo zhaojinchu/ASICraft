@@ -469,7 +469,8 @@ test('the trace the backend records equals the simulator trace of the same stimu
 });
 
 test('a design that does not fit a plot is refused before anything is placed, and the page can ask first', async () => {
-    const { backend, world, base } = await live({ plots: 2, plotSize: [64, 64] });
+    // Two chunks square: nor2 (21 by 10) fits, fa1 (59 by 30) does not.
+    const { backend, world, base } = await live({ plots: 2, plotSize: [32, 32] });
     try {
         const small = await submit(base, 'nor2');
         assert.equal(small.status, 200, small.body.error);
@@ -479,7 +480,7 @@ test('a design that does not fit a plot is refused before anything is placed, an
         assert.equal(world.placed.length, 1);
         assert.deepEqual((await api(base, '/api/status')).body.plots, { total: 2, free: 1, broken: 0 });
         const fits = await api(base, '/api/fits?x=95&z=70');
-        assert.deepEqual([fits.status, fits.body.fits, fits.body.plotSize], [200, false, [64, 64]]);
+        assert.deepEqual([fits.status, fits.body.fits, fits.body.plotSize], [200, false, [32, 32]]);
         assert.equal((await api(base, '/api/fits?x=25&z=10')).body.fits, true);
         assert.equal((await api(base, '/api/fits?x=abc&z=1')).status, 400);
     } finally {
