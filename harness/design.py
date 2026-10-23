@@ -34,6 +34,7 @@ from .place_template import place, read_box
 from .runner import Runner, layout
 from .server import ROOT, VanillaServer, redfab
 from .session import Session
+from .tiles import batches
 from .trace import Expectation, Fixture, Trace, first_trace_difference, parse_replay_summary
 
 if TYPE_CHECKING:
@@ -48,6 +49,10 @@ FIRST_VECTOR_TICK = 2
 # than MAX_TRACED_TICKS. The `exhaustive` check covers every vector without traces.
 MAX_TRACED_VECTORS = 32
 MAX_TRACED_TICKS = 300
+# The design whose worst case the game must reach (`timing-traces`): it is driven
+# through every ordered pair of its input combinations instead, so that the pair
+# the exact analysis found slowest is among them whatever the layout.
+WORST_CASE_DESIGN = "fa1"
 TEMPLATE_Z = 8192  # where the template checks place their copies, clear of the traced plots
 
 DUST_NS = "minecraft:redstone_wire[east=none,north=side,power=0,south=side,west=none]"
@@ -129,6 +134,23 @@ def sim_vectors(module: dict) -> tuple[list[dict[str, int]], bool]:
     while len(rows) < SIM_SAMPLE:
         rows.append([rng.randint(0, 1) for _ in names])
     return [dict(zip(names, row)) for row in rows[:SIM_SAMPLE]], True
+
+
+def every_pair_walk(vectors: list[dict[str, int]]) -> list[dict[str, int]]:
+    """The vectors in an order that steps from each one to each other exactly once
+    (an Eulerian circuit of the complete directed graph on them), starting and
+    ending at the first: n(n-1) changes for n vectors."""
+    if not vectors:
+        return []
+    remaining = {i: [j for j in range(len(vectors)) if j != i] for i in range(len(vectors))}
+    stack, walk = [0], []
+    while stack:
+        here = stack[-1]
+        if remaining[here]:
+            stack.append(remaining[here].pop())
+        else:
+            walk.append(stack.pop())
+    return [vectors[i] for i in reversed(walk)]
 
 
 def sampled_vectors(module: dict, limit: int) -> list[dict[str, int]]:
@@ -332,22 +354,30 @@ def cmd_vanilla(names: list[str]) -> int:
     for name in names:
         design, module = load(name)
         limit = max(2, min(MAX_TRACED_VECTORS, MAX_TRACED_TICKS // (design["settle_ticks"] + 2)))
-        vectors = sampled_vectors(module, limit)
+        if name == WORST_CASE_DESIGN:
+            vectors = every_pair_walk(all_vectors(module))
+        else:
+            vectors = sampled_vectors(module, limit)
         designs[name] = design
         fixtures.append(function_fixture(name, design, vectors, verilator_outputs(name, module, vectors)))
     game_dir = DESIGNS / "_game"
     shutil.rmtree(game_dir, ignore_errors=True)
 
+    # In batches of similar length, each on a fresh server: the runner steps every
+    # plot of a run until its longest fixture ends.
     failures: list[str] = []
+    groups = batches(fixtures)
     for mode in MODES:
-        problems, server = run_function(fixtures, mode, game_dir)
-        try:
-            for name, items in problems.items():
-                failures += [f"{name}: {item}" for item in items]
-            if mode == "vanilla":
-                failures += template_checks(server, designs)
-        finally:
-            server.stop()
+        for number, batch in enumerate(groups, start=1):
+            print(f"[{mode}] batch {number}: {', '.join(fx.name for fx in batch)}", flush=True)
+            problems, server = run_function(batch, mode, game_dir)
+            try:
+                for name, items in problems.items():
+                    failures += [f"{name}: {item}" for item in items]
+                if mode == "vanilla" and number == len(groups):
+                    failures += template_checks(server, designs)
+            finally:
+                server.stop()
 
     # The simulator must reproduce each recorded trace, in its default order of
     # same-tick events: a trace it matches only in another order is a race in the
@@ -510,11 +540,11 @@ def cmd_timing_traces(names: list[str]) -> int:
                 if early:
                     failures.append(f"{name} [{mode}]: {output} changed {min(early)} ticks after an input change, "
                                     f"earlier than its reported best case of {best}")
-                if name == "fa1" and worst in delays:
+                if name == WORST_CASE_DESIGN and worst in delays:
                     reached = True
             print(f"{name} [{mode}]: lamp changes stay within the reported timing")
-    if "fa1" in names and not reached:
-        failures.append("fa1: no recorded lamp change reaches the reported worst case")
+    if WORST_CASE_DESIGN in names and not reached:
+        failures.append(f"{WORST_CASE_DESIGN}: no recorded lamp change reaches the reported worst case")
     for failure in failures:
         print("FAIL: " + failure)
     return 1 if failures else 0
