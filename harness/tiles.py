@@ -6,6 +6,7 @@ must equal the simulator's. Random tile groups are recorded and replayed too.
 
 The seed of the random tile groups is fixed (1) so the gate tests the same groups
 run after run; `--seed random` draws one from the clock for an exploratory run.
+The fixtures run in batches of similar length (`batches`), each on fresh servers.
 The two redstone modes run at the same time on two servers (each server gets its
 own ports and run directory); `--serial` runs them one after the other.
 """
@@ -26,6 +27,14 @@ from .trace import Fixture, Trace, check_expectations, first_trace_difference, p
 
 OUT = ROOT / "build" / "tiles"
 DEFAULT_SEED = 1
+# The runner steps and saves every plot of a run until its longest fixture ends,
+# so the fixtures run in batches of similar length, each on fresh servers, and a
+# batch holds at most this many plots (three placements a fixture): 391 fixtures in
+# one run (2026-10-23) kept every plot ticking for the flip-flop sweeps' 1,252
+# ticks, and two servers with their heaps full took 12 s a tick.
+MAX_BATCH_PLOTS = 450
+# Fixtures up to this long share a batch, however their lengths differ.
+SHORT_TICKS = 50
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -35,6 +44,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--seed", type=seed_argument, default=DEFAULT_SEED, help="an integer, or `random`")
     ap.add_argument("--serial", action="store_true", help="run the two redstone modes one after the other")
     return ap.parse_args(argv)
+
+
+def batches(fixtures: list[Fixture], per_fixture: int = 3) -> list[list[Fixture]]:
+    """The fixtures by length, in batches: a new one whenever the batch would hold
+    more than `MAX_BATCH_PLOTS` plots, or its longest fixture would run more than
+    twice as long as its shortest (all up to `SHORT_TICKS` count as that long)."""
+    out: list[list[Fixture]] = []
+    for fx in sorted(fixtures, key=lambda f: (f.ticks, f.name)):
+        if out and (len(out[-1]) + 1) * per_fixture <= MAX_BATCH_PLOTS \
+                and fx.ticks <= 2 * max(out[-1][0].ticks, SHORT_TICKS):
+            out[-1].append(fx)
+        else:
+            out.append([fx])
+    return out
 
 
 def run_mode(mode: str, fixtures: list[Fixture]) -> dict[tuple[str, str], Trace]:
@@ -57,11 +80,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{len(fixtures)} fixtures (seed {args.seed})")
 
     failures: list[str] = []
-    if args.serial:
-        runs = {mode: run_mode(mode, fixtures) for mode in MODES}
-    else:
-        with ThreadPoolExecutor(max_workers=len(MODES)) as pool:
-            runs = {mode: future.result() for mode, future in [(m, pool.submit(run_mode, m, fixtures)) for m in MODES]}
+    runs: dict[str, dict[tuple[str, str], Trace]] = {mode: {} for mode in MODES}
+    for number, batch in enumerate(batches(fixtures), start=1):
+        print(f"batch {number}: {len(batch)} fixtures of {batch[0].ticks} to {batch[-1].ticks} ticks", flush=True)
+        if args.serial:
+            done = {mode: run_mode(mode, batch) for mode in MODES}
+        else:
+            with ThreadPoolExecutor(max_workers=len(MODES)) as pool:
+                done = {mode: future.result() for mode, future in [(m, pool.submit(run_mode, m, batch)) for m in MODES]}
+        for mode, traces in done.items():
+            runs[mode].update(traces)
     for mode, traces in runs.items():
         for fx in fixtures:
             base = traces[(fx.name, "aligned")]
