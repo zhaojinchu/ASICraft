@@ -1559,16 +1559,17 @@ mod tests {
     }
 
     /// The candidates are laid out in the order they can win (the packing
-    /// style's searched rows, then its swept rows, pitch4 last), and one whose
+    /// styles' searched rows, then their swept rows, pitch4 last), and one whose
     /// footprint floor exceeds the footprint already kept is given up on, since
     /// it can only lose: pitch4 is then not laid out at all for most designs.
     /// What the build keeps is what laying every candidate out to completion
     /// and picking as DESIGN 4.3 step 7 says would keep, ties to the earlier
-    /// style as before, so no layout changes.
+    /// style as before, so no layout changes; and only the kept candidate is
+    /// timed for its burnout budget when its inputs keep up.
     #[test]
     fn the_candidates_laid_out_in_the_order_they_can_win_keep_what_laying_them_all_out_keeps() {
         let library = Library::builtin().unwrap();
-        let mut given_up = 0;
+        let (mut given_up, mut stretched) = (0, 0);
         for seed in 300..306u64 {
             let mut rng = crate::tiletest::Rng::new(seed);
             let gates = 2 + rng.below(10);
@@ -1576,7 +1577,7 @@ mod tests {
             let lamp_names: Vec<String> = netlist.outputs.iter().map(|p| p.name.clone()).collect();
             // Every candidate to completion, in the order the styles are tried.
             let mut all: Vec<Candidate> = Vec::new();
-            for &style in COMBINATIONAL_STYLES {
+            for &style in styles_of(&netlist) {
                 let mut placers = vec![Placer::swept(&netlist, style).unwrap()];
                 if style.packs() {
                     let searched = Placer::searched(&netlist, style).unwrap();
@@ -1593,21 +1594,74 @@ mod tests {
             let (built, problems) =
                 build_unchecked_logged(&netlist, "random", Break::None, &mut |l| lines.push(l.to_string())).unwrap();
             assert!(problems.is_empty(), "seed {seed}: {problems:?}");
+            // The test assumes the first pick stands: its inputs keep up.
+            assert_eq!(built.design.timing.input_spacing, crate::timing::MIN_INPUT_SPACING, "seed {seed}");
             let (sx, sy, sz) = expected.world.size();
             assert_eq!(
                 (built.design.placement.as_str(), built.design.rows.as_str(), built.design.size),
                 (expected.style.name(), expected.rows, [sx, sy, sz]),
                 "seed {seed}: {lines:#?}"
             );
+            let timed = lines.iter().filter(|l| l.contains("measuring the burnout budget")).count();
+            assert_eq!(timed, 1, "seed {seed}: the burnout budget was measured {timed} times: {lines:#?}");
             let at = |prefix: &str| lines.iter().position(|l| l.starts_with(prefix));
-            if let (Some(packed), Some(pitch4)) = (at("packed"), at("pitch4")) {
-                assert!(packed < pitch4, "seed {seed}: pitch4 was laid out before the packing style: {lines:#?}");
+            if let Some(pitch4) = at("pitch4") {
+                for style in ["packed", "stretched"] {
+                    if let Some(packing) = at(style) {
+                        assert!(packing < pitch4, "seed {seed}: pitch4 was laid out before {style}: {lines:#?}");
+                    }
+                }
             }
             if lines.iter().any(|l| l.contains(" blocks against the ") && l.contains(" kept")) {
                 given_up += 1;
             }
+            if lines.iter().any(|l| l == "stretched placement") {
+                stretched += 1;
+            }
         }
         assert!(given_up > 0, "no candidate was ever given up on");
+        assert!(stretched > 0, "the stretched style was never a candidate");
+    }
+
+    /// The stretched style, measured a loss on every combinational design at
+    /// the five-block pitch, is a candidate again for the combinational designs
+    /// under `STRETCHED_UP_TO_CELLS` cells, since the shallow rows: drawn out
+    /// over the tallest column's rows, the pins of the short columns no longer
+    /// share the top rows, where the stubs that turn into them must stack over
+    /// one another's trunks (the review of 2026-10-31: divmod 182 x 60 to
+    /// 146 x 60, adder4, signed_sub, mux4, cmp4 and nor3 smaller). Above the
+    /// gate it has not won and costs more than the playground's time allows.
+    #[test]
+    fn the_stretched_style_is_a_candidate_for_combinational_designs_under_the_gate() {
+        let mut rng = crate::tiletest::Rng::new(7);
+        let under = crate::pnrtest::random_netlist_sized(&mut rng, STRETCHED_UP_TO_CELLS - 1, 3, 0);
+        let at = crate::pnrtest::random_netlist_sized(&mut rng, STRETCHED_UP_TO_CELLS, 3, 0);
+        let clocked = crate::pnrtest::random_netlist_sized(&mut rng, 5, 2, 1);
+        assert_eq!(under.cells.len(), STRETCHED_UP_TO_CELLS - 1);
+        assert_eq!(styles_of(&under), [Style::Pitch4, Style::Packed, Style::Stretched]);
+        assert_eq!(styles_of(&at), [Style::Pitch4, Style::Packed]);
+        assert_eq!(styles_of(&clocked), [Style::Pitch4, Style::Stretched]);
+        // adder4 (49 cells) gains from the style; adder8 (102) does not, and would take about 29 s more.
+        assert!((50..=102).contains(&STRETCHED_UP_TO_CELLS), "{STRETCHED_UP_TO_CELLS}");
+    }
+
+    /// When the kept layout's inputs may change less often than every
+    /// `MIN_INPUT_SPACING` ticks, the pick is made again over every candidate:
+    /// by input spacing first, every spacing of the minimum or under alike,
+    /// then by the rank, ties to the earlier. So the next-best layout whose
+    /// inputs keep up is taken, not pitch4 (which the old fallback jumped to:
+    /// divmod's stretched searched rows at spacing 10 would have shipped pitch4
+    /// at 164 x 69 instead of the stretched swept rows at 146 x 60).
+    #[test]
+    fn the_pick_made_again_by_input_spacing_takes_the_next_best_whose_inputs_keep_up() {
+        // The rank (footprint, settle) per candidate in the pick's order: pitch4, packed, stretched.
+        let ranks = [(100u64, 5u64), (60, 4), (70, 3)];
+        assert_eq!(repick(&ranks, &[8, 12, 8]), 2, "the stretched layout, not pitch4");
+        assert_eq!(repick(&ranks, &[8, 12, 12]), 0, "pitch4 when it alone keeps up");
+        assert_eq!(repick(&ranks, &[10, 12, 11]), 0, "the least spacing when none keeps up");
+        assert_eq!(repick(&ranks, &[8, 8, 8]), 1, "the rank when all keep up");
+        assert_eq!(repick(&ranks, &[12, 10, 10]), 1, "the rank among equal spacings");
+        assert_eq!(repick(&[(100, 5), (100, 5)], &[10, 10]), 0, "ties go to the earlier");
     }
 
     /// Where signals keep dying in shallow rows, the build makes a cell deep
