@@ -235,241 +235,512 @@ pub fn gap_count(netlist: &Netlist, style: Style) -> Result<usize, String> {
     Ok(stages(netlist, &level, &drivers, style).1)
 }
 
+/// How many barycenter sweeps a placement runs. The sweeps do not settle, they
+/// oscillate (adder8 packed estimated 71, 68, 67, 65 and 65 routing columns
+/// after 2, 3, 4, 6 and 8 sweeps), so the one that scores least is kept.
+pub const SWEEPS: usize = 8;
+
+/// The most passes the local search makes over the columns' orders; it stops
+/// sooner when a pass improves nothing.
+const IMPROVE_PASSES: usize = 12;
+
+/// How many sweeps the swept rows run, the last of them kept.
+const SWEPT_SWEEPS: usize = 4;
+
 /// Places the netlist with `routing[g]` routing columns in gap `g`, the rows
-/// taken as `style` says.
+/// taken as `style` says: the searched rows (see [`Placer::searched`]), in the
+/// columns `routing` gives.
 pub fn place(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Placement, String> {
-    let drivers = netlist.drivers()?;
-    let level = levels(netlist, &drivers)?;
-    let has_dff = netlist.cells.iter().any(|c| c.is_dff());
-    let (stage, gaps) = stages(netlist, &level, &drivers, style);
-    let inverters = if style.packs() { clock_inverters(netlist, &drivers) } else { Vec::new() };
-    if routing.len() != gaps {
-        return Err(format!("the placement has {gaps} gaps but {} routing widths were given", routing.len()));
-    }
-    if routing.iter().any(|&r| r < 1) {
-        return Err("every gap needs at least one routing column".to_string());
-    }
-    let used_constants: Vec<(NetId, bool)> =
-        netlist.constants.iter().copied().filter(|(net, _)| !netlist.sinks_of(*net).is_empty()).collect();
+    Placer::searched(netlist, style)?.place(routing)
+}
 
-    // Columns: sources, routing, [flip-flops (two cells), routing,] gates, routing,
-    // ..., gates, routing, outputs.
-    let mut columns = vec![Column::Sources];
-    let mut gate_col_of_stage = vec![0i32; gaps];
-    let mut by_stage: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for (c, &s) in stage.iter().enumerate() {
-        by_stage.entry(s).or_default().push(c);
-    }
-    for (gap, &width) in routing.iter().enumerate() {
-        for offset in 0..width {
-            columns.push(Column::Routing { gap, offset });
-        }
-        let index = gap + 1;
-        if index < gaps {
-            gate_col_of_stage[index] = columns.len() as i32;
-            let wide = has_dff && index == 1;
-            for offset in 0..if wide { 2 } else { 1 } {
-                columns.push(Column::Gates { index: index - 1, offset });
-            }
-        }
-    }
-    columns.push(Column::Outputs);
-    let cols = columns.len() as i32;
-
-    let gates_per_col = by_stage.values().map(Vec::len).max().unwrap_or(0) as i32;
-    let sources = (netlist.inputs.len() + used_constants.len()) as i32;
-    // A net can only pass a gate column through a row that holds neither a gate nor
-    // one of its feeds, so every column needs as many free rows as there are nets
-    // crossing it: nets that span it, in either direction (a flip-flop's D input
-    // is fed back from the last level to the first column).
-    let span = |net: NetId| -> (i32, i32) {
-        let driver = match drivers[net] {
-            Driver::Cell(d) => stage[d] as i32,
-            _ => 0,
-        };
-        let sinks =
-            netlist.sinks_of(net).into_iter().map(|(c, _)| if c == usize::MAX { gaps as i32 } else { stage[c] as i32 });
-        sinks.chain(std::iter::once(driver)).fold((i32::MAX, i32::MIN), |(lo, hi), l| (lo.min(l), hi.max(l)))
-    };
-    let crossing_of_stage: Vec<i32> = (0..gaps)
-        .map(|s| {
-            (0..netlist.net_count)
-                .filter(|&n| {
-                    let (lo, hi) = span(n);
-                    lo < s as i32 && (s as i32) < hi
-                })
-                .count() as i32
+/// The placement after each of the `SWEEPS` barycenter sweeps, in order, with
+/// `routing[g]` routing columns in gap `g`: what [`Placer::searched`] chooses
+/// among before the local search.
+pub fn sweeps(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Vec<Placement>, String> {
+    let frame = Frame::new(netlist, style)?;
+    let mut rows = frame.initial_rows();
+    (0..SWEEPS)
+        .map(|_| {
+            frame.sweep(&mut rows, frame.base_rows);
+            frame.assemble(&rows, routing)
         })
-        .collect();
-    // The most rows any stage can take: three per gate (north feed, gate, south
-    // feed) and one per crossing net; the packed sweeps need fewer.
-    let crossing_rows =
-        (1..gaps).map(|s| 3 * by_stage.get(&s).map_or(0, Vec::len) as i32 + crossing_of_stage[s]).max().unwrap_or(0);
-    // One spare row at the bottom: two nets that have to swap rows need a third row to pass.
-    let mut rows = if style.packs() { crossing_rows + 1 } else { (4 * gates_per_col).max(crossing_rows + 1) }
-        .max(sources + 1)
-        .max(netlist.outputs.len() as i32 + 1)
-        .max(2);
+        .collect()
+}
 
-    // Rows: start in index order, then sweep by barycenter a few times.
-    let mut row_of_cell = vec![0i32; netlist.cells.len()];
-    // Packed: the sides each gate's pins were given when its rows were reserved.
-    let mut sides_of_cell: Vec<Vec<Edge>> = vec![Vec::new(); netlist.cells.len()];
-    let mut row_of_input: Vec<i32> = (0..netlist.inputs.len() as i32).collect();
-    let mut row_of_tie: Vec<i32> = (0..used_constants.len() as i32).map(|i| i + netlist.inputs.len() as i32).collect();
-    let mut row_of_output: Vec<i32> = (0..netlist.outputs.len() as i32).collect();
-    for cells in by_stage.values() {
-        for (i, &c) in cells.iter().enumerate() {
-            row_of_cell[c] = 1 + 4 * i as i32;
-        }
+/// What a placement is expected to cost, less being better: the footprint in
+/// blocks with every gap as wide as the channel estimate says (a routing column
+/// `NARROW` blocks per estimated column), then the summed vertical span of its
+/// nets over every gap, which tells apart placements the estimate cannot (the
+/// straighter the wires run, the easier the router's work).
+pub fn score(netlist: &Netlist, placement: &Placement) -> (i64, i64) {
+    let drivers = netlist.drivers().unwrap_or_default();
+    let mut estimate = Vec::with_capacity(placement.routing.len());
+    let mut spanned = 0i64;
+    for gap in 0..placement.routing.len() {
+        let spans = spans_in(netlist, placement, &drivers, gap);
+        spanned += spans.iter().map(|&(lo, hi)| i64::from(hi - lo)).sum::<i64>();
+        estimate.push(density(&spans, placement.rows).max(1));
     }
-    let driver_row = |net: NetId, row_of_cell: &[i32], row_of_input: &[i32], row_of_tie: &[i32]| -> f64 {
-        match drivers[net] {
-            Driver::Cell(d) => f64::from(row_of_cell[d]),
-            Driver::Input(i) => f64::from(row_of_input[i]),
-            Driver::Const(v) => {
-                let i = used_constants.iter().position(|&(_, value)| value == v).unwrap_or(0);
-                f64::from(row_of_tie.get(i).copied().unwrap_or(0))
+    let width: i64 = placement
+        .columns
+        .iter()
+        .zip(&placement.col_width)
+        .map(|(column, &w)| match *column {
+            Column::Routing { gap, offset: 0 } => i64::from(NARROW) * i64::from(estimate[gap]),
+            Column::Routing { .. } => 0,
+            _ => i64::from(w),
+        })
+        .sum();
+    let depth: i64 = placement.row_depth.iter().map(|&d| i64::from(d)).sum();
+    (width * depth, spanned)
+}
+
+/// A netlist placed in one style, its rows settled once, one of two ways: swept
+/// ([`Placer::swept`]) or searched ([`Placer::searched`]). The rows do not
+/// depend on the routing columns, so one placer serves every attempt at routing
+/// ([`Placer::place`] for any widths). The build routes the swept rows in every
+/// style and the searched rows where they promise a smaller footprint, and
+/// keeps the layout that measures best: the score is an estimate, and the
+/// router has the last word.
+pub struct Placer<'a> {
+    frame: Frame<'a>,
+    rows: Rows,
+    searched: bool,
+}
+
+impl<'a> Placer<'a> {
+    /// The rows after `SWEPT_SWEEPS` barycenter sweeps, the last kept, the row
+    /// count never falling from one sweep to the next: the placement of the
+    /// compaction stage, kept as it was so that a design never builds worse than
+    /// it did.
+    pub fn swept(netlist: &'a Netlist, style: Style) -> Result<Placer<'a>, String> {
+        let frame = Frame::new(netlist, style)?;
+        let mut rows = frame.initial_rows();
+        for _ in 0..SWEPT_SWEEPS {
+            let floor = rows.count;
+            frame.sweep(&mut rows, floor);
+        }
+        Ok(Placer { frame, rows, searched: false })
+    }
+
+    /// The rows after `SWEEPS` barycenter sweeps, the one that scores least
+    /// kept, then improved by a local search over the order of each column that
+    /// takes a swap or a move of one gate only when the score falls.
+    pub fn searched(netlist: &'a Netlist, style: Style) -> Result<Placer<'a>, String> {
+        let frame = Frame::new(netlist, style)?;
+        let mut rows = frame.initial_rows();
+        let mut best: Option<((i64, i64), Rows)> = None;
+        for _ in 0..SWEEPS {
+            frame.sweep(&mut rows, frame.base_rows);
+            let score = frame.score_of(&rows);
+            if best.as_ref().is_none_or(|(least, _)| score < *least) {
+                best = Some((score, rows.clone()));
             }
         }
-    };
-    for _ in 0..4 {
-        // Gates: by the average row of their drivers, the clock inverters in the
-        // middle of the flip-flop column.
-        // Packed, the first row below each stage.
+        let (score, rows) = best.expect("at least one sweep");
+        let rows = frame.improve(rows, score);
+        Ok(Placer { frame, rows, searched: true })
+    }
+
+    /// The placement with `routing[g]` routing columns in gap `g`.
+    pub fn place(&self, routing: &[i32]) -> Result<Placement, String> {
+        self.frame.assemble(&self.rows, routing)
+    }
+
+    pub fn style(&self) -> Style {
+        self.frame.style
+    }
+
+    /// How many gaps of routing columns the placement has.
+    pub fn gaps(&self) -> usize {
+        self.frame.gaps
+    }
+
+    /// How the rows were settled, as the design file records it.
+    pub fn rows_name(&self) -> &'static str {
+        if self.searched { "searched" } else { "swept" }
+    }
+
+    /// What the rows score (see [`score`]).
+    pub fn score(&self) -> (i64, i64) {
+        self.frame.score_of(&self.rows)
+    }
+}
+
+/// The rows of a placement: where every cell, input, constant and output sits,
+/// and which side each packed gate's pins were given when its rows were
+/// reserved. `count` is how many rows there are.
+#[derive(Clone, Debug)]
+struct Rows {
+    of_cell: Vec<i32>,
+    sides_of_cell: Vec<Vec<Edge>>,
+    of_input: Vec<i32>,
+    of_tie: Vec<i32>,
+    of_output: Vec<i32>,
+    count: i32,
+}
+
+/// What every ordering of a netlist's columns shares: its stages, the nets that
+/// cross each one, and the rows it needs however its gates are ordered.
+struct Frame<'a> {
+    netlist: &'a Netlist,
+    style: Style,
+    drivers: Vec<Driver>,
+    stage: Vec<usize>,
+    gaps: usize,
+    has_dff: bool,
+    inverters: Vec<usize>,
+    used_constants: Vec<(NetId, bool)>,
+    by_stage: BTreeMap<usize, Vec<usize>>,
+    crossing_of_stage: Vec<i32>,
+    /// The rows a placement has whatever the order of its gates: room for the
+    /// sources, the outputs, and the nets crossing the tallest stage, with one
+    /// spare row at the bottom (two nets that have to swap rows need a third row
+    /// to pass).
+    base_rows: i32,
+}
+
+impl<'a> Frame<'a> {
+    fn new(netlist: &'a Netlist, style: Style) -> Result<Frame<'a>, String> {
+        let drivers = netlist.drivers()?;
+        let level = levels(netlist, &drivers)?;
+        let has_dff = netlist.cells.iter().any(|c| c.is_dff());
+        let (stage, gaps) = stages(netlist, &level, &drivers, style);
+        let inverters = if style.packs() { clock_inverters(netlist, &drivers) } else { Vec::new() };
+        let used_constants: Vec<(NetId, bool)> =
+            netlist.constants.iter().copied().filter(|(net, _)| !netlist.sinks_of(*net).is_empty()).collect();
+        let mut by_stage: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for (c, &s) in stage.iter().enumerate() {
+            by_stage.entry(s).or_default().push(c);
+        }
+
+        let gates_per_col = by_stage.values().map(Vec::len).max().unwrap_or(0) as i32;
+        let sources = (netlist.inputs.len() + used_constants.len()) as i32;
+        // A net can only pass a gate column through a row that holds neither a gate nor
+        // one of its feeds, so every column needs as many free rows as there are nets
+        // crossing it: nets that span it, in either direction (a flip-flop's D input
+        // is fed back from the last level to the first column).
+        let span = |net: NetId| -> (i32, i32) {
+            let driver = match drivers[net] {
+                Driver::Cell(d) => stage[d] as i32,
+                _ => 0,
+            };
+            let sinks = netlist
+                .sinks_of(net)
+                .into_iter()
+                .map(|(c, _)| if c == usize::MAX { gaps as i32 } else { stage[c] as i32 });
+            sinks.chain(std::iter::once(driver)).fold((i32::MAX, i32::MIN), |(lo, hi), l| (lo.min(l), hi.max(l)))
+        };
+        let crossing_of_stage: Vec<i32> = (0..gaps)
+            .map(|s| {
+                (0..netlist.net_count)
+                    .filter(|&n| {
+                        let (lo, hi) = span(n);
+                        lo < s as i32 && (s as i32) < hi
+                    })
+                    .count() as i32
+            })
+            .collect();
+        // The most rows any stage can take: three per gate (north feed, gate, south
+        // feed) and one per crossing net; the packed sweeps need fewer.
+        let crossing_rows = (1..gaps)
+            .map(|s| 3 * by_stage.get(&s).map_or(0, Vec::len) as i32 + crossing_of_stage[s])
+            .max()
+            .unwrap_or(0);
+        let base_rows = if style.packs() { crossing_rows + 1 } else { (4 * gates_per_col).max(crossing_rows + 1) }
+            .max(sources + 1)
+            .max(netlist.outputs.len() as i32 + 1)
+            .max(2);
+        Ok(Frame {
+            netlist,
+            style,
+            drivers,
+            stage,
+            gaps,
+            has_dff,
+            inverters,
+            used_constants,
+            by_stage,
+            crossing_of_stage,
+            base_rows,
+        })
+    }
+
+    /// Everything in index order, the gates at the four-row pitch.
+    fn initial_rows(&self) -> Rows {
+        let netlist = self.netlist;
+        let mut of_cell = vec![0i32; netlist.cells.len()];
+        for cells in self.by_stage.values() {
+            for (i, &c) in cells.iter().enumerate() {
+                of_cell[c] = 1 + 4 * i as i32;
+            }
+        }
+        Rows {
+            of_cell,
+            sides_of_cell: vec![Vec::new(); netlist.cells.len()],
+            of_input: (0..netlist.inputs.len() as i32).collect(),
+            of_tie: (0..self.used_constants.len() as i32).map(|i| i + netlist.inputs.len() as i32).collect(),
+            of_output: (0..netlist.outputs.len() as i32).collect(),
+            count: self.base_rows,
+        }
+    }
+
+    /// The row a net comes from.
+    fn driver_row(&self, net: NetId, rows: &Rows) -> f64 {
+        match self.drivers[net] {
+            Driver::Cell(d) => f64::from(rows.of_cell[d]),
+            Driver::Input(i) => f64::from(rows.of_input[i]),
+            Driver::Const(v) => {
+                let i = self.used_constants.iter().position(|&(_, value)| value == v).unwrap_or(0);
+                f64::from(rows.of_tie.get(i).copied().unwrap_or(0))
+            }
+        }
+    }
+
+    /// One barycenter sweep: every stage in the order of its gates' average
+    /// driver row (the clock inverters in the middle of the flip-flop column).
+    fn sweep(&self, rows: &mut Rows, floor: i32) {
+        self.lay(rows, |s, rows| self.barycenter_order(s, rows), floor);
+    }
+
+    fn barycenter_order(&self, s: usize, rows: &Rows) -> Vec<usize> {
+        let mut order: Vec<(f64, usize)> = self.by_stage[&s]
+            .iter()
+            .map(|&c| {
+                let from: Vec<f64> = self.netlist.cells[c].inputs.iter().map(|&n| self.driver_row(n, rows)).collect();
+                (from.iter().sum::<f64>() / from.len().max(1) as f64, c)
+            })
+            .collect();
+        order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
+        let mut order: Vec<usize> = order.iter().map(|(_, c)| *c).collect();
+        in_the_middle(&mut order, &self.inverters);
+        order
+    }
+
+    /// The order of each stage's gates in `rows`, top down.
+    fn orders_of(&self, rows: &Rows) -> BTreeMap<usize, Vec<usize>> {
+        self.by_stage
+            .iter()
+            .map(|(&s, cells)| {
+                let mut order = cells.clone();
+                order.sort_by_key(|&c| (rows.of_cell[c], c));
+                (s, order)
+            })
+            .collect()
+    }
+
+    /// Lays every stage in the order `order_of` gives it, from the rows as they
+    /// stand (the stages before it already laid in this pass), then the outputs
+    /// after their drivers and the sources after their sinks.
+    fn lay(&self, rows: &mut Rows, order_of: impl Fn(usize, &Rows) -> Vec<usize>, floor: i32) {
+        let netlist = self.netlist;
+        // Packed: the first row below each stage.
         let mut bottoms: Vec<(usize, i32)> = Vec::new();
-        for (&s, cells) in &by_stage {
-            let mut order: Vec<(f64, usize)> = cells
-                .iter()
-                .map(|&c| {
-                    let rows: Vec<f64> = netlist.cells[c]
-                        .inputs
-                        .iter()
-                        .map(|&n| driver_row(n, &row_of_cell, &row_of_input, &row_of_tie))
-                        .collect();
-                    (rows.iter().sum::<f64>() / rows.len().max(1) as f64, c)
-                })
-                .collect();
-            order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
-            let mut order: Vec<usize> = order.iter().map(|(_, c)| *c).collect();
-            in_the_middle(&mut order, &inverters);
-            if style.packs() {
+        for &s in self.by_stage.keys() {
+            let order = order_of(s, rows);
+            if self.style.packs() {
                 let from: Vec<Vec<f64>> = order
                     .iter()
-                    .map(|&c| {
-                        netlist.cells[c]
-                            .inputs
-                            .iter()
-                            .map(|&n| driver_row(n, &row_of_cell, &row_of_input, &row_of_tie))
-                            .collect()
-                    })
+                    .map(|&c| netlist.cells[c].inputs.iter().map(|&n| self.driver_row(n, rows)).collect())
                     .collect();
-                let crossing = crossing_of_stage[s];
+                let crossing = self.crossing_of_stage[s];
                 let every = if crossing > 0 { (order.len() as i32 + crossing - 1) / crossing } else { i32::MAX };
-                let bottom = pack_stage(netlist, &order, &from, every, &mut row_of_cell, &mut sides_of_cell);
+                let bottom = pack_stage(netlist, &order, &from, every, &mut rows.of_cell, &mut rows.sides_of_cell);
                 bottoms.push((s, bottom));
-                rows = rows.max(bottom + 1);
             } else {
                 for (i, &c) in order.iter().enumerate() {
-                    row_of_cell[c] = 1 + 4 * i as i32;
+                    rows.of_cell[c] = 1 + 4 * i as i32;
                 }
             }
         }
-        if style == Style::Stretched {
+        // At least `floor` rows (the swept rows never lose one), at least what
+        // every order needs, and one below the lowest stage.
+        rows.count = floor.max(self.base_rows).max(bottoms.iter().map(|&(_, bottom)| bottom + 1).max().unwrap_or(0));
+        if self.style == Style::Stretched {
             // Every stage shorter than the tallest is stretched over the
             // tallest's rows, uniformly: differences between rows only grow,
             // so no gate lands on another's row or feed.
             let tallest = bottoms.iter().map(|&(_, bottom)| bottom).max().unwrap_or(0);
             for &(s, bottom) in bottoms.iter().filter(|&&(_, bottom)| bottom > 1 && bottom < tallest) {
-                for &c in &by_stage[&s] {
-                    row_of_cell[c] = row_of_cell[c] * (tallest - 1) / (bottom - 1);
+                for &c in &self.by_stage[&s] {
+                    rows.of_cell[c] = rows.of_cell[c] * (tallest - 1) / (bottom - 1);
                 }
             }
         }
         // Outputs: in the order of their drivers' rows and each as near its
         // driver's row as the ones above allow, so that most output nets run
         // straight instead of all converging on the top rows.
-        let mut output_order: Vec<(f64, usize)> = netlist
-            .outputs
-            .iter()
-            .enumerate()
-            .map(|(o, p)| (driver_row(p.net, &row_of_cell, &row_of_input, &row_of_tie), o))
-            .collect();
+        let mut output_order: Vec<(f64, usize)> =
+            netlist.outputs.iter().enumerate().map(|(o, p)| (self.driver_row(p.net, rows), o)).collect();
         output_order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
         let targets: Vec<f64> = output_order.iter().map(|(t, _)| *t).collect();
-        for (row, &(_, o)) in spread(&targets, rows).into_iter().zip(&output_order) {
-            row_of_output[o] = row;
+        for (row, &(_, o)) in spread(&targets, rows.count).into_iter().zip(&output_order) {
+            rows.of_output[o] = row;
         }
         // Inputs and constants: by the average row of what they feed.
         let sink_row = |net: NetId| -> f64 {
             let sinks = netlist.sinks_of(net);
-            let rows: Vec<f64> = sinks
+            let sum: f64 = sinks
                 .iter()
-                .map(|&(c, o)| if c == usize::MAX { f64::from(row_of_output[o]) } else { f64::from(row_of_cell[c]) })
-                .collect();
-            rows.iter().sum::<f64>() / rows.len().max(1) as f64
+                .map(|&(c, o)| if c == usize::MAX { f64::from(rows.of_output[o]) } else { f64::from(rows.of_cell[c]) })
+                .sum();
+            sum / sinks.len().max(1) as f64
         };
         let mut order: Vec<(f64, usize, bool)> =
             netlist.inputs.iter().enumerate().map(|(i, p)| (sink_row(p.net), i, false)).collect();
-        order.extend(used_constants.iter().enumerate().map(|(i, &(net, _))| (sink_row(net), i, true)));
+        order.extend(self.used_constants.iter().enumerate().map(|(i, &(net, _))| (sink_row(net), i, true)));
         order.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
         let targets: Vec<f64> = order.iter().map(|(t, _, _)| *t).collect();
-        for (row, &(_, i, is_tie)) in spread(&targets, rows).into_iter().zip(&order) {
+        for (row, &(_, i, is_tie)) in spread(&targets, rows.count).into_iter().zip(&order) {
             if is_tie {
-                row_of_tie[i] = row;
+                rows.of_tie[i] = row;
             } else {
-                row_of_input[i] = row;
+                rows.of_input[i] = row;
             }
         }
     }
-    let gates: Vec<Cell> = (0..netlist.cells.len()).map(|c| (gate_col_of_stage[stage[c]], row_of_cell[c])).collect();
-    let widths: Vec<i32> = netlist.cells.iter().map(|c| if c.is_dff() { 2 } else { 1 }).collect();
-    let inputs: Vec<Cell> = row_of_input.iter().map(|&r| (0, r)).collect();
-    let ties: Vec<(NetId, bool, Cell)> =
-        used_constants.iter().zip(&row_of_tie).map(|(&(net, value), &r)| (net, value, (0, r))).collect();
-    let outputs: Vec<Cell> = row_of_output.iter().map(|&r| (cols - 1, r)).collect();
 
-    // Pin edges: give each input net the side closest to where it comes from
-    // (packed, the sides its rows were reserved for). A flip-flop's sides are
-    // fixed: D on the west, the clock on the north.
-    let mut pin_edges = Vec::new();
-    for (c, cell) in netlist.cells.iter().enumerate() {
-        if cell.is_dff() {
-            pin_edges.push(vec![Edge::West, Edge::North]);
-            continue;
-        }
-        if style.packs() {
-            pin_edges.push(sides_of_cell[c].clone());
-            continue;
-        }
-        let row = f64::from(gates[c].1);
-        let from: Vec<f64> =
-            cell.inputs.iter().map(|&n| driver_row(n, &row_of_cell, &row_of_input, &row_of_tie)).collect();
-        pin_edges.push(assign_sides(&from, row, row, 0.0, &vec![None; from.len()]));
+    /// What `rows` scores (the score does not depend on the routing columns).
+    fn score_of(&self, rows: &Rows) -> (i64, i64) {
+        let placement = self.assemble(rows, &vec![1; self.gaps]).expect("one routing column a gap is valid");
+        score(self.netlist, &placement)
     }
 
-    Ok(Placement {
-        cols,
-        rows,
-        // Routing columns take the narrow wiring tiles; gates, sources and outputs a full cell.
-        col_width: columns.iter().map(|c| if matches!(c, Column::Routing { .. }) { NARROW } else { PITCH }).collect(),
-        // Rows take the shallow tiles, but a row a flip-flop sits in, which is a cell deep.
-        row_depth: (0..rows)
-            .map(|r| {
-                let flip_flop = netlist.cells.iter().zip(&gates).any(|(cell, &(_, row))| cell.is_dff() && row == r);
-                if flip_flop { PITCH } else { SHALLOW }
-            })
-            .collect(),
-        gates,
-        widths,
-        pin_edges,
-        inputs,
-        outputs,
-        ties,
-        routing: routing.to_vec(),
-        columns,
-        stages: stage,
-    })
+    /// The local search: every swap of two gates of a stage and every move of
+    /// one gate to another place in its stage, laid out from the rows as they
+    /// stand and kept when the score falls, stage after stage, until a pass
+    /// keeps nothing or `IMPROVE_PASSES` are done.
+    fn improve(&self, rows: Rows, score: (i64, i64)) -> Rows {
+        let mut best = rows;
+        let mut least = score;
+        let mut orders = self.orders_of(&best);
+        for _ in 0..IMPROVE_PASSES {
+            let mut improved = false;
+            for &s in self.by_stage.keys() {
+                let order = orders[&s].clone();
+                let n = order.len();
+                let mut candidates: Vec<Vec<usize>> = Vec::new();
+                for i in 0..n {
+                    for j in i + 1..n {
+                        let mut swapped = order.clone();
+                        swapped.swap(i, j);
+                        candidates.push(swapped);
+                    }
+                    for j in 0..n {
+                        // A move next door is the swap above.
+                        if i == j || j + 1 == i || i + 1 == j {
+                            continue;
+                        }
+                        let mut moved = order.clone();
+                        let gate = moved.remove(i);
+                        moved.insert(j, gate);
+                        candidates.push(moved);
+                    }
+                }
+                for candidate in candidates {
+                    let mut trial_orders = orders.clone();
+                    trial_orders.insert(s, candidate);
+                    let mut trial = best.clone();
+                    self.lay(&mut trial, |st, _| trial_orders[&st].clone(), self.base_rows);
+                    let score = self.score_of(&trial);
+                    if score < least {
+                        best = trial;
+                        least = score;
+                        orders = trial_orders;
+                        improved = true;
+                    }
+                }
+            }
+            if !improved {
+                break;
+            }
+        }
+        best
+    }
+
+    /// The placement of `rows` with `routing[g]` routing columns in gap `g`.
+    fn assemble(&self, rows: &Rows, routing: &[i32]) -> Result<Placement, String> {
+        let netlist = self.netlist;
+        let gaps = self.gaps;
+        if routing.len() != gaps {
+            return Err(format!("the placement has {gaps} gaps but {} routing widths were given", routing.len()));
+        }
+        if routing.iter().any(|&r| r < 1) {
+            return Err("every gap needs at least one routing column".to_string());
+        }
+        // Columns: sources, routing, [flip-flops (two cells), routing,] gates, routing,
+        // ..., gates, routing, outputs.
+        let mut columns = vec![Column::Sources];
+        let mut gate_col_of_stage = vec![0i32; gaps];
+        for (gap, &width) in routing.iter().enumerate() {
+            for offset in 0..width {
+                columns.push(Column::Routing { gap, offset });
+            }
+            let index = gap + 1;
+            if index < gaps {
+                gate_col_of_stage[index] = columns.len() as i32;
+                let wide = self.has_dff && index == 1;
+                for offset in 0..if wide { 2 } else { 1 } {
+                    columns.push(Column::Gates { index: index - 1, offset });
+                }
+            }
+        }
+        columns.push(Column::Outputs);
+        let cols = columns.len() as i32;
+
+        let gates: Vec<Cell> =
+            (0..netlist.cells.len()).map(|c| (gate_col_of_stage[self.stage[c]], rows.of_cell[c])).collect();
+        let widths: Vec<i32> = netlist.cells.iter().map(|c| if c.is_dff() { 2 } else { 1 }).collect();
+        let inputs: Vec<Cell> = rows.of_input.iter().map(|&r| (0, r)).collect();
+        let ties: Vec<(NetId, bool, Cell)> =
+            self.used_constants.iter().zip(&rows.of_tie).map(|(&(net, value), &r)| (net, value, (0, r))).collect();
+        let outputs: Vec<Cell> = rows.of_output.iter().map(|&r| (cols - 1, r)).collect();
+
+        // Pin edges: give each input net the side closest to where it comes from
+        // (packed, the sides its rows were reserved for). A flip-flop's sides are
+        // fixed: D on the west, the clock on the north.
+        let mut pin_edges = Vec::new();
+        for (c, cell) in netlist.cells.iter().enumerate() {
+            if cell.is_dff() {
+                pin_edges.push(vec![Edge::West, Edge::North]);
+                continue;
+            }
+            if self.style.packs() {
+                pin_edges.push(rows.sides_of_cell[c].clone());
+                continue;
+            }
+            let row = f64::from(gates[c].1);
+            let from: Vec<f64> = cell.inputs.iter().map(|&n| self.driver_row(n, rows)).collect();
+            pin_edges.push(assign_sides(&from, row, row, 0.0, &vec![None; from.len()]));
+        }
+
+        Ok(Placement {
+            cols,
+            rows: rows.count,
+            // Routing columns take the narrow wiring tiles; gates, sources and outputs a full cell.
+            col_width: columns
+                .iter()
+                .map(|c| if matches!(c, Column::Routing { .. }) { NARROW } else { PITCH })
+                .collect(),
+            // Rows take the shallow tiles, but a row a flip-flop sits in, which is a cell deep.
+            row_depth: (0..rows.count)
+                .map(|r| {
+                    let flip_flop = netlist.cells.iter().zip(&gates).any(|(cell, &(_, row))| cell.is_dff() && row == r);
+                    if flip_flop { PITCH } else { SHALLOW }
+                })
+                .collect(),
+            gates,
+            widths,
+            pin_edges,
+            inputs,
+            outputs,
+            ties,
+            routing: routing.to_vec(),
+            columns,
+            stages: self.stage.clone(),
+        })
+    }
 }
 
 /// A first guess at the routing columns each gap needs: in a gap, every net
@@ -478,61 +749,76 @@ pub fn place(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Placeme
 /// spans overlap cannot share a column. The most spans over any one row is
 /// therefore a lower bound on the columns, the channel density of the gap.
 pub fn estimate_routing(netlist: &Netlist, placement: &Placement) -> Vec<i32> {
-    let gaps = placement.routing.len();
     let drivers = netlist.drivers().unwrap_or_default();
-    let mut estimate = vec![1i32; gaps];
-    for (gap, slot) in estimate.iter_mut().enumerate() {
-        let mut spans: Vec<(i32, i32)> = Vec::new();
-        for (net, &driver) in drivers.iter().enumerate() {
-            let (driver_stage, driver_row) = match driver {
-                Driver::Cell(c) => (placement.stages[c], placement.gates[c].1),
-                Driver::Input(i) => (0, placement.inputs[i].1),
-                Driver::Const(_) => match placement.ties.iter().find(|t| t.0 == net) {
-                    Some(t) => (0, t.2.1),
-                    None => continue,
-                },
-            };
-            // The rows this net arrives at in the stage east of the gap; a net
-            // whose sink is in its driver's own stage (a clock inverter's) turns
-            // round in the gap east of that stage.
-            let mut rows: Vec<i32> = Vec::new();
-            for (c, pin) in netlist.sinks_of(net) {
-                let (sink_stage, row) = if c == usize::MAX {
-                    (gaps, placement.outputs[pin].1)
-                } else {
-                    let (_, row) = placement.gates[c];
-                    let row = match placement.pin_edges[c][pin] {
-                        Edge::North => row - 1,
-                        Edge::South => row + 1,
-                        _ => row,
-                    };
-                    (placement.stages[c], row)
+    (0..placement.routing.len())
+        .map(|gap| density(&spans_in(netlist, placement, &drivers, gap), placement.rows).max(1))
+        .collect()
+}
+
+/// The rows each net changes between in gap `gap`, lowest to highest, for the
+/// nets that change rows there at all.
+fn spans_in(netlist: &Netlist, placement: &Placement, drivers: &[Driver], gap: usize) -> Vec<(i32, i32)> {
+    let gaps = placement.routing.len();
+    let mut spans: Vec<(i32, i32)> = Vec::new();
+    for (net, &driver) in drivers.iter().enumerate() {
+        let (driver_stage, driver_row) = match driver {
+            Driver::Cell(c) => (placement.stages[c], placement.gates[c].1),
+            Driver::Input(i) => (0, placement.inputs[i].1),
+            Driver::Const(_) => match placement.ties.iter().find(|t| t.0 == net) {
+                Some(t) => (0, t.2.1),
+                None => continue,
+            },
+        };
+        // The rows this net arrives at in the stage east of the gap; a net
+        // whose sink is in its driver's own stage (a clock inverter's) turns
+        // round in the gap east of that stage.
+        let mut rows: Vec<i32> = Vec::new();
+        for (c, pin) in netlist.sinks_of(net) {
+            let (sink_stage, row) = if c == usize::MAX {
+                (gaps, placement.outputs[pin].1)
+            } else {
+                let (_, row) = placement.gates[c];
+                let row = match placement.pin_edges[c][pin] {
+                    Edge::North => row - 1,
+                    Edge::South => row + 1,
+                    _ => row,
                 };
-                let through = if sink_stage == driver_stage { sink_stage } else { sink_stage - 1 };
-                if through == gap {
-                    rows.push(row);
-                }
-            }
-            if rows.is_empty() {
-                continue;
-            }
-            // A net driven after this gap (the D feedback of a flip-flop) comes back
-            // along some row and must reach its sink's row somewhere: count it here.
-            rows.push(driver_row);
-            let lo = *rows.iter().min().expect("non-empty");
-            let hi = *rows.iter().max().expect("non-empty");
-            if lo < hi {
-                spans.push((lo, hi));
+                (placement.stages[c], row)
+            };
+            let through = if sink_stage == driver_stage { sink_stage } else { sink_stage - 1 };
+            if through == gap {
+                rows.push(row);
             }
         }
-        let mut density = 0;
-        for row in 0..placement.rows {
-            let here = spans.iter().filter(|(lo, hi)| *lo <= row && row <= *hi).count() as i32;
-            density = density.max(here);
+        if rows.is_empty() {
+            continue;
         }
-        *slot = density.max(1);
+        // A net driven after this gap (the D feedback of a flip-flop) comes back
+        // along some row and must reach its sink's row somewhere: count it here.
+        rows.push(driver_row);
+        let lo = *rows.iter().min().expect("non-empty");
+        let hi = *rows.iter().max().expect("non-empty");
+        if lo < hi {
+            spans.push((lo, hi));
+        }
     }
-    estimate
+    spans
+}
+
+/// The most spans over any one of `rows` rows.
+fn density(spans: &[(i32, i32)], rows: i32) -> i32 {
+    let mut change = vec![0i32; rows as usize + 1];
+    for &(lo, hi) in spans {
+        change[lo.clamp(0, rows) as usize] += 1;
+        change[(hi + 1).clamp(0, rows) as usize] -= 1;
+    }
+    let mut here = 0;
+    let mut most = 0;
+    for &c in &change[..rows as usize] {
+        here += c;
+        most = most.max(here);
+    }
+    most
 }
 
 /// Moves the cells of `middle` that are in `order` to its middle, keeping the
@@ -1021,7 +1307,11 @@ mod tests {
                 let again = place(&netlist, &routing, style).unwrap();
                 assert_eq!(kept.gates, again.gates, "seed {seed} {}: placed differently twice", style.name());
                 let kept = score(&netlist, &kept);
-                assert!(kept <= best, "seed {seed} {}: scored {kept:?} against the best sweep's {best:?}", style.name());
+                assert!(
+                    kept <= best,
+                    "seed {seed} {}: scored {kept:?} against the best sweep's {best:?}",
+                    style.name()
+                );
                 if kept < best {
                     improved += 1;
                 }
