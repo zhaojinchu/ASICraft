@@ -1441,6 +1441,89 @@ mod tests {
         assert_eq!(outputs(&built.design, r#"[{},{},{},{}]"#), r#"[{"q":0},{"q":1},{"q":0},{"q":1}]"#);
     }
 
+    /// A placement's footprint floor is the least footprint any layout of it
+    /// can have: its width, which routing adds no column to, by the depth down
+    /// to the lowest row a gate, feed, input, output or constant sits in; the
+    /// router may only lay rows below that. Widening a gap or deepening a row
+    /// before the next attempt only raises it, so a floor above the footprint
+    /// already kept says the attempt cannot win.
+    #[test]
+    fn the_footprint_floor_of_a_placement_never_exceeds_the_footprint_it_routes_to() {
+        let library = Library::builtin().unwrap();
+        let mut exact = 0;
+        for seed in 200..212u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let (gates, inputs, flip_flops) = (3 + rng.below(10), 1 + rng.below(4), rng.below(3));
+            let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
+            for style in Style::ALL {
+                let placer = Placer::swept(&netlist, style).unwrap();
+                let first = placer.place(&vec![1; placer.gaps()]).unwrap().footprint_floor();
+                let (routed, routing) = place_and_route(&library, &netlist, style).unwrap();
+                let last = placer.place(&routing).unwrap().footprint_floor();
+                let (sx, _, sz) = routed.layout.realize(&library, &netlist).unwrap().world.size();
+                assert!(first.0 <= last.0 && first.1 <= last.1, "seed {seed} {style:?}: {first:?} then {last:?}");
+                assert_eq!(last.0, sx, "seed {seed} {style:?}: the width is known before routing");
+                assert!(last.1 <= sz, "seed {seed} {style:?}: floor {last:?}, routed {sx} x {sz}");
+                if last.1 == sz {
+                    exact += 1;
+                }
+            }
+        }
+        assert!(exact > 0, "the floor never met the routed depth");
+    }
+
+    /// The candidates are laid out in the order they can win (the packing
+    /// style's searched rows, then its swept rows, pitch4 last), and one whose
+    /// footprint floor exceeds the footprint already kept is given up on, since
+    /// it can only lose: pitch4 is then not laid out at all for most designs.
+    /// What the build keeps is what laying every candidate out to completion
+    /// and picking as DESIGN 4.3 step 7 says would keep, ties to the earlier
+    /// style as before, so no layout changes.
+    #[test]
+    fn the_candidates_laid_out_in_the_order_they_can_win_keep_what_laying_them_all_out_keeps() {
+        let library = Library::builtin().unwrap();
+        let mut given_up = 0;
+        for seed in 300..306u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let gates = 2 + rng.below(10);
+            let netlist = crate::pnrtest::random_netlist(&mut rng, gates);
+            let lamp_names: Vec<String> = netlist.outputs.iter().map(|p| p.name.clone()).collect();
+            // Every candidate to completion, in the order the styles are tried.
+            let mut all: Vec<Candidate> = Vec::new();
+            for &style in COMBINATIONAL_STYLES {
+                let mut placers = vec![Placer::swept(&netlist, style).unwrap()];
+                if style.packs() {
+                    let searched = Placer::searched(&netlist, style).unwrap();
+                    if searched.score().0 < placers[0].score().0 {
+                        placers.push(searched);
+                    }
+                }
+                for placer in &placers {
+                    all.extend(lay_out(&library, &netlist, placer, &lamp_names, None, &mut |_| {}).unwrap());
+                }
+            }
+            let expected = all.iter().filter(|c| c.problems.is_empty()).min_by_key(|c| c.rank(false)).unwrap();
+            let mut lines: Vec<String> = Vec::new();
+            let (built, problems) =
+                build_unchecked_logged(&netlist, "random", Break::None, &mut |l| lines.push(l.to_string())).unwrap();
+            assert!(problems.is_empty(), "seed {seed}: {problems:?}");
+            let (sx, sy, sz) = expected.world.size();
+            assert_eq!(
+                (built.design.placement.as_str(), built.design.rows.as_str(), built.design.size),
+                (expected.style.name(), expected.rows, [sx, sy, sz]),
+                "seed {seed}: {lines:#?}"
+            );
+            let at = |prefix: &str| lines.iter().position(|l| l.starts_with(prefix));
+            if let (Some(packed), Some(pitch4)) = (at("packed"), at("pitch4")) {
+                assert!(packed < pitch4, "seed {seed}: pitch4 was laid out before the packing style: {lines:#?}");
+            }
+            if lines.iter().any(|l| l.contains(" blocks against the ") && l.contains(" kept")) {
+                given_up += 1;
+            }
+        }
+        assert!(given_up > 0, "no candidate was ever given up on");
+    }
+
     /// Where signals keep dying in shallow rows, the build makes a cell deep
     /// the rows that hold a fair share of the tiles they could not take a
     /// repeater in: a quarter of the most or more.
