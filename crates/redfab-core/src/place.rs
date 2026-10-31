@@ -122,6 +122,24 @@ pub struct Placement {
 }
 
 impl Placement {
+    /// The least footprint any layout of this placement can have, in blocks
+    /// (width, depth): every column its width, since routing adds no column,
+    /// by the depth down to the lowest row a gate, its south feed, an input,
+    /// an output or a constant sits in, since routing only lays rows below.
+    /// Widening a gap or deepening a row for the next attempt only raises it.
+    pub fn footprint_floor(&self) -> (i32, i32) {
+        let width: i32 = self.col_width[..self.cols as usize].iter().sum();
+        let gate_rows = self
+            .gates
+            .iter()
+            .zip(&self.pin_edges)
+            .map(|(cell, edges)| cell.1 + i32::from(edges.contains(&Edge::South)));
+        let fixed_rows = self.inputs.iter().chain(&self.outputs).map(|c| c.1).chain(self.ties.iter().map(|t| t.2.1));
+        let lowest = gate_rows.chain(fixed_rows).max().unwrap_or(-1);
+        let depth: i32 = self.row_depth[..(lowest + 1) as usize].iter().sum();
+        (width, depth)
+    }
+
     pub fn is_free(&self, cell: Cell) -> bool {
         cell.0 >= 0
             && cell.0 < self.cols

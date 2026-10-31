@@ -226,10 +226,14 @@ pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(B
 /// as under the four-row pitch; for a clocked design the least footprint times
 /// clock period, then the shorter period (counter4 stretched measured half the
 /// footprint of the four-row pitch for a period 6 % longer, negedge packed 6 %
-/// less footprint for a period 45 % longer). The styles are tried in a fixed order and ties
-/// go to the earlier, so the same netlist always builds the same. The burnout
-/// budget is measured once, on the winner (a clocked design's clock slows until
-/// it is met).
+/// less footprint for a period 45 % longer). The pick's order is fixed and ties
+/// go to the earlier (the styles' order, the swept rows before the searched), so
+/// the same netlist always builds the same. The candidates are laid out in the
+/// order they can win, though: the packing style's searched rows, then its
+/// swept rows, pitch4 last, and for a combinational design one whose footprint
+/// floor already exceeds the footprint kept is given up on, since it can only
+/// lose; so pitch4 is seldom laid out at all. The burnout budget is measured
+/// once, on the winner (a clocked design's clock slows until it is met).
 pub fn build_unchecked_logged(
     netlist: &Netlist,
     name: &str,
@@ -241,46 +245,61 @@ pub fn build_unchecked_logged(
     let lamp_names: Vec<String> = netlist.outputs.iter().map(|p| p.name.clone()).collect();
     let clocked = netlist.cells.iter().any(|c| c.is_dff());
     let styles: &[Style] = if clocked { CLOCKED_STYLES } else { COMBINATIONAL_STYLES };
-    let mut candidates: Vec<Candidate> = Vec::new();
-    let mut failures: Vec<String> = Vec::new();
-    for &style in styles {
-        // The swept rows in every style; the searched rows in the packing style,
-        // where the width is decided, when they promise a smaller footprint.
+    // The swept rows in every style; the searched rows in the packing style,
+    // where the width is decided, when they promise a smaller footprint. Each
+    // with its place in the pick's order.
+    let mut placers: Vec<(Placer, (usize, usize))> = Vec::new();
+    for (i, &style) in styles.iter().enumerate() {
         let swept = Placer::swept(netlist, style)?;
-        let mut placers = vec![swept];
         if style.packs() {
             let searched = Placer::searched(netlist, style)?;
-            let (promised, kept) = (searched.score().0, placers[0].score().0);
+            let (promised, kept) = (searched.score().0, swept.score().0);
             if promised < kept {
                 log(&format!("the searched rows promise {promised} blocks against the swept rows' {kept}"));
-                placers.push(searched);
+                placers.push((searched, (i, 1)));
             }
         }
-        for placer in &placers {
-            let name = format!("{}{}", style.name(), if placer.rows_name() == "searched" { ", searched" } else { "" });
-            if styles.len() > 1 || placers.len() > 1 {
-                log(&format!("{name} placement"));
+        placers.push((swept, (i, 0)));
+    }
+    // Laid out in the order they can win: the searched rows first, pitch4 last.
+    placers.sort_by_key(|(placer, _)| placer.style() == Style::Pitch4);
+    let mut candidates: Vec<(Candidate, (usize, usize))> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    let mut pitch4_given_up = false;
+    for (placer, precedence) in &placers {
+        let name = candidate_name(placer);
+        if placers.len() > 1 {
+            log(&format!("{name} placement"));
+        }
+        // The footprint kept so far bounds a combinational candidate (a clocked
+        // design's pick multiplies by the period, which the footprint does not bound).
+        let bound = if clocked {
+            None
+        } else {
+            candidates.iter().filter(|(c, _)| c.problems.is_empty()).map(|(c, _)| c.rank(false).0).min()
+        };
+        match lay_out(&library, netlist, placer, &lamp_names, bound, log) {
+            Ok(Some(candidate)) => {
+                log(&format!("  {name}: {}", candidate.summary()));
+                candidates.push((candidate, *precedence));
             }
-            match lay_out(&library, netlist, placer, &lamp_names, log) {
-                Ok(candidate) => {
-                    log(&format!("  {name}: {}", candidate.summary()));
-                    candidates.push(candidate);
-                }
-                Err(e) => {
-                    log(&format!("  {name} placement failed: {e}"));
-                    failures.push(e);
-                }
+            Ok(None) => pitch4_given_up |= placer.style() == Style::Pitch4,
+            Err(e) => {
+                log(&format!("  {name} placement failed: {e}"));
+                failures.push(e);
             }
         }
     }
     if candidates.is_empty() {
         return Err(failures.swap_remove(0));
     }
-    // The pick, among the layouts that pass the checks (any at all when none does).
+    // The pick, in its own order, among the layouts that pass the checks (any at all when none does).
+    candidates.sort_by_key(|&(_, precedence)| precedence);
+    let mut candidates: Vec<Candidate> = candidates.into_iter().map(|(c, _)| c).collect();
     let eligible: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].problems.is_empty()).collect();
     let chosen = eligible.iter().copied().min_by_key(|&i| candidates[i].rank(clocked)).unwrap_or(0);
     let mut chosen = candidates.swap_remove(chosen);
-    if styles.len() > 1 || candidates.len() > 1 {
+    if placers.len() > 1 {
         log(&format!("keeping the {} placement, {} rows", chosen.style.name(), chosen.rows));
     }
 
@@ -299,24 +318,38 @@ pub fn build_unchecked_logged(
 
     let (mut design, mut problems) = finish(&chosen, netlist, name, log)?;
     // A packed layout whose inputs must change less often than under the
-    // four-row pitch is not kept over it.
-    if !clocked
-        && chosen.style != Style::Pitch4
-        && design.timing.input_spacing > crate::timing::MIN_INPUT_SPACING
-        && let Some(i) = candidates.iter().position(|c| c.style == Style::Pitch4 && c.problems.is_empty())
-    {
-        let pitch4 = candidates.swap_remove(i);
-        let (other, other_problems) = finish(&pitch4, netlist, name, log)?;
-        if other.timing.input_spacing < design.timing.input_spacing {
+    // four-row pitch is not kept over it: pitch4 is laid out now if its
+    // footprint made it not worth laying out before.
+    if !clocked && chosen.style != Style::Pitch4 && design.timing.input_spacing > crate::timing::MIN_INPUT_SPACING {
+        if pitch4_given_up {
             log(&format!(
-                "keeping the pitch4 placement after all: its inputs may change every {} ticks, the {} placement's every {}",
-                other.timing.input_spacing,
+                "pitch4 placement after all: the {} placement's inputs may change only every {} ticks",
                 chosen.style.name(),
                 design.timing.input_spacing
             ));
-            chosen = pitch4;
-            design = other;
-            problems = other_problems;
+            match lay_out(&library, netlist, &Placer::swept(netlist, Style::Pitch4)?, &lamp_names, None, log) {
+                Ok(Some(candidate)) => {
+                    log(&format!("  pitch4: {}", candidate.summary()));
+                    candidates.push(candidate);
+                }
+                Ok(None) => unreachable!("nothing is given up on without a bound"),
+                Err(e) => log(&format!("  pitch4 placement failed: {e}")),
+            }
+        }
+        if let Some(i) = candidates.iter().position(|c| c.style == Style::Pitch4 && c.problems.is_empty()) {
+            let pitch4 = candidates.swap_remove(i);
+            let (other, other_problems) = finish(&pitch4, netlist, name, log)?;
+            if other.timing.input_spacing < design.timing.input_spacing {
+                log(&format!(
+                    "keeping the pitch4 placement after all: its inputs may change every {} ticks, the {} placement's every {}",
+                    other.timing.input_spacing,
+                    chosen.style.name(),
+                    design.timing.input_spacing
+                ));
+                chosen = pitch4;
+                design = other;
+                problems = other_problems;
+            }
         }
     }
     let realized = &chosen.realized;
@@ -428,15 +461,37 @@ impl Candidate {
 /// Places and routes `netlist` as `placer` has it, then realizes, checks and
 /// times the layout, lengthening the D path of any flip-flop whose hold is
 /// violated (a repeater's delay up, or a repeater into a wire) and going again.
+/// The name a candidate's log lines carry: its style, and whether its rows are
+/// the searched ones.
+fn candidate_name(placer: &Placer) -> String {
+    format!("{}{}", placer.style().name(), if placer.rows_name() == "searched" { ", searched" } else { "" })
+}
+
+/// Places, routes, checks and times the rows `placer` settled on. `bound` is a
+/// footprint in blocks already kept: a placement whose floor exceeds it can
+/// only lose the pick, so it is given up on and `None` returned.
 fn lay_out(
     library: &Library,
     netlist: &Netlist,
     placer: &Placer,
     lamp_names: &[String],
+    bound: Option<u64>,
     log: Log,
-) -> Result<Candidate, String> {
+) -> Result<Option<Candidate>, String> {
     let style = placer.style();
-    let (mut routed, routing_cols) = place_and_route_logged(library, netlist, placer, log)?;
+    let (mut routed, routing_cols) = match place_and_route_bounded(library, netlist, placer, bound, log)? {
+        Routing::Done(routed, routing_cols) => (routed, routing_cols),
+        Routing::GivenUp { attempt, floor: (width, depth) } => {
+            log(&format!(
+                "  {} placement {}: at least {width} x {depth} = {} blocks against the {} kept",
+                candidate_name(placer),
+                if attempt == 1 { "not laid out".to_string() } else { format!("given up at attempt {attempt}") },
+                width as u64 * depth as u64,
+                bound.unwrap_or(0)
+            ));
+            return Ok(None);
+        }
+    };
     log("checking the layout against the netlist and timing it");
     let mut rounds = 0;
     loop {
@@ -450,7 +505,7 @@ fn lay_out(
                 ));
             }
             problems.extend(unlengthenable(&routed, netlist));
-            return Ok(Candidate {
+            return Ok(Some(Candidate {
                 style,
                 rows: placer.rows_name(),
                 routed,
@@ -460,7 +515,7 @@ fn lay_out(
                 problems,
                 timing,
                 hold_fix_rounds: rounds,
-            });
+            }));
         }
         rounds += 1;
         log(&format!("hold fix round {rounds}: lengthening the D path of {}", violated.join(", ")));
@@ -844,6 +899,31 @@ pub fn place_and_route_logged(
     placer: &Placer,
     log: Log,
 ) -> Result<(crate::route::Routed, Vec<i32>), String> {
+    match place_and_route_bounded(library, netlist, placer, None, log)? {
+        Routing::Done(routed, routing) => Ok((routed, routing)),
+        Routing::GivenUp { .. } => unreachable!("nothing is given up on without a bound"),
+    }
+}
+
+/// What routing a placement came to.
+pub enum Routing {
+    /// The routed layout and the routing columns per gap.
+    Done(crate::route::Routed, Vec<i32>),
+    /// Given up on before attempt `attempt` was routed: the attempt's footprint
+    /// floor (width, depth in blocks) exceeded the bound.
+    GivenUp { attempt: usize, floor: (i32, i32) },
+}
+
+/// [`place_and_route_logged`], giving up as soon as an attempt's footprint floor
+/// ([`Placement::footprint_floor`]) exceeds `bound` blocks: attempts only widen
+/// gaps and deepen rows, so no later attempt would come under it either.
+pub fn place_and_route_bounded(
+    library: &Library,
+    netlist: &Netlist,
+    placer: &Placer,
+    bound: Option<u64>,
+    log: Log,
+) -> Result<Routing, String> {
     let gaps = placer.gaps();
     let first = placer.place(&vec![1; gaps])?;
     let mut routing = estimate_routing(netlist, &first);
@@ -863,6 +943,12 @@ pub fn place_and_route_logged(
         for &row in &deepened {
             placement.row_depth[row as usize] = crate::tile::PITCH;
         }
+        if let Some(bound) = bound {
+            let floor = placement.footprint_floor();
+            if floor.0 as u64 * floor.1 as u64 > bound {
+                return Ok(Routing::GivenUp { attempt, floor });
+            }
+        }
         log(&format!(
             "routing attempt {attempt}: {} columns x {} rows, routing columns {}",
             placement.cols,
@@ -872,7 +958,7 @@ pub fn place_and_route_logged(
         match route(library, netlist, &placement, history.as_ref(), log) {
             Ok(routed) => {
                 log(&format!("routed in {} rounds", routed.rounds));
-                return Ok((routed, routing));
+                return Ok(Routing::Done(routed, routing));
             }
             Err(RouteFailure::Congested { tracks, users, rounds, history: learned }) => {
                 // Widen every gap that holds a fair share of the contended tracks.
