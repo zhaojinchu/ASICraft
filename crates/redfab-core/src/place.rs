@@ -952,6 +952,84 @@ mod tests {
         assert_eq!(untouched, vec![1, 2, 3]);
     }
 
+    /// What a placement is scored by: the footprint the estimate predicts (every
+    /// column its width, a routing column `NARROW` per estimated routing column
+    /// of its gap, every row its depth), then the summed vertical span of its
+    /// nets, so that among placements the estimate cannot tell apart the one
+    /// whose wires run straighter wins.
+    #[test]
+    fn a_placement_scores_by_its_estimated_footprint_then_by_its_spans() {
+        let netlist = Netlist::from_yosys_json(TWO_LEVELS, "top", &Library::builtin().unwrap()).unwrap();
+        let p = place(&netlist, &[1, 1, 1], Style::Pitch4).unwrap();
+        let predicted = |p: &Placement| -> i64 {
+            let estimate = estimate_routing(&netlist, p);
+            let width: i32 = p
+                .columns
+                .iter()
+                .zip(&p.col_width)
+                .map(|(c, &w)| match c {
+                    Column::Routing { gap, offset: 0 } => NARROW * estimate[*gap],
+                    Column::Routing { .. } => 0,
+                    _ => w,
+                })
+                .sum();
+            i64::from(width) * i64::from(p.row_depth.iter().sum::<i32>())
+        };
+        let (area, spans) = score(&netlist, &p);
+        assert_eq!(area, predicted(&p));
+        assert!(spans >= 0);
+        // Input a feeds g's first pin. Moving a away from that pin's row lengthens
+        // its span by the rows it moved, and nothing else changes but the estimate.
+        let g = netlist.cells.iter().position(|c| c.kind == "NOR2").unwrap();
+        let a = netlist.inputs.iter().position(|i| i.net == netlist.cells[g].inputs[0]).unwrap();
+        let pin_row = match p.pin_edges[g][0] {
+            Edge::North => p.gates[g].1 - 1,
+            Edge::South => p.gates[g].1 + 1,
+            _ => p.gates[g].1,
+        };
+        let mut moved = p.clone();
+        let taken: Vec<i32> = moved.inputs.iter().map(|i| i.1).collect();
+        let row = (0..moved.rows).rev().find(|r| !taken.contains(r)).expect("a free row");
+        moved.inputs[a].1 = row;
+        let (area, moved_spans) = score(&netlist, &moved);
+        assert_eq!(area, predicted(&moved));
+        assert_eq!(moved_spans - spans, i64::from((row - pin_row).abs() - (p.inputs[a].1 - pin_row).abs()));
+    }
+
+    /// The placement kept is the best of its barycenter sweeps by the score,
+    /// improved by a local search over the order of each column, which never
+    /// loses: over random netlists in every style the score is at most the best
+    /// sweep's, and for some of them it is below it (the barycenter order is not
+    /// the least channel density). The sweeps are deterministic, so the same
+    /// netlist always places the same.
+    #[test]
+    fn the_placement_kept_scores_no_worse_than_any_sweep_and_sometimes_better() {
+        let mut improved = 0;
+        for seed in 0..24u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let gates = 4 + rng.below(12);
+            let inputs = 2 + rng.below(4);
+            let flip_flops = if seed % 3 == 2 { 1 + rng.below(3) } else { 0 };
+            let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
+            for style in Style::ALL {
+                let gaps = gap_count(&netlist, style).unwrap();
+                let routing = vec![1; gaps];
+                let sweeps = sweeps(&netlist, &routing, style).unwrap();
+                assert_eq!(sweeps.len(), SWEEPS);
+                let best = sweeps.iter().map(|p| score(&netlist, p)).min().unwrap();
+                let kept = place(&netlist, &routing, style).unwrap();
+                let again = place(&netlist, &routing, style).unwrap();
+                assert_eq!(kept.gates, again.gates, "seed {seed} {}: placed differently twice", style.name());
+                let kept = score(&netlist, &kept);
+                assert!(kept <= best, "seed {seed} {}: scored {kept:?} against the best sweep's {best:?}", style.name());
+                if kept < best {
+                    improved += 1;
+                }
+            }
+        }
+        assert!(improved > 0, "the local search never found a better order than the sweeps");
+    }
+
     #[test]
     fn the_estimate_counts_overlapping_row_changes() {
         // Two inputs that each feed the same two gates in the first column: both
