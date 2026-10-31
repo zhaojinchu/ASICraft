@@ -202,14 +202,48 @@ pub enum Break {
 const HOLD_FIX_ROUNDS: usize = 20;
 
 /// The placement styles a combinational design is laid out in, and a clocked
-/// one, in the order they are tried (ties in the pick go to the earlier). The
-/// stretched style measured as a loss on every combinational design (adder8
-/// 455 x 195 against 470 x 180 packed, adder4 its inputs changing every 12
-/// ticks instead of 8), and the packed style never won on a clocked one (over
-/// eleven clocked designs it tied stretched at best, with the same layout), so
-/// each kind tries the four-row pitch and the one packed style that can win.
-const COMBINATIONAL_STYLES: &[Style] = &[Style::Pitch4, Style::Packed];
+/// one, in the pick's order (ties go to the earlier). At the five-block pitch
+/// the stretched style measured as a loss on every combinational design
+/// (adder8 455 x 195 against 470 x 180 packed, adder4 its inputs changing
+/// every 12 ticks instead of 8); since the rows are three blocks deep it wins
+/// on the mid-size ones (the review of 2026-10-31: divmod 182 x 60 to
+/// 146 x 60, adder4, signed_sub, mux4, cmp4 and nor3 smaller), because drawn
+/// out over the tallest column's rows the pins of the short columns no longer
+/// share the top rows, where the stubs that turn into them must stack over one
+/// another's trunks. Above [`STRETCHED_UP_TO_CELLS`] cells it has not won and
+/// costs more than the playground's time allows, so only the designs under the
+/// gate try it. The packed style never won on a clocked design (over eleven it
+/// tied stretched at best, with the same layout).
+const COMBINATIONAL_STYLES: &[Style] = &[Style::Pitch4, Style::Packed, Style::Stretched];
+const LARGE_COMBINATIONAL_STYLES: &[Style] = &[Style::Pitch4, Style::Packed];
 const CLOCKED_STYLES: &[Style] = &[Style::Pitch4, Style::Stretched];
+
+/// Combinational designs with fewer cells than this try the stretched style
+/// too: adder4 (49 cells) gains from it, adder8 (102) does not and would take
+/// about 29 s more.
+const STRETCHED_UP_TO_CELLS: usize = 64;
+
+/// The placement styles `netlist` is laid out in, in the pick's order.
+fn styles_of(netlist: &Netlist) -> &'static [Style] {
+    if netlist.cells.iter().any(|c| c.is_dff()) {
+        CLOCKED_STYLES
+    } else if netlist.cells.len() < STRETCHED_UP_TO_CELLS {
+        COMBINATIONAL_STYLES
+    } else {
+        LARGE_COMBINATIONAL_STYLES
+    }
+}
+
+/// The pick made again when the kept layout's inputs may change less often
+/// than every [`crate::timing::MIN_INPUT_SPACING`] ticks: among the candidates
+/// in the pick's order, with their ranks and input spacings, the least spacing,
+/// every spacing of the minimum or under alike, then the least rank, ties to
+/// the earlier.
+fn repick(ranks: &[(u64, u64)], spacings: &[u32]) -> usize {
+    (0..ranks.len())
+        .min_by_key(|&i| (spacings[i].max(crate::timing::MIN_INPUT_SPACING), ranks[i]))
+        .expect("a candidate to pick among")
+}
 
 /// [`build_netlist`], but a layout that fails the checks is returned along with
 /// the problems instead of being an error, so it can be looked at.
@@ -220,10 +254,12 @@ pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(B
 /// [`build_unchecked`], telling `log` about each phase.
 ///
 /// Every placement style is taken through placing, routing, the layout check and
-/// timing, and the best layout is kept (a combinational design tries pitch4 and
-/// packed, a clocked one pitch4 and stretched): for a combinational design the smallest
-/// footprint, then the shortest settle, provided its inputs may change as often
-/// as under the four-row pitch; for a clocked design the least footprint times
+/// timing, and the best layout is kept (a combinational design tries pitch4,
+/// packed and, under [`STRETCHED_UP_TO_CELLS`] cells, stretched; a clocked one
+/// pitch4 and stretched): for a combinational design the smallest footprint,
+/// then the shortest settle, provided its inputs may change every
+/// [`crate::timing::MIN_INPUT_SPACING`] ticks, else the pick is made again
+/// by input spacing first; for a clocked design the least footprint times
 /// clock period, then the shorter period (counter4 stretched measured half the
 /// footprint of the four-row pitch for a period 6 % longer, negedge packed 6 %
 /// less footprint for a period 45 % longer). The pick's order is fixed and ties
@@ -244,7 +280,7 @@ pub fn build_unchecked_logged(
     check_netlist(netlist)?;
     let lamp_names: Vec<String> = netlist.outputs.iter().map(|p| p.name.clone()).collect();
     let clocked = netlist.cells.iter().any(|c| c.is_dff());
-    let styles: &[Style] = if clocked { CLOCKED_STYLES } else { COMBINATIONAL_STYLES };
+    let styles = styles_of(netlist);
     // The swept rows in every style; the searched rows in the packing style,
     // where the width is decided, when they promise a smaller footprint. Each
     // with its place in the pick's order.
@@ -297,61 +333,74 @@ pub fn build_unchecked_logged(
     candidates.sort_by_key(|&(_, precedence)| precedence);
     let mut candidates: Vec<Candidate> = candidates.into_iter().map(|(c, _)| c).collect();
     let eligible: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].problems.is_empty()).collect();
-    let chosen = eligible.iter().copied().min_by_key(|&i| candidates[i].rank(clocked)).unwrap_or(0);
-    let mut chosen = candidates.swap_remove(chosen);
+    let mut chosen = eligible.iter().copied().min_by_key(|&i| candidates[i].rank(clocked)).unwrap_or(0);
     if placers.len() > 1 {
-        log(&format!("keeping the {} placement, {} rows", chosen.style.name(), chosen.rows));
+        log(&format!("keeping the {} placement, {} rows", candidates[chosen].style.name(), candidates[chosen].rows));
     }
 
     // A fault built in on purpose, after the fixes, so that the checks can catch it.
     if fault == Break::Hold {
-        break_layout(&mut chosen.routed, netlist, &chosen.timing, fault)?;
+        let faulty = &mut candidates[chosen];
+        break_layout(&mut faulty.routed, netlist, &faulty.timing, fault)?;
         let (realized, world, _, mut problems, timing) =
-            check_and_time(&library, netlist, &chosen.routed, &lamp_names)?;
+            check_and_time(&library, netlist, &faulty.routed, &lamp_names)?;
         if let Some(s) = &timing.sequential
             && !s.hold_violations.is_empty()
         {
             problems.push(format!("hold violated at flip-flops {}", s.hold_violations.join(", ")));
         }
-        chosen = Candidate { realized, world, problems, timing, ..chosen };
+        (faulty.realized, faulty.world, faulty.problems, faulty.timing) = (realized, world, problems, timing);
     }
 
-    let (mut design, mut problems) = finish(&chosen, netlist, name, log)?;
-    // A packed layout whose inputs must change less often than under the
-    // four-row pitch is not kept over it: pitch4 is laid out now if its
-    // footprint made it not worth laying out before.
-    if !clocked && chosen.style != Style::Pitch4 && design.timing.input_spacing > crate::timing::MIN_INPUT_SPACING {
+    // The burnout budget of the kept layout. A combinational layout whose inputs
+    // may change less often than every MIN_INPUT_SPACING ticks is not kept over
+    // one whose inputs keep up: the pick is made again over every candidate, by
+    // input spacing first, pitch4 laid out now if its footprint made it not
+    // worth laying out before.
+    let mut finished: Vec<Option<(Design, Vec<String>)>> = candidates.iter().map(|_| None).collect();
+    finished[chosen] = Some(finish(&candidates[chosen], netlist, name, log)?);
+    let spacing_of =
+        |finished: &Option<(Design, Vec<String>)>| finished.as_ref().map_or(0, |(d, _)| d.timing.input_spacing);
+    if !clocked && spacing_of(&finished[chosen]) > crate::timing::MIN_INPUT_SPACING {
+        log(&format!(
+            "the {} placement's inputs may change only every {} ticks; measuring the other candidates' budgets",
+            candidates[chosen].style.name(),
+            spacing_of(&finished[chosen])
+        ));
         if pitch4_given_up {
-            log(&format!(
-                "pitch4 placement after all: the {} placement's inputs may change only every {} ticks",
-                chosen.style.name(),
-                design.timing.input_spacing
-            ));
             match lay_out(&library, netlist, &Placer::swept(netlist, Style::Pitch4)?, &lamp_names, None, log) {
                 Ok(Some(candidate)) => {
                     log(&format!("  pitch4: {}", candidate.summary()));
-                    candidates.push(candidate);
+                    candidates.insert(0, candidate);
+                    finished.insert(0, None);
+                    chosen += 1;
                 }
                 Ok(None) => unreachable!("nothing is given up on without a bound"),
                 Err(e) => log(&format!("  pitch4 placement failed: {e}")),
             }
         }
-        if let Some(i) = candidates.iter().position(|c| c.style == Style::Pitch4 && c.problems.is_empty()) {
-            let pitch4 = candidates.swap_remove(i);
-            let (other, other_problems) = finish(&pitch4, netlist, name, log)?;
-            if other.timing.input_spacing < design.timing.input_spacing {
-                log(&format!(
-                    "keeping the pitch4 placement after all: its inputs may change every {} ticks, the {} placement's every {}",
-                    other.timing.input_spacing,
-                    chosen.style.name(),
-                    design.timing.input_spacing
-                ));
-                chosen = pitch4;
-                design = other;
-                problems = other_problems;
+        let eligible: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].problems.is_empty()).collect();
+        for &i in &eligible {
+            if finished[i].is_none() {
+                finished[i] = Some(finish(&candidates[i], netlist, name, log)?);
             }
         }
+        let ranks: Vec<(u64, u64)> = eligible.iter().map(|&i| candidates[i].rank(false)).collect();
+        let spacings: Vec<u32> = eligible.iter().map(|&i| spacing_of(&finished[i])).collect();
+        let again = eligible[repick(&ranks, &spacings)];
+        if again != chosen {
+            log(&format!(
+                "keeping the {} placement after all: its inputs may change every {} ticks, the {} placement's every {}",
+                candidates[again].style.name(),
+                spacing_of(&finished[again]),
+                candidates[chosen].style.name(),
+                spacing_of(&finished[chosen])
+            ));
+            chosen = again;
+        }
     }
+    let (design, problems) = finished.swap_remove(chosen).expect("the kept layout is finished");
+    let chosen = candidates.swap_remove(chosen);
     let realized = &chosen.realized;
     let (sx, sy, sz) = chosen.world.size();
 
