@@ -120,7 +120,9 @@ def check_paths(text: str, where: str, root: Path) -> list[str]:
 def check_limits(readme: str, measured_cells: str, max_inputs: str, plot: tuple[str, str]) -> list[str]:
     """The numbers README's Limits section quotes equal the code's constants."""
     out = []
-    limits = section(readme, "Limits (measured 2026-10-07)") or section(readme, "Limits")
+    # The heading carries the date of the last measurement.
+    dated = re.search(r"^#+ Limits \(measured \d{4}-\d{2}-\d{2}\)\n(.*?)(?=^#+ |\Z)", readme, re.M | re.S)
+    limits = dated.group(1) if dated else section(readme, "Limits")
     for phrase, source in ((f"about {measured_cells} cells (`measuredCells`)", "playground/compile.js measuredCells"),
                            (f"| Inputs | {max_inputs} bits |", "build.rs MAX_INPUTS"),
                            (f"up to {plot[0]} x {plot[1]} blocks", "server/live.mjs plotSize")):

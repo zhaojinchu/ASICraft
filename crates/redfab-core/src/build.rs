@@ -11,7 +11,7 @@ use crate::geom::Pos;
 use crate::layout::{Macro, Placed, Realized};
 use crate::lvs::lvs;
 use crate::netlist::{Driver, Netlist};
-use crate::place::{Style, estimate_routing, gap_count, place};
+use crate::place::{Placer, Style, estimate_routing};
 use crate::route::{History, Level, RouteFailure, route};
 use crate::sim::Sim;
 use crate::structure::structure_file;
@@ -52,6 +52,11 @@ pub struct Design {
     /// How the gates were placed: the name of the [`Style`] the build kept.
     #[serde(default)]
     pub placement: String,
+    /// How the rows were settled: `swept` (barycenter sweeps) or `searched`
+    /// (the best sweep improved by a local search); files written before the
+    /// distinction read as empty, and were swept.
+    #[serde(default)]
+    pub rows: String,
     /// Counts of the routed layout, which the area-period baseline
     /// (`tests/baselines/area.json`) holds to: tiles, the tile grid, repeaters
     /// (in their own tiles and in crossings), and the rounds of hold fixes the
@@ -239,17 +244,32 @@ pub fn build_unchecked_logged(
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     for &style in styles {
-        if styles.len() > 1 {
-            log(&format!("{} placement", style.name()));
-        }
-        match lay_out(&library, netlist, style, &lamp_names, log) {
-            Ok(candidate) => {
-                log(&format!("  {}: {}", style.name(), candidate.summary()));
-                candidates.push(candidate);
+        // The swept rows in every style; the searched rows in the packing style,
+        // where the width is decided, when they promise a smaller footprint.
+        let swept = Placer::swept(netlist, style)?;
+        let mut placers = vec![swept];
+        if style.packs() {
+            let searched = Placer::searched(netlist, style)?;
+            let (promised, kept) = (searched.score().0, placers[0].score().0);
+            if promised < kept {
+                log(&format!("the searched rows promise {promised} blocks against the swept rows' {kept}"));
+                placers.push(searched);
             }
-            Err(e) => {
-                log(&format!("  {} placement failed: {e}", style.name()));
-                failures.push(e);
+        }
+        for placer in &placers {
+            let name = format!("{}{}", style.name(), if placer.rows_name() == "searched" { ", searched" } else { "" });
+            if styles.len() > 1 || placers.len() > 1 {
+                log(&format!("{name} placement"));
+            }
+            match lay_out(&library, netlist, placer, &lamp_names, log) {
+                Ok(candidate) => {
+                    log(&format!("  {name}: {}", candidate.summary()));
+                    candidates.push(candidate);
+                }
+                Err(e) => {
+                    log(&format!("  {name} placement failed: {e}"));
+                    failures.push(e);
+                }
             }
         }
     }
@@ -260,8 +280,8 @@ pub fn build_unchecked_logged(
     let eligible: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].problems.is_empty()).collect();
     let chosen = eligible.iter().copied().min_by_key(|&i| candidates[i].rank(clocked)).unwrap_or(0);
     let mut chosen = candidates.swap_remove(chosen);
-    if styles.len() > 1 {
-        log(&format!("keeping the {} placement", chosen.style.name()));
+    if styles.len() > 1 || candidates.len() > 1 {
+        log(&format!("keeping the {} placement, {} rows", chosen.style.name(), chosen.rows));
     }
 
     // A fault built in on purpose, after the fixes, so that the checks can catch it.
@@ -341,12 +361,13 @@ pub fn build_unchecked_logged(
         ),
     };
     let report = format!(
-        "design {name}\n  cells: {}\n  tiles: {} ({} columns x {} rows, {routing_text})\n  placement: {}{}\n  repeaters: {}\n  blocks: {} in {sx} x {sy} x {sz}\n{timing_line}{positions}{}",
+        "design {name}\n  cells: {}\n  tiles: {} ({} columns x {} rows, {routing_text})\n  placement: {}{}{}\n  repeaters: {}\n  blocks: {} in {sx} x {sy} x {sz}\n{timing_line}{positions}{}",
         netlist.cells.len(),
         design.tiles,
         design.grid.cols,
         design.grid.rows,
         design.placement,
+        if design.rows == "searched" { ", searched rows" } else { "" },
         if clocked {
             let rounds = design.hold_fix_rounds;
             format!(", hold fixes: {rounds} round{}", if rounds == 1 { "" } else { "s" })
@@ -363,6 +384,8 @@ pub fn build_unchecked_logged(
 /// A layout in one placement style, checked and timed, before the pick.
 struct Candidate {
     style: Style,
+    /// How the rows were settled (`Placer::rows_name`).
+    rows: &'static str,
     routed: crate::route::Routed,
     routing_cols: Vec<i32>,
     realized: Realized,
@@ -402,17 +425,18 @@ impl Candidate {
     }
 }
 
-/// Places and routes `netlist` in `style`, then realizes, checks and times the
-/// layout, lengthening the D path of any flip-flop whose hold is violated (a
-/// repeater's delay up, or a repeater into a wire) and going again.
+/// Places and routes `netlist` as `placer` has it, then realizes, checks and
+/// times the layout, lengthening the D path of any flip-flop whose hold is
+/// violated (a repeater's delay up, or a repeater into a wire) and going again.
 fn lay_out(
     library: &Library,
     netlist: &Netlist,
-    style: Style,
+    placer: &Placer,
     lamp_names: &[String],
     log: Log,
 ) -> Result<Candidate, String> {
-    let (mut routed, routing_cols) = place_and_route_logged(library, netlist, style, log)?;
+    let style = placer.style();
+    let (mut routed, routing_cols) = place_and_route_logged(library, netlist, placer, log)?;
     log("checking the layout against the netlist and timing it");
     let mut rounds = 0;
     loop {
@@ -428,6 +452,7 @@ fn lay_out(
             problems.extend(unlengthenable(&routed, netlist));
             return Ok(Candidate {
                 style,
+                rows: placer.rows_name(),
                 routed,
                 routing_cols,
                 realized,
@@ -511,6 +536,7 @@ fn finish(candidate: &Candidate, netlist: &Netlist, name: &str, log: Log) -> Res
         settle_ticks: timing.settle_ticks(),
         timing: timing.clone(),
         placement: candidate.style.name().to_string(),
+        rows: candidate.rows.to_string(),
         tiles: layout.cells_used(),
         grid: Grid { cols, rows, routing: candidate.routing_cols.clone() },
         repeaters: repeater_count,
@@ -798,25 +824,28 @@ pub fn clock_input(netlist: &Netlist) -> Result<usize, String> {
     }
 }
 
-/// Places and routes, giving the congested gaps more routing columns each time
-/// routing fails. Returns the routed layout and the routing columns per gap.
+/// Places (the swept rows) and routes, giving the congested gaps more routing
+/// columns each time routing fails. Returns the routed layout and the routing
+/// columns per gap.
 pub fn place_and_route(
     library: &Library,
     netlist: &Netlist,
     style: Style,
 ) -> Result<(crate::route::Routed, Vec<i32>), String> {
-    place_and_route_logged(library, netlist, style, &mut |_| {})
+    place_and_route_logged(library, netlist, &Placer::swept(netlist, style)?, &mut |_| {})
 }
 
-/// [`place_and_route`], telling `log` about each attempt.
+/// [`place_and_route`] with the rows `placer` settled on, telling `log` about
+/// each attempt: the rows are settled once, and every attempt lays them out in
+/// its own columns.
 pub fn place_and_route_logged(
     library: &Library,
     netlist: &Netlist,
-    style: Style,
+    placer: &Placer,
     log: Log,
 ) -> Result<(crate::route::Routed, Vec<i32>), String> {
-    let gaps = gap_count(netlist, style)?;
-    let first = place(netlist, &vec![1; gaps], style)?;
+    let gaps = placer.gaps();
+    let first = placer.place(&vec![1; gaps])?;
     let mut routing = estimate_routing(netlist, &first);
     log(&format!(
         "placing {} cells in {} gate columns and {} rows; routing columns estimated at {}",
@@ -830,7 +859,7 @@ pub fn place_and_route_logged(
     // Shallow rows made a cell deep because signals kept dying in them.
     let mut deepened: BTreeSet<i32> = BTreeSet::new();
     for attempt in 1..=MAX_ROUTING_ATTEMPTS {
-        let mut placement = place(netlist, &routing, style)?;
+        let mut placement = placer.place(&routing)?;
         for &row in &deepened {
             placement.row_depth[row as usize] = crate::tile::PITCH;
         }
@@ -1149,6 +1178,7 @@ mod tests {
         let built = build(NOR2, "top", "nor2").unwrap();
         let design = &built.design;
         assert!(Style::from_name(&design.placement).is_some(), "placement {:?}", design.placement);
+        assert!(["swept", "searched"].contains(&design.rows.as_str()), "rows {:?}", design.rows);
         assert_eq!(design.hold_fix_rounds, 0);
         let line = built.report.lines().find(|l| l.contains("tiles:")).unwrap().trim();
         assert_eq!(
@@ -1179,12 +1209,13 @@ mod tests {
             let mut rng = crate::tiletest::Rng::new(seed);
             let (gates, inputs, flip_flops) = (2 + rng.below(6), 1 + rng.below(3), 1 + rng.below(3));
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
-            let gaps = gap_count(&netlist, Style::Pitch4).unwrap();
-            let estimate = estimate_routing(&netlist, &place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap());
+            let placer = Placer::swept(&netlist, Style::Pitch4).unwrap();
+            let gaps = placer.gaps();
+            let estimate = estimate_routing(&netlist, &placer.place(&vec![1; gaps]).unwrap());
             let mut lines: Vec<String> = Vec::new();
             let library = Library::builtin().unwrap();
             let (_, routing) =
-                place_and_route_logged(&library, &netlist, Style::Pitch4, &mut |l| lines.push(l.to_string())).unwrap();
+                place_and_route_logged(&library, &netlist, &placer, &mut |l| lines.push(l.to_string())).unwrap();
             assert_eq!(routing.len(), gaps);
             assert!(routing.iter().zip(&estimate).all(|(r, e)| r >= e), "seed {seed}: {routing:?} < {estimate:?}");
             // Each widening names the gaps it widens; those gaps end wider than estimated.
