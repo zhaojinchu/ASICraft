@@ -1273,10 +1273,12 @@ mod tests {
         // repeaters, 4 ramps; the shallow family the same with west and east
         // swapped for north and south, plus 7 NORs, the input, the output and the
         // two ties; and the square family, on each level 11 wires + 4 repeater
-        // placements (the two straights, each way) + 6 more delays, and 4 ramps
-        let narrow = 2 * (11 + 20 + 6) + 3 + 4;
-        let shallow = narrow + 7 + 4;
-        let square = 2 * (11 + 4 + 6) + 4;
+        // placements (the two straights, each way) + 6 more delays, and 4 ramps;
+        // the narrow and the square families also the input, the output and the
+        // two ties three blocks wide.
+        let narrow = 2 * (11 + 20 + 6) + 3 + 4 + 4;
+        let shallow = narrow - 4 + 7 + 4;
+        let square = 2 * (11 + 4 + 6) + 4 + 4;
         assert_eq!(Variant::all().len(), 2 + 2 * (11 + 28 + 3) + 4 + 7 + 3 + 2 + 2 + narrow + shallow + square);
     }
 
@@ -1542,6 +1544,65 @@ mod tests {
         }
         assert_eq!(square_ramp.dust_steps(West, East), Some(3));
         assert_eq!(square_ramp_ns.dust_steps(North, South), Some(3));
+    }
+
+    /// The input, the output and the constants need three blocks along the row:
+    /// the probe block with its lever, off the border, and the port's dust; the
+    /// port's dust and the lamp; the torch and the dust. So, like a routing
+    /// column, their columns are three blocks wide, and the tiles come three
+    /// wide for a row a cell deep (`_n`) and for a shallow one (`_sq`): four
+    /// blocks of width saved on every design. The signal leaves a source at
+    /// full strength and any strength lights the lamp, two dust steps fewer per
+    /// path than the wide tiles.
+    #[test]
+    fn the_input_output_and_constant_tiles_come_three_wide_too() {
+        let parse = |text: &str| Tile::parse(text).unwrap();
+        let lib = Library::builtin().unwrap();
+        use Edge::{East, West};
+        let families = [
+            (
+                PITCH,
+                parse(include_str!("../../../cells/input_n.tile")),
+                parse(include_str!("../../../cells/output_n.tile")),
+                parse(include_str!("../../../cells/tie_high_n.tile")),
+                parse(include_str!("../../../cells/tie_low_n.tile")),
+            ),
+            (
+                SHALLOW,
+                parse(include_str!("../../../cells/input_sq.tile")),
+                parse(include_str!("../../../cells/output_sq.tile")),
+                parse(include_str!("../../../cells/tie_high_sq.tile")),
+                parse(include_str!("../../../cells/tie_low_sq.tile")),
+            ),
+        ];
+        for (depth, input, output, high, low) in &families {
+            for tile in [input, output, high, low] {
+                assert_eq!((tile.width, tile.depth, tile.cells()), (NARROW, *depth, 1), "{}", tile.name);
+            }
+            assert_eq!(input.source_out(East), 15, "{}", input.name);
+            assert!(input.source_out(East) >= lib.input.source_out(East));
+            assert_eq!(output.port_needs(West), Some(1), "{}", output.name);
+            assert!(output.port_needs(West) <= lib.output.port_needs(West));
+            assert_eq!(high.source_out(East), 15, "{}", high.name);
+            assert_eq!(low.source_out(East), 0, "{}", low.name);
+            // The probe block, a redstone block under test, stays off the border.
+            let probe = input.probe.unwrap_or_else(|| panic!("{} has no probe", input.name));
+            assert!(probe.x > 0 && probe.x < NARROW - 1, "{}: probe at {probe:?}", input.name);
+            assert!(output.lamp.is_some(), "{} has no lamp", output.name);
+        }
+        // The library knows them by width and depth, as it knows the shallow ones.
+        for (wide, narrow, square) in [
+            (Kind::Input, Kind::InputN, Kind::InputSq),
+            (Kind::Output, Kind::OutputN, Kind::OutputSq),
+            (Kind::TieHigh, Kind::TieHighN, Kind::TieHighSq),
+            (Kind::TieLow, Kind::TieLowN, Kind::TieLowSq),
+        ] {
+            assert_eq!(wide.sized(NARROW, PITCH), Some(narrow));
+            assert_eq!(wide.sized(NARROW, SHALLOW), Some(square));
+            assert_eq!((lib.get(narrow).width, lib.get(narrow).depth), (NARROW, PITCH));
+            assert_eq!((lib.get(square).width, lib.get(square).depth), (NARROW, SHALLOW));
+        }
+        assert_eq!(Kind::ALL.len(), 38);
     }
 
     /// In a narrow tile the cell next to the west or east port is the centre,
