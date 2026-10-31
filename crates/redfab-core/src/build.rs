@@ -1752,9 +1752,12 @@ mod tests {
             .replace(r#""y":{"direction":"output","bits":[4]}"#, r#""y":{"direction":"output","bits":[5]}"#);
         let built = build(&two_cells, "top", "x").unwrap();
         let routing: i32 = built.design.grid.routing.iter().sum();
-        let others = built.design.grid.cols - routing;
+        // The sources' and the outputs' columns are three blocks wide too, like a
+        // routing column; only the two gate columns are a cell wide.
+        let gates = built.design.grid.cols - routing - 2;
         assert!(routing >= 2, "{:?}", built.design.grid);
-        assert_eq!(built.design.size[0], others * 5 + routing * 3, "{:?}", built.design.grid);
+        assert_eq!(gates, 2, "{:?}", built.design.grid);
+        assert_eq!(built.design.size[0], gates * 5 + (routing + 2) * 3, "{:?}", built.design.grid);
         let vectors = r#"[{"a":0,"b":0},{"a":0,"b":1},{"a":1,"b":0},{"a":1,"b":1}]"#;
         assert_eq!(outputs(&built.design, vectors), r#"[{"y":0},{"y":1},{"y":1},{"y":1}]"#);
     }
