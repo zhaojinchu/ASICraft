@@ -1036,12 +1036,12 @@ mod tests {
         assert_eq!(p.gates[0].0, 3);
         assert_eq!(p.gates[1].0, 5);
         assert_eq!(p.outputs[0].0, 9);
-        // A routing column is narrow; every other column is a cell wide, and every
-        // row shallow (no flip-flop sits in any).
+        // A gate column is a cell wide; a routing column, the sources' and the
+        // outputs' are narrow; and every row is shallow (no flip-flop sits in any).
         let widths: Vec<i32> =
-            p.columns.iter().map(|c| if matches!(c, Column::Routing { .. }) { NARROW } else { PITCH }).collect();
+            p.columns.iter().map(|c| if matches!(c, Column::Gates { .. }) { PITCH } else { NARROW }).collect();
         assert_eq!(p.col_width, widths);
-        assert_eq!(p.col_width[..4], [PITCH, NARROW, NARROW, PITCH]);
+        assert_eq!(p.col_width[..4], [NARROW, NARROW, NARROW, PITCH]);
         assert_eq!(p.row_depth, vec![SHALLOW; p.rows as usize]);
         // Widening the middle gap moves the later columns but keeps their names.
         let q = place(&netlist, &[2, 2, 3], Style::Pitch4).unwrap();
