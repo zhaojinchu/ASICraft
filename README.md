@@ -146,9 +146,9 @@ circuit that passed its checks. The ceiling is capacity, not correctness:
 
 | Limit | Value | Where it comes from |
 |---|---|---|
-| Builds at all | about 150 cells with up to 20 inputs, in 2 to 3 minutes natively (random netlists, two seeds each); 100 cells in about 30 s; an 8-bit adder (102 cells, 17 inputs) in about 25 s. A combinational design is laid out in two placement styles (three under 64 cells) and a clocked one in two (the four-row pitch and stretched), and once more in each packing style with the searched rows when they promise a smaller footprint, and the best kept; the candidates are laid out in the order they can win and a combinational one whose footprint can only lose is given up on before it is routed, so a build is one to three layouts (the four-row pitch is seldom laid out); the 4-bit CPU of the capacity review (132 cells, clocked) builds in five to six minutes, since signals keep dying in its shallow rows until some are made a cell deep again. A 200-cell, 24-input netlist did not finish in 12 minutes | the router's rounds on grids of 10k tiles, then the layout check and timing on 150k-block worlds (`crates/redfab-core/src/route.rs`, `build.rs`) |
+| Builds at all | about 150 cells with up to 20 inputs, in 2 to 3 minutes natively (random netlists, two seeds each); 100 cells in about 30 s; an 8-bit adder (102 cells, 17 inputs) in about 25 s. A combinational design is laid out in two placement styles (three under 64 cells) and a clocked one in two (the four-row pitch and stretched), and once more in each packing style with the searched rows when they promise a smaller footprint, and the best kept; the candidates are laid out in the order they can win and a combinational one whose footprint can only lose is given up on before it is routed, so a build is one to three layouts (the four-row pitch is seldom laid out); the 4-bit CPU of the capacity review (132 cells, clocked) builds in about eight minutes, since signals keep dying in its shallow rows until some are made a cell deep again. A 200-cell, 24-input netlist did not finish in 12 minutes | the router's rounds on grids of 10k tiles, then the layout check and timing on 150k-block worlds (`crates/redfab-core/src/route.rs`, `build.rs`) |
 | Routes inside the playground's 90 s compile limit | about 100 cells (`measuredCells`) | `playground/compile.js` |
-| Fits a plot on the live server | footprint up to 512 x 512 blocks: every shipped design fits, the widest is `adder8` at 327 x 99 | `server/live.mjs` |
+| Fits a plot on the live server | footprint up to 512 x 512 blocks: every shipped design fits, the widest is `adder8` at 323 x 99 | `server/live.mjs` |
 | Inputs | 64 bits | `build.rs` (`MAX_INPUTS`) |
 | Clock period | long: `counter4` needs 66 game ticks (3.3 s) per cycle, `mem2` 64 | repeaters on long feedback paths; the compaction steps and the two wire levels (`docs/PLAN.md`) shortened them |
 
@@ -159,18 +159,18 @@ register file and the CPU are the capacity review's, not shipped):
 
 | Design | Cells | Blocks | Footprint | Period |
 |---|---|---|---|---|
-| `nor2` | 1 | 59 | 21 x 4 x 6 | |
-| `fa1` (full adder) | 11 | 934 | 68 x 4 x 21 | |
-| `mul2` | 12 | 1052 | 74 x 4 x 27 | |
-| `lfsr3` | 15 | 1805 | 76 x 4 x 42 | 38 |
-| `counter4` | 26 | 4786 | 128 x 4 x 62 | 66 |
-| `divmod` | 30 | 4787 | 146 x 4 x 60 | |
-| `mem2` (2x2-bit memory) | 31 | 5622 | 109 x 4 x 89 | 64 |
-| `cmp4` | 32 | 2863 | 113 x 4 x 54 | |
-| `adder4` | 49 | 6119 | 176 x 4 x 60 | |
-| 2x4-bit register file | 57 | 14308 | 151 x 4 x 157 | 96 |
-| 8-bit adder with carry | 102 | 18481 | 327 x 4 x 99 | |
-| 4-bit CPU, 16-word ROM | 132 | 52914 | 303 x 4 x 298 | 268 |
+| `nor2` | 1 | 47 | 17 x 4 x 6 | |
+| `fa1` (full adder) | 11 | 914 | 64 x 4 x 21 | |
+| `mul2` | 12 | 1020 | 70 x 4 x 27 | |
+| `lfsr3` | 15 | 1785 | 72 x 4 x 42 | 38 |
+| `counter4` | 26 | 4758 | 124 x 4 x 62 | 66 |
+| `divmod` | 30 | 4699 | 139 x 4 x 60 | |
+| `mem2` (2x2-bit memory) | 31 | 5674 | 105 x 4 x 83 | 64 |
+| `cmp4` | 32 | 2719 | 106 x 4 x 54 | |
+| `adder4` | 49 | 6063 | 172 x 4 x 60 | |
+| 2x4-bit register file | 57 | 13330 | 135 x 4 x 145 | 100 |
+| 8-bit adder with carry | 102 | 18377 | 323 x 4 x 99 | |
+| 4-bit CPU, 16-word ROM | 132 | 52726 | 305 x 4 x 298 | 262 |
 
 ## Putting it in your world
 

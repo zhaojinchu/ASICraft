@@ -608,8 +608,9 @@ test('a plot goes when its time is up, and a recording past the cap is kept no f
         assert.equal(reply.status, 200, reply.body.error);
         const { design, origin } = reply.body;
         const { client } = await control(wsBase, reply.body);
-        // Sixty changes of real blocks after placement: the recording stops at the cap.
-        for (let t = 1; t <= 60; t++) world.emit(world.tick + 1, [[key(add([t % 25, 2, Math.floor(t / 25)], origin)), 'minecraft:gold_block']]);
+        // Sixty changes of real blocks inside the design after placement: the recording stops at the cap.
+        const [width] = design.size;
+        for (let t = 1; t <= 60; t++) world.emit(world.tick + 1, [[key(add([t % width, 2, Math.floor(t / width)], origin)), 'minecraft:gold_block']]);
         await sleep(20);
         const info = await api(base, `/api/plots/${reply.body.plot}`);
         assert.equal(info.body.truncated, true);

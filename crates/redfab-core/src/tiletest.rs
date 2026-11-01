@@ -138,10 +138,14 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
         Kind::Cross | Kind::CrossN | Kind::CrossS => {
             "Crossing: west drives east only, north drives south only, at once."
         }
-        Kind::TieHigh | Kind::TieHighS => "Constant 1: the output is always powered.",
-        Kind::TieLow | Kind::TieLowS => "Constant 0: the output is never powered.",
-        Kind::Input | Kind::InputS => "Input: the output is powered while the probe block is a redstone block.",
-        Kind::Output | Kind::OutputS => {
+        Kind::TieHigh | Kind::TieHighS | Kind::TieHighN | Kind::TieHighSq => {
+            "Constant 1: the output is always powered."
+        }
+        Kind::TieLow | Kind::TieLowS | Kind::TieLowN | Kind::TieLowSq => "Constant 0: the output is never powered.",
+        Kind::Input | Kind::InputS | Kind::InputN | Kind::InputSq => {
+            "Input: the output is powered while the probe block is a redstone block."
+        }
+        Kind::Output | Kind::OutputS | Kind::OutputN | Kind::OutputSq => {
             "Output: the lamp lights at once and goes out 4 game ticks after the input drops."
         }
         Kind::Dff | Kind::DffAlt => unreachable!("flip-flops have sweep fixtures, see dfftest"),
@@ -247,14 +251,21 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
                 t += delay + 3;
             }
         }
-        Kind::TieHigh | Kind::TieLow | Kind::TieHighS | Kind::TieLowS => {
+        Kind::TieHigh
+        | Kind::TieLow
+        | Kind::TieHighS
+        | Kind::TieLowS
+        | Kind::TieHighN
+        | Kind::TieLowN
+        | Kind::TieHighSq
+        | Kind::TieLowSq => {
             let output = &hooks[0];
-            let high = matches!(variant.kind, Kind::TieHigh | Kind::TieHighS);
+            let high = matches!(variant.kind, Kind::TieHigh | Kind::TieHighS | Kind::TieHighN | Kind::TieHighSq);
             fx.powered(0, output.reader, high);
             fx.powered(6, output.reader, high);
         }
         Kind::Dff | Kind::DffAlt => unreachable!(),
-        Kind::Input | Kind::InputS => {
+        Kind::Input | Kind::InputS | Kind::InputN | Kind::InputSq => {
             let probe = variant.tile(library).probe.expect("input tile has a probe");
             let probe = Pos::new(ORIGIN.x + probe.x, ORIGIN.y + probe.y, ORIGIN.z + probe.z);
             let output = &hooks[0];
@@ -263,7 +274,7 @@ pub fn variant_fixture(variant: &Variant, library: &Library) -> Value {
             fx.at(6, probe, Block::Stone);
             fx.powered(6, output.reader, false);
         }
-        Kind::Output | Kind::OutputS => {
+        Kind::Output | Kind::OutputS | Kind::OutputN | Kind::OutputSq => {
             let lamp = variant.tile(library).lamp.expect("output tile has a lamp");
             let lamp = Pos::new(ORIGIN.x + lamp.x, ORIGIN.y + lamp.y, ORIGIN.z + lamp.z);
             let input = &hooks[0];

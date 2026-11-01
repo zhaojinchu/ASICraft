@@ -610,7 +610,14 @@ fn critical_path(
 /// The parts of a circuit as a timed model: the block simulator's rules for
 /// torches, repeaters and lamps, applied on the net graph. Exact for a settled
 /// combinational circuit that does not burn a torch out (the walks here keep
-/// changes far enough apart for that).
+/// changes far enough apart for that), as long as the order it schedules parts
+/// in within a tick is the simulator's, which decides races: two parts due in
+/// the same tick fire in the order they were scheduled, so a torch whose input
+/// changes in the tick it fires in lights or not by that order (cmp4's `lt`
+/// output, 2026-10-31: a two-tick pulse in one order, none in the other). The
+/// model applies simultaneous input changes in the simulator's and the harness's
+/// order (`trace::event_order` of the probes) for that reason; the propagation
+/// order within a net it takes to be the part order, which has agreed so far.
 pub struct Model {
     parts: Vec<ModelPart>,
     /// Parts that read each net.
@@ -623,6 +630,11 @@ pub struct Model {
     lamps: Vec<usize>,
     /// Part states in the world the model was built from (every input off).
     rest: Vec<bool>,
+    /// The inputs in the order the block simulator and the harness apply
+    /// simultaneous changes (`trace::event_order` of the probe blocks): the
+    /// order decides which parts' ticks are scheduled first, and so which fires
+    /// first when two fall due together.
+    input_order: Vec<usize>,
 }
 
 struct ModelPart {
@@ -708,7 +720,9 @@ impl Model {
             .iter()
             .map(|probe| circuit.sources.iter().find(|s| s.pos == *probe).map(|s| s.drives.clone()).unwrap_or_default())
             .collect();
-        Ok(Model { parts, readers, drivers, input_nets, lamps: lamp_parts, rest })
+        let mut input_order: Vec<usize> = (0..probes.len()).collect();
+        input_order.sort_by_key(|&i| crate::trace::event_order(probes[i]));
+        Ok(Model { parts, readers, drivers, input_nets, lamps: lamp_parts, rest, input_order })
     }
 
     /// The model at rest with every input off, as the world was built.
@@ -826,7 +840,7 @@ impl Model {
         let start = state.time;
         let running: Vec<usize> = Vec::new();
         let mut changed_inputs: Vec<usize> = Vec::new();
-        for i in 0..state.inputs.len() {
+        for &i in &self.input_order {
             let on = vector >> i & 1 == 1;
             if state.inputs[i] != on {
                 state.inputs[i] = on;

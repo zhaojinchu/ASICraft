@@ -233,12 +233,17 @@ pub fn route(
         tile.port_needs(pin)
             .ok_or_else(|| RouteFailure::Other(format!("the {} tile has no {} input", tile.name, pin.letter())))
     };
-    // The tile a part in `row` uses: the full cell's, or in a shallow row the shallow one.
-    let in_row = |kind: Kind, row: i32| -> &Tile {
+    // The tile a part at `col`, `row` uses: the full cell's, or the one sized to
+    // its column's width and its row's depth (narrow in the sources' and the
+    // outputs' columns, shallow in a row no flip-flop sits in).
+    let in_cell = |kind: Kind, col: i32, row: i32| -> &Tile {
+        let width = placement.col_width.get(col as usize).copied().unwrap_or(PITCH);
         let depth = placement.row_depth.get(row as usize).copied().unwrap_or(PITCH);
-        library.get(kind.sized(PITCH, depth).unwrap_or(kind))
+        library.get(kind.sized(width, depth).unwrap_or(kind))
     };
-    let gate_tile = |c: usize, row: i32| if netlist.cells[c].is_dff() { &library.dff } else { in_row(Kind::Nor, row) };
+    let gate_tile = |c: usize, (col, row): (i32, i32)| {
+        if netlist.cells[c].is_dff() { &library.dff } else { in_cell(Kind::Nor, col, row) }
+    };
     let mut nets: Vec<(NetId, Source, Vec<Sink>)> = Vec::new();
     for (net, &driver) in drivers.iter().enumerate() {
         let sinks = netlist.sinks_of(net);
@@ -251,7 +256,7 @@ pub fn route(
                 Source {
                     node: ((col + placement.widths[c], row), Track::X),
                     entry: Edge::West,
-                    strength: gate_tile(c, row).source_out(Edge::East),
+                    strength: gate_tile(c, (col, row)).source_out(Edge::East),
                 }
             }
             Driver::Input(i) => {
@@ -259,7 +264,7 @@ pub fn route(
                 Source {
                     node: ((col + 1, row), Track::X),
                     entry: Edge::West,
-                    strength: in_row(Kind::Input, row).source_out(Edge::East),
+                    strength: in_cell(Kind::Input, col, row).source_out(Edge::East),
                 }
             }
             Driver::Const(v) => {
@@ -268,7 +273,7 @@ pub fn route(
                     .iter()
                     .find(|t| t.0 == net)
                     .ok_or_else(|| RouteFailure::Other("constant without a tie".to_string()))?;
-                let tile = in_row(if v { Kind::TieHigh } else { Kind::TieLow }, row);
+                let tile = in_cell(if v { Kind::TieHigh } else { Kind::TieLow }, col, row);
                 Source { node: ((col + 1, row), Track::X), entry: Edge::West, strength: tile.source_out(Edge::East) }
             }
         };
@@ -279,12 +284,12 @@ pub fn route(
                 Sink {
                     node: ((col - 1, row), Track::X),
                     exit: Edge::East,
-                    needed_after: needs(in_row(Kind::Output, row), Edge::West)?,
+                    needed_after: needs(in_cell(Kind::Output, col, row), Edge::West)?,
                 }
             } else {
                 let (col, row) = placement.gates[c];
                 let edge = placement.pin_edges[c][pin];
-                let needed_after = needs(gate_tile(c, row), edge)?;
+                let needed_after = needs(gate_tile(c, (col, row)), edge)?;
                 match edge {
                     Edge::West => Sink { node: ((col - 1, row), Track::X), exit: Edge::East, needed_after },
                     Edge::North => Sink { node: ((col, row - 1), Track::Z), exit: Edge::South, needed_after },

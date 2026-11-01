@@ -620,6 +620,14 @@ pub struct Library {
     pub output_s: Tile,
     pub tie_high_s: Tile,
     pub tie_low_s: Tile,
+    pub input_n: Tile,
+    pub output_n: Tile,
+    pub tie_high_n: Tile,
+    pub tie_low_n: Tile,
+    pub input_sq: Tile,
+    pub output_sq: Tile,
+    pub tie_high_sq: Tile,
+    pub tie_low_sq: Tile,
     /// The wiring of a routing column in such a row, `NARROW` by `SHALLOW`: the
     /// wire on each level and the two ramps (no crossing fits).
     pub wire_sq: Tile,
@@ -661,6 +669,14 @@ impl Library {
             output_s: parse("output_s", include_str!("../../../cells/output_s.tile"))?,
             tie_high_s: parse("tie_high_s", include_str!("../../../cells/tie_high_s.tile"))?,
             tie_low_s: parse("tie_low_s", include_str!("../../../cells/tie_low_s.tile"))?,
+            input_n: parse("input_n", include_str!("../../../cells/input_n.tile"))?,
+            output_n: parse("output_n", include_str!("../../../cells/output_n.tile"))?,
+            tie_high_n: parse("tie_high_n", include_str!("../../../cells/tie_high_n.tile"))?,
+            tie_low_n: parse("tie_low_n", include_str!("../../../cells/tie_low_n.tile"))?,
+            input_sq: parse("input_sq", include_str!("../../../cells/input_sq.tile"))?,
+            output_sq: parse("output_sq", include_str!("../../../cells/output_sq.tile"))?,
+            tie_high_sq: parse("tie_high_sq", include_str!("../../../cells/tie_high_sq.tile"))?,
+            tie_low_sq: parse("tie_low_sq", include_str!("../../../cells/tie_low_sq.tile"))?,
             wire_sq: parse("wire_sq", include_str!("../../../cells/wire_sq.tile"))?,
             wire_up_sq: parse("wire_up_sq", include_str!("../../../cells/wire_up_sq.tile"))?,
             ramp_sq: parse("ramp_sq", include_str!("../../../cells/ramp_sq.tile"))?,
@@ -695,6 +711,14 @@ impl Library {
             Kind::OutputS => &self.output_s,
             Kind::TieHighS => &self.tie_high_s,
             Kind::TieLowS => &self.tie_low_s,
+            Kind::InputN => &self.input_n,
+            Kind::OutputN => &self.output_n,
+            Kind::TieHighN => &self.tie_high_n,
+            Kind::TieLowN => &self.tie_low_n,
+            Kind::InputSq => &self.input_sq,
+            Kind::OutputSq => &self.output_sq,
+            Kind::TieHighSq => &self.tie_high_sq,
+            Kind::TieLowSq => &self.tie_low_sq,
             Kind::WireSq => &self.wire_sq,
             Kind::WireUpSq => &self.wire_up_sq,
             Kind::RampSq => &self.ramp_sq,
@@ -792,6 +816,16 @@ pub enum Kind {
     OutputS,
     TieHighS,
     TieLowS,
+    /// The input, the output and the ties `NARROW` wide, in a row a cell deep
+    /// and in a shallow one.
+    InputN,
+    OutputN,
+    TieHighN,
+    TieLowN,
+    InputSq,
+    OutputSq,
+    TieHighSq,
+    TieLowSq,
     /// The wiring and ramps `NARROW` by `SHALLOW`.
     WireSq,
     WireUpSq,
@@ -808,7 +842,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 30] = [
+    pub const ALL: [Kind; 38] = [
         Kind::Input,
         Kind::Output,
         Kind::Wire,
@@ -829,6 +863,14 @@ impl Kind {
         Kind::OutputS,
         Kind::TieHighS,
         Kind::TieLowS,
+        Kind::InputN,
+        Kind::OutputN,
+        Kind::TieHighN,
+        Kind::TieLowN,
+        Kind::InputSq,
+        Kind::OutputSq,
+        Kind::TieHighSq,
+        Kind::TieLowSq,
         Kind::WireSq,
         Kind::WireUpSq,
         Kind::RampSq,
@@ -863,6 +905,14 @@ impl Kind {
             Kind::OutputS => "output_s",
             Kind::TieHighS => "tie_high_s",
             Kind::TieLowS => "tie_low_s",
+            Kind::InputN => "input_n",
+            Kind::OutputN => "output_n",
+            Kind::TieHighN => "tie_high_n",
+            Kind::TieLowN => "tie_low_n",
+            Kind::InputSq => "input_sq",
+            Kind::OutputSq => "output_sq",
+            Kind::TieHighSq => "tie_high_sq",
+            Kind::TieLowSq => "tie_low_sq",
             Kind::WireSq => "wire_sq",
             Kind::WireUpSq => "wire_up_sq",
             Kind::RampSq => "ramp_sq",
@@ -913,9 +963,9 @@ impl Kind {
 
     /// The kind a tile of the full-cell family (`self`) takes in a cell `width`
     /// blocks wide and `depth` deep: the narrow, shallow or square one. `None`
-    /// where the family has no such tile: no crossing three by three, no gate,
-    /// input, output or constant three wide, no flip-flop but in a full cell,
-    /// and no ramp ([`Kind::ramp_sized`]).
+    /// where the family has no such tile: no crossing three by three, no gate
+    /// three wide, no flip-flop but in a full cell, and no ramp
+    /// ([`Kind::ramp_sized`]).
     pub fn sized(self, width: i32, depth: i32) -> Option<Kind> {
         let (narrow, shallow) = (width < PITCH, depth < PITCH);
         Some(match (self, narrow, shallow) {
@@ -932,6 +982,14 @@ impl Kind {
             (Kind::Output, false, true) => Kind::OutputS,
             (Kind::TieHigh, false, true) => Kind::TieHighS,
             (Kind::TieLow, false, true) => Kind::TieLowS,
+            (Kind::Input, true, false) => Kind::InputN,
+            (Kind::Output, true, false) => Kind::OutputN,
+            (Kind::TieHigh, true, false) => Kind::TieHighN,
+            (Kind::TieLow, true, false) => Kind::TieLowN,
+            (Kind::Input, true, true) => Kind::InputSq,
+            (Kind::Output, true, true) => Kind::OutputSq,
+            (Kind::TieHigh, true, true) => Kind::TieHighSq,
+            (Kind::TieLow, true, true) => Kind::TieLowSq,
             (Kind::Wire, true, true) => Kind::WireSq,
             (Kind::WireUp, true, true) => Kind::WireUpSq,
             _ => return None,
@@ -1222,6 +1280,17 @@ impl Variant {
         out.push(Variant::new(Kind::OutputS, &[Edge::West]));
         out.push(Variant::new(Kind::TieHighS, &[Edge::East]));
         out.push(Variant::new(Kind::TieLowS, &[Edge::East]));
+        // Three blocks wide, in a row a cell deep and in a shallow one: the
+        // input, the output and the ties.
+        for (input, output, high, low) in [
+            (Kind::InputN, Kind::OutputN, Kind::TieHighN, Kind::TieLowN),
+            (Kind::InputSq, Kind::OutputSq, Kind::TieHighSq, Kind::TieLowSq),
+        ] {
+            out.push(Variant::new(input, &[Edge::East]));
+            out.push(Variant::new(output, &[Edge::West]));
+            out.push(Variant::new(high, &[Edge::East]));
+            out.push(Variant::new(low, &[Edge::East]));
+        }
         out
     }
 }
@@ -1579,11 +1648,14 @@ mod tests {
             for tile in [input, output, high, low] {
                 assert_eq!((tile.width, tile.depth, tile.cells()), (NARROW, *depth, 1), "{}", tile.name);
             }
-            assert_eq!(input.source_out(East), 15, "{}", input.name);
-            assert!(input.source_out(East) >= lib.input.source_out(East));
+            // The port's dust is powered at full strength, so the neighbour's port
+            // dust gets one less; the wide tiles lose two or three steps before it.
+            assert_eq!(input.source_out(East), FULL_POWER - 1, "{}", input.name);
+            assert_eq!(input.source_out(East), lib.input.source_out(East) + 2, "{}", input.name);
             assert_eq!(output.port_needs(West), Some(1), "{}", output.name);
-            assert!(output.port_needs(West) <= lib.output.port_needs(West));
-            assert_eq!(high.source_out(East), 15, "{}", high.name);
+            assert_eq!(output.port_needs(West), lib.output.port_needs(West).map(|n| n - 2), "{}", output.name);
+            assert_eq!(high.source_out(East), FULL_POWER - 1, "{}", high.name);
+            assert_eq!(high.source_out(East), lib.tie_high.source_out(East) + 1, "{}", high.name);
             assert_eq!(low.source_out(East), 0, "{}", low.name);
             // The probe block, a redstone block under test, stays off the border.
             let probe = input.probe.unwrap_or_else(|| panic!("{} has no probe", input.name));
