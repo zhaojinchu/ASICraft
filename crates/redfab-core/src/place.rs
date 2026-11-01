@@ -1019,6 +1019,69 @@ mod tests {
     use super::*;
     use crate::tile::Library;
 
+    /// Direction 7 of the 2026-10-31 review. The tail of a ripple design is a
+    /// run of gate columns holding one to three gates each, a routing gap between
+    /// every two (adder8's levels 15 to 19 hold 2, 3, 1, 2, 1 gates). With
+    /// `Columns::Folded` a level of `FOLD_UP_TO_GATES` gates or fewer shares its
+    /// predecessor's column while the merged column holds no more gates than the
+    /// tallest level and no gate would read more than two nets from its own
+    /// column (its north and south pins); a net never runs westward, and an
+    /// input whose driver shares the column is read on a feed, never on the
+    /// west, in every style. `Columns::Levels` is the placement as it was: a
+    /// column per logic level.
+    #[test]
+    fn folded_columns_hold_the_sparse_trailing_levels() {
+        let netlist = crate::pnrtest::ripple_netlist(6, 8);
+        let drivers = netlist.drivers().unwrap();
+        let level = levels(&netlist, &drivers).unwrap();
+        for style in [Style::Pitch4, Style::Packed, Style::Stretched] {
+            let gaps = gap_count(&netlist, style, Columns::Levels).unwrap();
+            let folded_gaps = gap_count(&netlist, style, Columns::Folded).unwrap();
+            assert_eq!(gaps, 10, "{style:?}: nine levels and the outputs");
+            assert!(folded_gaps < gaps, "{style:?}: {folded_gaps} gaps folded against {gaps}");
+            let unfolded = Placer::swept(&netlist, style, Columns::Levels).unwrap().place(&vec![1; gaps]).unwrap();
+            assert_eq!(unfolded.stages, level, "{style:?}: the levels are the columns as before");
+            let folded = Placer::swept(&netlist, style, Columns::Folded).unwrap().place(&vec![1; folded_gaps]).unwrap();
+            let tallest = (1..folded_gaps).map(|s| folded.stages.iter().filter(|&&t| t == s).count()).max().unwrap();
+            assert_eq!(tallest, 6, "{style:?}: the first level is never exceeded");
+            let mut same_column_inputs = 0;
+            for (c, cell) in netlist.cells.iter().enumerate() {
+                let same: Vec<bool> = cell
+                    .inputs
+                    .iter()
+                    .map(|&n| matches!(drivers[n], Driver::Cell(d) if folded.stages[d] == folded.stages[c]))
+                    .collect();
+                for &n in &cell.inputs {
+                    if let Driver::Cell(d) = drivers[n] {
+                        assert!(
+                            folded.stages[d] <= folded.stages[c],
+                            "{style:?}: a net runs westward into {}",
+                            cell.name
+                        );
+                    }
+                }
+                assert!(
+                    same.iter().filter(|&&s| s).count() <= 2,
+                    "{style:?}: {} reads three nets from its column",
+                    cell.name
+                );
+                for (i, &s) in same.iter().enumerate() {
+                    if s {
+                        same_column_inputs += 1;
+                        assert_ne!(
+                            folded.pin_edges[c][i],
+                            Edge::West,
+                            "{style:?}: {} reads its column on the west",
+                            cell.name
+                        );
+                    }
+                }
+            }
+            assert!(same_column_inputs >= 4, "{style:?}: only {same_column_inputs} inputs read their own column");
+        }
+        assert_eq!(FOLD_UP_TO_GATES, 4);
+    }
+
     /// The lowest row anything is placed in (a gate or its south feed, an input,
     /// an output, a constant) is where the footprint floor's depth ends: the
     /// rows below it hold wiring at most, which the router is charged for.

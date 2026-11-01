@@ -1401,6 +1401,7 @@ mod tests {
         let design = &built.design;
         assert!(Style::from_name(&design.placement).is_some(), "placement {:?}", design.placement);
         assert!(["swept", "searched"].contains(&design.rows.as_str()), "rows {:?}", design.rows);
+        assert!(["levels", "folded"].contains(&design.columns.as_str()), "columns {:?}", design.columns);
         let draw = Draw { seed: design.seed, charge_below: design.rows_below_charged };
         assert!(ROUTING_DRAWS.contains(&draw), "{draw:?}");
         assert_eq!(design.hold_fix_rounds, 0);
@@ -1716,17 +1717,27 @@ mod tests {
             // Every candidate to completion, in the order the styles are tried.
             let mut all: Vec<Candidate> = Vec::new();
             for &style in styles_of(&netlist) {
-                let mut placers = vec![Placer::swept(&netlist, style).unwrap()];
-                if style.packs() {
-                    let searched = Placer::searched(&netlist, style).unwrap();
-                    if searched.score().0 < placers[0].score().0 {
-                        placers.push(searched);
+                for columns in [Columns::Levels, Columns::Folded] {
+                    // The folded columns only where the fold changes them.
+                    if columns == Columns::Folded
+                        && gap_count(&netlist, style, Columns::Folded) == gap_count(&netlist, style, Columns::Levels)
+                    {
+                        continue;
                     }
-                }
-                for placer in &placers {
-                    // Each with every routing draw, the earlier draw first in the pick's order.
-                    for &draw in routing_draws(&netlist) {
-                        all.extend(lay_out(&library, &netlist, placer, &lamp_names, draw, None, &mut |_| {}).unwrap());
+                    let mut placers = vec![Placer::swept(&netlist, style, columns).unwrap()];
+                    if style.packs() {
+                        let searched = Placer::searched(&netlist, style, columns).unwrap();
+                        if searched.score().0 < placers[0].score().0 {
+                            placers.push(searched);
+                        }
+                    }
+                    for placer in &placers {
+                        // Each with every routing draw, the earlier draw first in the pick's order.
+                        for &draw in routing_draws(&netlist) {
+                            all.extend(
+                                lay_out(&library, &netlist, placer, &lamp_names, draw, None, &mut |_| {}).unwrap(),
+                            );
+                        }
                     }
                 }
             }
@@ -1753,12 +1764,20 @@ mod tests {
             assert_eq!(
                 (
                     built.design.placement.as_str(),
+                    built.design.columns.as_str(),
                     built.design.rows.as_str(),
                     built.design.seed,
                     built.design.rows_below_charged,
                     built.design.size
                 ),
-                (expected.style.name(), expected.rows, expected.draw.seed, expected.draw.charge_below, [sx, sy, sz]),
+                (
+                    expected.style.name(),
+                    expected.columns.name(),
+                    expected.rows,
+                    expected.draw.seed,
+                    expected.draw.charge_below,
+                    [sx, sy, sz]
+                ),
                 "seed {seed}: {lines:#?}"
             );
             for draw in [", seed 1 placement", ", rows below charged placement"] {
@@ -1834,6 +1853,58 @@ mod tests {
         // The designs the extra draws won have 11 to 32 cells; adder4 (49), the
         // capacity designs and adder8 (102) are routed once, for their time.
         assert!((33..=49).contains(&EXTRA_DRAWS_UP_TO_CELLS), "{EXTRA_DRAWS_UP_TO_CELLS}");
+    }
+
+    /// The folded columns (`Columns::Folded`, direction 7 of the 2026-10-31
+    /// review) are a candidate beside the levels, in every style and with both
+    /// kinds of rows, wherever the fold changes the columns at all. They are laid
+    /// out first, being narrower, so that the floor bound can give the levels'
+    /// candidates up; the levels are earlier in the pick's order, so a layout the
+    /// fold does not beat stays as it was. On a ripple shape the fold wins: the
+    /// kept layout is narrower than any layout of the levels can be, and the
+    /// design file and the report say so.
+    #[test]
+    fn the_folded_columns_are_a_candidate_and_win_on_a_ripple_shape() {
+        let netlist = crate::pnrtest::ripple_netlist(6, 8);
+        let mut lines: Vec<String> = Vec::new();
+        let (built, problems) =
+            build_unchecked_logged(&netlist, "ripple", Break::None, &mut |l| lines.push(l.to_string())).unwrap();
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(built.design.columns, "folded", "{lines:#?}");
+        assert!(built.report.contains("folded columns"), "{}", built.report);
+        let narrowest_levels = styles_of(&netlist)
+            .iter()
+            .map(|&style| {
+                let gaps = gap_count(&netlist, style, Columns::Levels).unwrap();
+                Placer::swept(&netlist, style, Columns::Levels)
+                    .unwrap()
+                    .place(&vec![1; gaps])
+                    .unwrap()
+                    .footprint_floor()
+                    .0
+            })
+            .min()
+            .unwrap();
+        assert!(
+            built.design.size[0] < narrowest_levels,
+            "the kept layout is {} wide, the levels at least {narrowest_levels}",
+            built.design.size[0]
+        );
+        let placement_lines: Vec<&String> = lines.iter().filter(|l| l.ends_with(" placement")).collect();
+        let first_folded = placement_lines.iter().position(|l| l.contains("folded")).expect("a folded candidate");
+        let first_levels = placement_lines
+            .iter()
+            .position(|l| !l.contains("folded") && !l.starts_with("pitch4"))
+            .expect("a levels candidate");
+        assert!(first_folded < first_levels, "the folded columns are laid out first: {placement_lines:#?}");
+        // Where the fold changes nothing, nothing is laid out twice.
+        let flat = crate::pnrtest::random_netlist_sized(&mut crate::tiletest::Rng::new(11), 3, 6, 0);
+        for &style in styles_of(&flat) {
+            assert_eq!(gap_count(&flat, style, Columns::Folded), gap_count(&flat, style, Columns::Levels), "{style:?}");
+        }
+        let mut lines: Vec<String> = Vec::new();
+        build_unchecked_logged(&flat, "flat", Break::None, &mut |l| lines.push(l.to_string())).unwrap();
+        assert!(lines.iter().all(|l| !l.contains("folded")), "{lines:#?}");
     }
 
     /// The router lays the nets that must change rows along any free row, and an
