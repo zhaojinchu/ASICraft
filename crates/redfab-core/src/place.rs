@@ -1012,6 +1012,41 @@ mod tests {
     use super::*;
     use crate::tile::Library;
 
+    /// The lowest row anything is placed in (a gate or its south feed, an input,
+    /// an output, a constant) is where the footprint floor's depth ends: the
+    /// rows below it hold wiring at most, which the router is charged for.
+    #[test]
+    fn the_lowest_placed_row_is_where_the_footprint_floor_ends() {
+        for seed in 600..612u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let gates = 2 + rng.below(12);
+            let flip_flops = if seed % 2 == 0 { rng.below(3) } else { 0 };
+            let inputs = 1 + rng.below(5);
+            let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
+            for style in [Style::Pitch4, Style::Packed, Style::Stretched] {
+                let gaps = gap_count(&netlist, style).unwrap();
+                let placement = place(&netlist, &vec![1; gaps], style).unwrap();
+                let lowest = placement.lowest_row();
+                assert!(
+                    (0..placement.rows).contains(&lowest),
+                    "seed {seed} {style:?}: lowest row {lowest} of {}",
+                    placement.rows
+                );
+                let depth: i32 = placement.row_depth[..=lowest as usize].iter().sum();
+                assert_eq!(placement.footprint_floor().1, depth, "seed {seed} {style:?}");
+                // No gate, feed, input, output or constant sits below it.
+                let placed = placement
+                    .gates
+                    .iter()
+                    .zip(&placement.pin_edges)
+                    .map(|(cell, edges)| cell.1 + i32::from(edges.contains(&Edge::South)))
+                    .chain(placement.inputs.iter().chain(&placement.outputs).map(|c| c.1))
+                    .chain(placement.ties.iter().map(|t| t.2.1));
+                assert_eq!(placed.max(), Some(lowest), "seed {seed} {style:?}");
+            }
+        }
+    }
+
     const TWO_LEVELS: &str = r#"{"modules":{"top":{
         "ports":{"a":{"direction":"input","bits":[2]},"b":{"direction":"input","bits":[3]},"y":{"direction":"output","bits":[5]}},
         "cells":{"g":{"type":"NOR2","connections":{"A":[2],"B":[3],"Y":[4]}},
