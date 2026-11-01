@@ -1314,6 +1314,7 @@ mod tests {
         let design = &built.design;
         assert!(Style::from_name(&design.placement).is_some(), "placement {:?}", design.placement);
         assert!(["swept", "searched"].contains(&design.rows.as_str()), "rows {:?}", design.rows);
+        assert!(design.seed < ROUTING_SEEDS, "seed {}", design.seed);
         assert_eq!(design.hold_fix_rounds, 0);
         let line = built.report.lines().find(|l| l.contains("tiles:")).unwrap().trim();
         assert_eq!(
@@ -1635,7 +1636,12 @@ mod tests {
                     }
                 }
                 for placer in &placers {
-                    all.extend(lay_out(&library, &netlist, placer, &lamp_names, None, &mut |_| {}).unwrap());
+                    // Each with every routing seed, the earlier seed first in the pick's order.
+                    for routing_seed in 0..routing_seeds(&netlist) {
+                        all.extend(
+                            lay_out(&library, &netlist, placer, &lamp_names, routing_seed, None, &mut |_| {}).unwrap(),
+                        );
+                    }
                 }
             }
             let expected = all.iter().filter(|c| c.problems.is_empty()).min_by_key(|c| c.rank(false)).unwrap();
@@ -1647,9 +1653,13 @@ mod tests {
             assert_eq!(built.design.timing.input_spacing, crate::timing::MIN_INPUT_SPACING, "seed {seed}");
             let (sx, sy, sz) = expected.world.size();
             assert_eq!(
-                (built.design.placement.as_str(), built.design.rows.as_str(), built.design.size),
-                (expected.style.name(), expected.rows, [sx, sy, sz]),
+                (built.design.placement.as_str(), built.design.rows.as_str(), built.design.seed, built.design.size),
+                (expected.style.name(), expected.rows, expected.seed, [sx, sy, sz]),
                 "seed {seed}: {lines:#?}"
+            );
+            assert!(
+                lines.iter().any(|l| l.ends_with(", seed 1 placement")),
+                "seed {seed}: no candidate was routed with the second seed: {lines:#?}"
             );
             let timed = lines.iter().filter(|l| l.contains("measuring the burnout budget")).count();
             assert_eq!(timed, 1, "seed {seed}: the burnout budget was measured {timed} times: {lines:#?}");
@@ -1692,6 +1702,24 @@ mod tests {
         assert_eq!(styles_of(&clocked), [Style::Pitch4, Style::Stretched]);
         // adder4 (49 cells) gains from the style; adder8 (102) does not, and would take about 29 s more.
         assert!((50..=102).contains(&STRETCHED_UP_TO_CELLS), "{STRETCHED_UP_TO_CELLS}");
+    }
+
+    /// The negotiation's result moves by up to a tenth of a design's area with
+    /// any change of the costs it starts from (the I/O columns step, 2026-10-31),
+    /// so every candidate of a design under `SECOND_SEED_UP_TO_CELLS` cells is
+    /// routed with two tie-break seeds and the pick takes the smaller layout; a
+    /// larger design is routed once, for its time. The earlier seed wins ties,
+    /// so a layout the second seed does not beat stays as it was.
+    #[test]
+    fn designs_under_the_gate_are_routed_with_two_seeds() {
+        let mut rng = crate::tiletest::Rng::new(9);
+        let under = crate::pnrtest::random_netlist_sized(&mut rng, SECOND_SEED_UP_TO_CELLS - 1, 3, 0);
+        let at = crate::pnrtest::random_netlist_sized(&mut rng, SECOND_SEED_UP_TO_CELLS, 3, 0);
+        assert_eq!(routing_seeds(&under), ROUTING_SEEDS);
+        assert_eq!(routing_seeds(&at), 1);
+        assert_eq!(ROUTING_SEEDS, 2);
+        // adder8 (102 cells) and the capacity designs are routed once.
+        assert!((50..=102).contains(&SECOND_SEED_UP_TO_CELLS), "{SECOND_SEED_UP_TO_CELLS}");
     }
 
     /// When the kept layout's inputs may change less often than every

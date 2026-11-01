@@ -1890,6 +1890,37 @@ mod tests {
         assert!(built.rounds > 0);
     }
 
+    /// The negotiation breaks ties between equal-cost paths with a hash of the
+    /// net and the node (`jitter`); seeding that hash gives another trajectory
+    /// through the same placement, and so, often, another layout of the same
+    /// width, which is as valid as the first (the build routes every candidate
+    /// of a small design with two seeds and keeps the smaller). Seed 0 is the
+    /// unseeded router, byte for byte.
+    #[test]
+    fn another_seed_routes_another_valid_layout_sometimes() {
+        let library = Library::builtin().unwrap();
+        let (mut routed_too, mut differs) = (0, 0);
+        for seed in 400..412u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let netlist = crate::pnrtest::random_netlist(&mut rng, 4 + rng.below(8));
+            let (first, routing) = crate::build::place_and_route(&library, &netlist, Style::Packed).unwrap();
+            let placement = place(&netlist, &routing, Style::Packed).unwrap();
+            let mut log = |_: &str| {};
+            let again = route_with_seed(&library, &netlist, &placement, None, 0, &mut log).unwrap();
+            assert_eq!(again.layout, first.layout, "seed {seed}: routing seed 0 is the plain router");
+            // The second seed may need other widths; where it routes, it routes a valid layout.
+            if let Ok(other) = route_with_seed(&library, &netlist, &placement, None, 1, &mut log) {
+                other.layout.realize(&library, &netlist).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+                routed_too += 1;
+                if other.layout != first.layout {
+                    differs += 1;
+                }
+            }
+        }
+        assert!(routed_too >= 6, "the second seed routed only {routed_too} of 12 placements");
+        assert!(differs >= 1, "the second seed never laid a net differently");
+    }
+
     #[test]
     fn a_seeded_history_steers_nets_off_the_costly_tracks() {
         let netlist = braid(5);
