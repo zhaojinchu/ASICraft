@@ -129,15 +129,22 @@ impl Placement {
     /// Widening a gap or deepening a row for the next attempt only raises it.
     pub fn footprint_floor(&self) -> (i32, i32) {
         let width: i32 = self.col_width[..self.cols as usize].iter().sum();
+        let depth: i32 = self.row_depth[..(self.lowest_row() + 1) as usize].iter().sum();
+        (width, depth)
+    }
+
+    /// The lowest row anything is placed in: a gate or its south feed, an
+    /// input, an output or a constant. The rows below it hold wiring at most,
+    /// and only when the router lays some there (which the charged routing
+    /// draw makes it pay for, `route::Draw`).
+    pub fn lowest_row(&self) -> i32 {
         let gate_rows = self
             .gates
             .iter()
             .zip(&self.pin_edges)
             .map(|(cell, edges)| cell.1 + i32::from(edges.contains(&Edge::South)));
         let fixed_rows = self.inputs.iter().chain(&self.outputs).map(|c| c.1).chain(self.ties.iter().map(|t| t.2.1));
-        let lowest = gate_rows.chain(fixed_rows).max().unwrap_or(-1);
-        let depth: i32 = self.row_depth[..(lowest + 1) as usize].iter().sum();
-        (width, depth)
+        gate_rows.chain(fixed_rows).max().unwrap_or(-1)
     }
 
     pub fn is_free(&self, cell: Cell) -> bool {
