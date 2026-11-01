@@ -1937,6 +1937,8 @@ mod tests {
             let first = match (plain, again) {
                 (Ok(plain), Ok(again)) => {
                     assert_eq!(again.layout, plain.layout, "seed {seed}: routing seed 0 is the plain router");
+                    let draw = route_with(&library, &netlist, &placement, None, Draw::default(), &mut log).unwrap();
+                    assert_eq!(draw.layout, plain.layout, "seed {seed}: the default draw is the plain router");
                     plain
                 }
                 (Err(_), Err(_)) => continue,

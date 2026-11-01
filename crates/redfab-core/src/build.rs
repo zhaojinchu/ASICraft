@@ -1367,7 +1367,8 @@ mod tests {
         let design = &built.design;
         assert!(Style::from_name(&design.placement).is_some(), "placement {:?}", design.placement);
         assert!(["swept", "searched"].contains(&design.rows.as_str()), "rows {:?}", design.rows);
-        assert!(design.seed < ROUTING_SEEDS, "seed {}", design.seed);
+        let draw = Draw { seed: design.seed, charge_below: design.rows_below_charged };
+        assert!(ROUTING_DRAWS.contains(&draw), "{draw:?}");
         assert_eq!(design.hold_fix_rounds, 0);
         let line = built.report.lines().find(|l| l.contains("tiles:")).unwrap().trim();
         assert_eq!(
@@ -1689,11 +1690,9 @@ mod tests {
                     }
                 }
                 for placer in &placers {
-                    // Each with every routing seed, the earlier seed first in the pick's order.
-                    for routing_seed in 0..routing_seeds(&netlist) {
-                        all.extend(
-                            lay_out(&library, &netlist, placer, &lamp_names, routing_seed, None, &mut |_| {}).unwrap(),
-                        );
+                    // Each with every routing draw, the earlier draw first in the pick's order.
+                    for &draw in routing_draws(&netlist) {
+                        all.extend(lay_out(&library, &netlist, placer, &lamp_names, draw, None, &mut |_| {}).unwrap());
                     }
                 }
             }
@@ -1706,14 +1705,22 @@ mod tests {
             assert_eq!(built.design.timing.input_spacing, crate::timing::MIN_INPUT_SPACING, "seed {seed}");
             let (sx, sy, sz) = expected.world.size();
             assert_eq!(
-                (built.design.placement.as_str(), built.design.rows.as_str(), built.design.seed, built.design.size),
-                (expected.style.name(), expected.rows, expected.seed, [sx, sy, sz]),
+                (
+                    built.design.placement.as_str(),
+                    built.design.rows.as_str(),
+                    built.design.seed,
+                    built.design.rows_below_charged,
+                    built.design.size
+                ),
+                (expected.style.name(), expected.rows, expected.draw.seed, expected.draw.charge_below, [sx, sy, sz]),
                 "seed {seed}: {lines:#?}"
             );
-            assert!(
-                lines.iter().any(|l| l.ends_with(", seed 1 placement")),
-                "seed {seed}: no candidate was routed with the second seed: {lines:#?}"
-            );
+            for draw in [", seed 1 placement", ", rows below charged placement"] {
+                assert!(
+                    lines.iter().any(|l| l.ends_with(draw)),
+                    "seed {seed}: no candidate was routed with the draw \"{draw}\": {lines:#?}"
+                );
+            }
             let timed = lines.iter().filter(|l| l.contains("measuring the burnout budget")).count();
             assert_eq!(timed, 1, "seed {seed}: the burnout budget was measured {timed} times: {lines:#?}");
             let at = |prefix: &str| lines.iter().position(|l| l.starts_with(prefix));
@@ -1759,22 +1766,88 @@ mod tests {
 
     /// The negotiation's result moves by up to a tenth of a design's area with
     /// any change of the costs it starts from (the I/O columns step, 2026-10-31),
-    /// so every candidate of a design under `SECOND_SEED_UP_TO_CELLS` cells is
-    /// routed with two tie-break seeds and the pick takes the smaller layout; a
-    /// larger design is routed once, for its time (the gate is where the second
-    /// seed costs seconds, not tens of them). The earlier seed wins ties, so a
-    /// layout the second seed does not beat stays as it was.
+    /// so every candidate of a design under `EXTRA_DRAWS_UP_TO_CELLS` cells is
+    /// routed with every draw of `ROUTING_DRAWS`: the plain router, a second
+    /// tie-break seed, and the plain seed with the rows below the placed rows
+    /// charged for (the depth kill tests, 2026-11-01), and the pick takes the
+    /// smallest layout; a larger design is routed once, for its time (the gate
+    /// is where the extra draws cost seconds, not tens of them). The plain
+    /// router is first in the pick's order and wins ties, so a layout no other
+    /// draw beats stays as it was.
     #[test]
-    fn designs_under_the_gate_are_routed_with_two_seeds() {
+    fn designs_under_the_gate_are_routed_with_every_draw() {
         let mut rng = crate::tiletest::Rng::new(9);
-        let under = crate::pnrtest::random_netlist_sized(&mut rng, SECOND_SEED_UP_TO_CELLS - 1, 3, 0);
-        let at = crate::pnrtest::random_netlist_sized(&mut rng, SECOND_SEED_UP_TO_CELLS, 3, 0);
-        assert_eq!(routing_seeds(&under), ROUTING_SEEDS);
-        assert_eq!(routing_seeds(&at), 1);
-        assert_eq!(ROUTING_SEEDS, 2);
-        // The designs the second seed won have 11 to 31 cells; adder4 (49), the
+        let under = crate::pnrtest::random_netlist_sized(&mut rng, EXTRA_DRAWS_UP_TO_CELLS - 1, 3, 0);
+        let at = crate::pnrtest::random_netlist_sized(&mut rng, EXTRA_DRAWS_UP_TO_CELLS, 3, 0);
+        assert_eq!(routing_draws(&under), ROUTING_DRAWS);
+        assert_eq!(routing_draws(&at), &ROUTING_DRAWS[..1]);
+        assert_eq!(
+            ROUTING_DRAWS,
+            [
+                Draw { seed: 0, charge_below: false },
+                Draw { seed: 1, charge_below: false },
+                Draw { seed: 0, charge_below: true }
+            ]
+        );
+        assert_eq!(ROUTING_DRAWS[0], Draw::default(), "the plain router is the first draw");
+        // The designs the extra draws won have 11 to 32 cells; adder4 (49), the
         // capacity designs and adder8 (102) are routed once, for their time.
-        assert!((32..=49).contains(&SECOND_SEED_UP_TO_CELLS), "{SECOND_SEED_UP_TO_CELLS}");
+        assert!((33..=49).contains(&EXTRA_DRAWS_UP_TO_CELLS), "{EXTRA_DRAWS_UP_TO_CELLS}");
+    }
+
+    /// The router lays the nets that must change rows along any free row, and an
+    /// empty row below the lowest placed row is the freest of all: counter4 kept
+    /// 5 of its 18 rows that way, mem2 6 of 27, counter8 6 of 31 (the review of
+    /// 2026-10-31, direction 5), each a strip of depth the layout check cannot
+    /// trim. The charged draw costs every track in such a row `BELOW_ROW_COST`
+    /// more, so a net weaves through the free rows among the gates where it
+    /// can and spills below only when it must: over random netlists the rows
+    /// the wiring lays below the placed rows fall by a third and the summed
+    /// footprint with them. Not a blanket change (the negotiation turns some
+    /// designs larger under any cost change: adder8 +6 %, mem2 +9 %), so it is
+    /// a draw the pick judges, like the second seed.
+    #[test]
+    fn charging_the_rows_below_the_placed_rows_keeps_the_wiring_among_the_gates() {
+        let library = Library::builtin().unwrap();
+        let charged = Draw { seed: 0, charge_below: true };
+        let (mut plain_below, mut charged_below, mut plain_area, mut charged_area, mut routed) = (0, 0, 0i64, 0i64, 0);
+        for seed in 500..540u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let gates = 4 + rng.below(14);
+            let flip_flops = if seed % 3 == 0 { 1 + rng.below(3) } else { 0 };
+            let inputs = 1 + rng.below(6);
+            let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
+            let style = if flip_flops > 0 { Style::Stretched } else { Style::Packed };
+            let placer = Placer::swept(&netlist, style).unwrap();
+            let lay = |draw: Draw| -> Option<(i32, i64)> {
+                let Routing::Done(routed, routing) =
+                    place_and_route_bounded(&library, &netlist, &placer, draw, None, &mut |_| {}).ok()?
+                else {
+                    unreachable!("nothing is given up on without a bound")
+                };
+                let lowest = placer.place(&routing).unwrap().lowest_row();
+                let (cols, rows) = routed.layout.size();
+                let width: i32 = routed.layout.col_width[..cols as usize].iter().sum();
+                let depth: i32 = routed.layout.row_depth[..rows as usize].iter().sum();
+                Some(((rows - 1 - lowest).max(0), i64::from(width) * i64::from(depth)))
+            };
+            let (Some(plain), Some(with_charge)) = (lay(Draw::default()), lay(charged)) else { continue };
+            routed += 1;
+            plain_below += plain.0;
+            charged_below += with_charge.0;
+            plain_area += plain.1;
+            charged_area += with_charge.1;
+        }
+        assert!(routed >= 36, "only {routed} of 40 netlists routed with both draws");
+        assert!(
+            plain_below >= 40,
+            "the plain router laid only {plain_below} rows below the placed rows: nothing to charge for"
+        );
+        assert!(
+            charged_below * 4 <= plain_below * 3,
+            "the charged draw laid {charged_below} rows below the placed rows against the plain router's {plain_below}"
+        );
+        assert!(charged_area < plain_area, "the charged draw's footprints sum to {charged_area} against {plain_area}");
     }
 
     /// When the kept layout's inputs may change less often than every
