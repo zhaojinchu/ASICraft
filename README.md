@@ -265,7 +265,7 @@ travels in the URL). The game port stays on 127.0.0.1.
 - `docs/DESIGN.md`: the design review the plan came from, with what changed.
 - `docs/mechanics.md`: what the game does, measured, with a fixture per fact.
 - `docs/trace-format.md`: the recording format every part shares.
-- `docs/REVIEW-2026-10-07.md`: the latest whole-project review and its roadmap.
+- `docs/REVIEW-2026-11-01.md`: the latest review, five lenses (area, time, correctness, structure, product) and the order to take them in; `docs/REVIEW-2026-10-31-optimisation.md` ranked the area directions the steps since then follow; `docs/REVIEW-2026-10-07.md` was the first whole-project review.
 - `cells/README.md`: the tile library and the rules every tile follows.
 
 ## License
