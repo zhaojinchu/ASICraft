@@ -215,17 +215,101 @@ pub fn levels(netlist: &Netlist, drivers: &[Driver]) -> Result<Vec<usize>, Strin
     Ok(level)
 }
 
+/// How the gates are given their columns: a column per logic level, or the
+/// sparse trailing levels folded into shared columns. The tail of a ripple
+/// design is a run of gate columns holding one to three gates each with a
+/// routing gap between every two (adder8's levels 15 to 19 hold 2, 3, 1, 2, 1
+/// gates), so folded, a level of [`FOLD_UP_TO_GATES`] gates or fewer shares its
+/// predecessor's column as long as the merged column holds no more gates than
+/// the tallest level and no gate would read more than two nets from its own
+/// column: those it reads on its north and south feeds, the net leaving the
+/// column on the east and turning back in the gap, as the clock inverter
+/// drives the flip-flops beside it. The build lays both out and the pick
+/// judges (the 2026-10-31 review, direction 7: adder8 323 x 99 to 250 x 105,
+/// adder4 172 x 60 to 125 x 63; fa1 and hier larger, so they keep the levels).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Columns {
+    Levels,
+    Folded,
+}
+
+impl Columns {
+    pub fn name(self) -> &'static str {
+        match self {
+            Columns::Levels => "levels",
+            Columns::Folded => "folded",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Columns> {
+        match name {
+            "levels" => Some(Columns::Levels),
+            "folded" => Some(Columns::Folded),
+            _ => None,
+        }
+    }
+}
+
+/// The most gates a level may hold and still be folded into its predecessor's
+/// column. Measured 2026-11-01 with every design folded: at four the shipped
+/// sum fell 11.6 % (adder8 -18 %, adder4 -24 %, cmp4 -18 %, param_add -18 %);
+/// at two adder8 gained nothing and param_add and counter4 half as much.
+pub const FOLD_UP_TO_GATES: usize = 4;
+
 /// The stage of every cell (1 and up, the flip-flop column being stage 1 when
 /// there is one), and how many gaps the placement has. In the packed styles
 /// the clock inverters go into the flip-flop column, not by their depth, so
-/// that the clock reaches every flip-flop from beside it.
-fn stages(netlist: &Netlist, level: &[usize], drivers: &[Driver], style: Style) -> (Vec<usize>, usize) {
+/// that the clock reaches every flip-flop from beside it. With
+/// [`Columns::Folded`], the sparse trailing levels are folded into shared
+/// columns, from the last level down: a level of [`FOLD_UP_TO_GATES`] gates or
+/// fewer joins the one before it (never the flip-flop column) when the merged
+/// column holds no more gates than the tallest level and every gate of it would
+/// read at most two nets from that column.
+fn stages(
+    netlist: &Netlist,
+    level: &[usize],
+    drivers: &[Driver],
+    style: Style,
+    columns: Columns,
+) -> (Vec<usize>, usize) {
     let has_dff = netlist.cells.iter().any(|c| c.is_dff());
     let first = if has_dff { 0 } else { 1 };
     let mut stage: Vec<usize> = level.iter().map(|&l| l + 1 - first).collect();
     if style.packs() {
         for c in clock_inverters(netlist, drivers) {
             stage[c] = 1;
+        }
+    }
+    if columns == Columns::Folded {
+        let count = |stage: &[usize], s: usize| stage.iter().filter(|&&t| t == s).count();
+        let max_stage = stage.iter().copied().max().unwrap_or(0);
+        let tallest = (1..=max_stage).map(|s| count(&stage, s)).max().unwrap_or(0);
+        let mut s = max_stage;
+        while s >= 2 {
+            let into = s - 1;
+            let n = count(&stage, s);
+            let fits = n > 0 && n <= FOLD_UP_TO_GATES && n + count(&stage, into) <= tallest && !(has_dff && into == 1);
+            // Every gate of the merged column reads at most two nets from it (a
+            // column folded before may already feed gates of its own).
+            let merged = |t: usize| t == s || t == into;
+            let readable = (0..netlist.cells.len()).filter(|&c| merged(stage[c])).all(|c| {
+                netlist.cells[c]
+                    .inputs
+                    .iter()
+                    .filter(|&&net| matches!(drivers[net], Driver::Cell(d) if merged(stage[d])))
+                    .count()
+                    <= 2
+            });
+            if fits && readable {
+                for st in stage.iter_mut() {
+                    if *st == s {
+                        *st = into;
+                    } else if *st > s {
+                        *st -= 1;
+                    }
+                }
+            }
+            s -= 1;
         }
     }
     let gate_columns = stage.iter().copied().max().unwrap_or(0);
@@ -252,12 +336,12 @@ pub fn clock_inverters(netlist: &Netlist, drivers: &[Driver]) -> Vec<usize> {
         .collect()
 }
 
-/// How many gaps of routing columns the placement of `netlist` in `style` has:
-/// one more than its gate columns.
-pub fn gap_count(netlist: &Netlist, style: Style) -> Result<usize, String> {
+/// How many gaps of routing columns the placement of `netlist` in `style` with
+/// `columns` has: one more than its gate columns.
+pub fn gap_count(netlist: &Netlist, style: Style, columns: Columns) -> Result<usize, String> {
     let drivers = netlist.drivers()?;
     let level = levels(netlist, &drivers)?;
-    Ok(stages(netlist, &level, &drivers, style).1)
+    Ok(stages(netlist, &level, &drivers, style, columns).1)
 }
 
 /// How many barycenter sweeps a placement runs. The sweeps do not settle, they
@@ -276,14 +360,14 @@ const SWEPT_SWEEPS: usize = 4;
 /// taken as `style` says: the searched rows (see [`Placer::searched`]), in the
 /// columns `routing` gives.
 pub fn place(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Placement, String> {
-    Placer::searched(netlist, style)?.place(routing)
+    Placer::searched(netlist, style, Columns::Levels)?.place(routing)
 }
 
 /// The placement after each of the `SWEEPS` barycenter sweeps, in order, with
 /// `routing[g]` routing columns in gap `g`: what [`Placer::searched`] chooses
 /// among before the local search.
 pub fn sweeps(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Vec<Placement>, String> {
-    let frame = Frame::new(netlist, style)?;
+    let frame = Frame::new(netlist, style, Columns::Levels)?;
     let mut rows = frame.initial_rows();
     (0..SWEEPS)
         .map(|_| {
@@ -339,8 +423,8 @@ impl<'a> Placer<'a> {
     /// count never falling from one sweep to the next: the placement of the
     /// compaction stage, kept as it was so that a design never builds worse than
     /// it did.
-    pub fn swept(netlist: &'a Netlist, style: Style) -> Result<Placer<'a>, String> {
-        let frame = Frame::new(netlist, style)?;
+    pub fn swept(netlist: &'a Netlist, style: Style, columns: Columns) -> Result<Placer<'a>, String> {
+        let frame = Frame::new(netlist, style, columns)?;
         let mut rows = frame.initial_rows();
         for _ in 0..SWEPT_SWEEPS {
             let floor = rows.count;
@@ -352,8 +436,8 @@ impl<'a> Placer<'a> {
     /// The rows after `SWEEPS` barycenter sweeps, the one that scores least
     /// kept, then improved by a local search over the order of each column that
     /// takes a swap or a move of one gate only when the score falls.
-    pub fn searched(netlist: &'a Netlist, style: Style) -> Result<Placer<'a>, String> {
-        let frame = Frame::new(netlist, style)?;
+    pub fn searched(netlist: &'a Netlist, style: Style, columns: Columns) -> Result<Placer<'a>, String> {
+        let frame = Frame::new(netlist, style, columns)?;
         let mut rows = frame.initial_rows();
         let mut best: Option<((i64, i64), Rows)> = None;
         for _ in 0..SWEEPS {
@@ -375,6 +459,11 @@ impl<'a> Placer<'a> {
 
     pub fn style(&self) -> Style {
         self.frame.style
+    }
+
+    /// How the gates were given their columns.
+    pub fn columns(&self) -> Columns {
+        self.frame.columns
     }
 
     /// How many gaps of routing columns the placement has.
@@ -411,6 +500,7 @@ struct Rows {
 struct Frame<'a> {
     netlist: &'a Netlist,
     style: Style,
+    columns: Columns,
     drivers: Vec<Driver>,
     stage: Vec<usize>,
     gaps: usize,
@@ -427,11 +517,11 @@ struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    fn new(netlist: &'a Netlist, style: Style) -> Result<Frame<'a>, String> {
+    fn new(netlist: &'a Netlist, style: Style, columns: Columns) -> Result<Frame<'a>, String> {
         let drivers = netlist.drivers()?;
         let level = levels(netlist, &drivers)?;
         let has_dff = netlist.cells.iter().any(|c| c.is_dff());
-        let (stage, gaps) = stages(netlist, &level, &drivers, style);
+        let (stage, gaps) = stages(netlist, &level, &drivers, style, columns);
         let inverters = if style.packs() { clock_inverters(netlist, &drivers) } else { Vec::new() };
         let used_constants: Vec<(NetId, bool)> =
             netlist.constants.iter().copied().filter(|(net, _)| !netlist.sinks_of(*net).is_empty()).collect();
@@ -480,6 +570,7 @@ impl<'a> Frame<'a> {
         Ok(Frame {
             netlist,
             style,
+            columns,
             drivers,
             stage,
             gaps,
@@ -509,6 +600,17 @@ impl<'a> Frame<'a> {
             of_output: (0..netlist.outputs.len() as i32).collect(),
             count: self.base_rows,
         }
+    }
+
+    /// Per input of gate `c`, whether its driver sits in the same gate column (a
+    /// folded level), so that the pin cannot be on the west: the net leaves the
+    /// column on the east and comes back into a feed.
+    fn same_column(&self, c: usize) -> Vec<bool> {
+        self.netlist.cells[c]
+            .inputs
+            .iter()
+            .map(|&net| matches!(self.drivers[net], Driver::Cell(d) if self.stage[d] == self.stage[c]))
+            .collect()
     }
 
     /// The row a net comes from.
@@ -571,7 +673,9 @@ impl<'a> Frame<'a> {
                     .collect();
                 let crossing = self.crossing_of_stage[s];
                 let every = if crossing > 0 { (order.len() as i32 + crossing - 1) / crossing } else { i32::MAX };
-                let bottom = pack_stage(netlist, &order, &from, every, &mut rows.of_cell, &mut rows.sides_of_cell);
+                let same: Vec<Vec<bool>> = order.iter().map(|&c| self.same_column(c)).collect();
+                let bottom =
+                    pack_stage(netlist, &order, &from, &same, every, &mut rows.of_cell, &mut rows.sides_of_cell);
                 bottoms.push((s, bottom));
             } else {
                 for (i, &c) in order.iter().enumerate() {
@@ -737,7 +841,7 @@ impl<'a> Frame<'a> {
             }
             let row = f64::from(gates[c].1);
             let from: Vec<f64> = cell.inputs.iter().map(|&n| self.driver_row(n, rows)).collect();
-            pin_edges.push(assign_sides(&from, row, row, 0.0, &vec![None; from.len()]));
+            pin_edges.push(assign_sides(&from, row, row, 0.0, &vec![None; from.len()], &self.same_column(c)));
         }
 
         Ok(Placement {
@@ -889,6 +993,7 @@ fn pack_stage(
     netlist: &Netlist,
     order: &[usize],
     from: &[Vec<f64>],
+    same: &[Vec<bool>],
     every: i32,
     row_of_cell: &mut [i32],
     sides_of_cell: &mut [Vec<Edge>],
@@ -908,7 +1013,14 @@ fn pack_stage(
             // Reading on the north costs a row above the gate, unless that row is
             // the feed shared with the gate above.
             let row_with_north = if shared_above.is_some() { top } else { top + 1 };
-            let own = assign_sides(&from[i], f64::from(top), f64::from(row_with_north), FEED_ROW_COST, &forced_above);
+            let own = assign_sides(
+                &from[i],
+                f64::from(top),
+                f64::from(row_with_north),
+                FEED_ROW_COST,
+                &forced_above,
+                &same[i],
+            );
             // A net the gate below also reads, that both would take on a feed side
             // of their own accord (so sharing the tile saves a row); neither reads it
             // twice, and it is not the one shared above. The lowest such net.
@@ -916,10 +1028,23 @@ fn pack_stage(
             let shared_below = below.and_then(|b| {
                 let next = &netlist.cells[b];
                 let unforced = vec![None; next.inputs.len()];
-                let own_below =
-                    assign_sides(&from[i + 1], f64::from(top + 2), f64::from(top + 3), FEED_ROW_COST, &unforced);
+                let own_below = assign_sides(
+                    &from[i + 1],
+                    f64::from(top + 2),
+                    f64::from(top + 3),
+                    FEED_ROW_COST,
+                    &unforced,
+                    &same[i + 1],
+                );
                 let on_feed = |sides: &[Edge], inputs: &[NetId], net: NetId| {
                     inputs.iter().zip(sides).any(|(&m, &side)| m == net && side != Edge::West)
+                };
+                // A gate has two feed sides: for every input that must take one (the
+                // net shared above, a net from the gate's own column, the net shared
+                // below), on both gates.
+                let feeds_fit = |inputs: &[NetId], same: &[bool], above: Option<NetId>, shared: NetId| {
+                    inputs.iter().zip(same).filter(|&(&net, &same)| same || Some(net) == above || net == shared).count()
+                        <= 2
                 };
                 cell.inputs
                     .iter()
@@ -930,6 +1055,8 @@ fn pack_stage(
                             && reads_once(b, net)
                             && on_feed(&own, &cell.inputs, net)
                             && on_feed(&own_below, &next.inputs, net)
+                            && feeds_fit(&cell.inputs, &same[i], shared_above, net)
+                            && feeds_fit(&next.inputs, &same[i + 1], None, net)
                     })
                     .min()
             });
@@ -942,8 +1069,14 @@ fn pack_stage(
                         .zip(&forced_above)
                         .map(|(&net, &above)| if net == shared { Some(Edge::South) } else { above })
                         .collect();
-                    let sides =
-                        assign_sides(&from[i], f64::from(top), f64::from(row_with_north), FEED_ROW_COST, &forced);
+                    let sides = assign_sides(
+                        &from[i],
+                        f64::from(top),
+                        f64::from(row_with_north),
+                        FEED_ROW_COST,
+                        &forced,
+                        &same[i],
+                    );
                     (sides, shared_below)
                 }
             }
@@ -975,6 +1108,7 @@ fn assign_sides(
     row_with_north: f64,
     feed_cost: f64,
     forced: &[Option<Edge>],
+    no_west: &[bool],
 ) -> Vec<Edge> {
     let sides = [Edge::West, Edge::North, Edge::South];
     let n = from_rows.len();
@@ -994,6 +1128,10 @@ fn assign_sides(
     }
     for choice in choices {
         if choice.iter().zip(forced).any(|(&e, f)| f.is_some_and(|f| f != e)) {
+            continue;
+        }
+        // A net from the gate's own column comes back into a feed, never the west.
+        if choice.iter().zip(no_west).any(|(&e, &nw)| nw && e == Edge::West) {
             continue;
         }
         let gate_row = if choice.contains(&Edge::North) { row_with_north } else { row };
@@ -1080,6 +1218,35 @@ mod tests {
             assert!(same_column_inputs >= 4, "{style:?}: only {same_column_inputs} inputs read their own column");
         }
         assert_eq!(FOLD_UP_TO_GATES, 4);
+        // Over random netlists too: every gate of a folded placement gets a side
+        // for every pin, however its column was merged, and reads at most two
+        // nets from its own column.
+        for seed in 700..740u64 {
+            let mut rng = crate::tiletest::Rng::new(seed);
+            let gates = 4 + rng.below(20);
+            let flip_flops = if seed % 4 == 0 { 1 + rng.below(3) } else { 0 };
+            let inputs = 1 + rng.below(6);
+            let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
+            let drivers = netlist.drivers().unwrap();
+            for style in [Style::Pitch4, Style::Packed, Style::Stretched] {
+                let gaps = gap_count(&netlist, style, Columns::Folded).unwrap();
+                let folded = Placer::swept(&netlist, style, Columns::Folded).unwrap().place(&vec![1; gaps]).unwrap();
+                for (c, cell) in netlist.cells.iter().enumerate() {
+                    assert_eq!(
+                        folded.pin_edges[c].len(),
+                        cell.inputs.len(),
+                        "seed {seed} {style:?}: {} has no sides",
+                        cell.name
+                    );
+                    let same = cell
+                        .inputs
+                        .iter()
+                        .filter(|&&n| matches!(drivers[n], Driver::Cell(d) if folded.stages[d] == folded.stages[c]))
+                        .count();
+                    assert!(same <= 2, "seed {seed} {style:?}: {} reads {same} nets from its column", cell.name);
+                }
+            }
+        }
     }
 
     /// The lowest row anything is placed in (a gate or its south feed, an input,
@@ -1094,7 +1261,7 @@ mod tests {
             let inputs = 1 + rng.below(5);
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
             for style in [Style::Pitch4, Style::Packed, Style::Stretched] {
-                let gaps = gap_count(&netlist, style).unwrap();
+                let gaps = gap_count(&netlist, style, Columns::Levels).unwrap();
                 let placement = place(&netlist, &vec![1; gaps], style).unwrap();
                 let lowest = placement.lowest_row();
                 assert!(
@@ -1125,7 +1292,7 @@ mod tests {
     #[test]
     fn columns_are_named_stably_and_gaps_have_their_own_width() {
         let netlist = Netlist::from_yosys_json(TWO_LEVELS, "top", &Library::builtin().unwrap()).unwrap();
-        assert_eq!(gap_count(&netlist, Style::Pitch4).unwrap(), 3);
+        assert_eq!(gap_count(&netlist, Style::Pitch4, Columns::Levels).unwrap(), 3);
         let p = place(&netlist, &[2, 1, 3], Style::Pitch4).unwrap();
         // sources, 2 routing, gate, 1 routing, gate, 3 routing, outputs
         assert_eq!(p.cols, 1 + 2 + 1 + 1 + 1 + 3 + 1);
@@ -1166,19 +1333,19 @@ mod tests {
     fn a_feed_side_costs_a_packed_gate_a_row_so_the_west_wins_when_it_is_near() {
         let free = |n: usize| vec![None; n];
         // At the four-row pitch (no cost) a driver one row up takes the north side.
-        assert_eq!(assign_sides(&[4.0], 5.0, 5.0, 0.0, &free(1)), vec![Edge::North]);
+        assert_eq!(assign_sides(&[4.0], 5.0, 5.0, 0.0, &free(1), &[false]), vec![Edge::North]);
         // Packed, the gate moves down a row to make room for a north feed, so
         // the west port is as near, and the feed row costs on top: west.
-        assert_eq!(assign_sides(&[4.0], 5.0, 6.0, FEED_ROW_COST, &free(1)), vec![Edge::West]);
+        assert_eq!(assign_sides(&[4.0], 5.0, 6.0, FEED_ROW_COST, &free(1), &[false]), vec![Edge::West]);
         // Three nets from below, above and the gate's own row: the one at the
         // gate's row takes the west, the one below the south, the one above the north.
         assert_eq!(
-            assign_sides(&[9.0, 2.0, 5.0], 5.0, 6.0, FEED_ROW_COST, &free(3)),
+            assign_sides(&[9.0, 2.0, 5.0], 5.0, 6.0, FEED_ROW_COST, &free(3), &[false; 3]),
             vec![Edge::South, Edge::West, Edge::North]
         );
         // A forced side is kept whatever it costs.
         assert_eq!(
-            assign_sides(&[9.0, 2.0, 5.0], 5.0, 6.0, FEED_ROW_COST, &[None, Some(Edge::South), None]),
+            assign_sides(&[9.0, 2.0, 5.0], 5.0, 6.0, FEED_ROW_COST, &[None, Some(Edge::South), None], &[false; 3]),
             vec![Edge::West, Edge::South, Edge::North]
         );
     }
@@ -1198,7 +1365,8 @@ mod tests {
         let pack = |order: &[usize], from: &[Vec<f64>], every: i32| {
             let mut rows = vec![0; 3];
             let mut sides = vec![Vec::new(); 3];
-            let bottom = pack_stage(&netlist, order, from, every, &mut rows, &mut sides);
+            let same: Vec<Vec<bool>> = from.iter().map(|f| vec![false; f.len()]).collect();
+            let bottom = pack_stage(&netlist, order, from, &same, every, &mut rows, &mut sides);
             (rows, sides, bottom)
         };
         // g0 reads b from above on the west and a from below on the south; g1
@@ -1230,8 +1398,8 @@ mod tests {
             let gates = 4 + rng.below(12);
             let inputs = 2 + rng.below(4);
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, 0);
-            let gaps = gap_count(&netlist, Style::Packed).unwrap();
-            assert_eq!(gaps, gap_count(&netlist, Style::Pitch4).unwrap(), "no clock inverter to move");
+            let gaps = gap_count(&netlist, Style::Packed, Columns::Levels).unwrap();
+            assert_eq!(gaps, gap_count(&netlist, Style::Pitch4, Columns::Levels).unwrap(), "no clock inverter to move");
             let packed = place(&netlist, &vec![1; gaps], Style::Packed).unwrap();
             let pitch4 = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
             let tallest = |p: &Placement| p.gates.iter().map(|g| g.1).max().unwrap_or(0);
@@ -1272,7 +1440,7 @@ mod tests {
             let gates = 4 + rng.below(12);
             let inputs = 2 + rng.below(4);
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, 0);
-            let gaps = gap_count(&netlist, Style::Stretched).unwrap();
+            let gaps = gap_count(&netlist, Style::Stretched, Columns::Levels).unwrap();
             let stretched = place(&netlist, &vec![1; gaps], Style::Stretched).unwrap();
             let pitch4 = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
             assert!(stretched.rows <= pitch4.rows, "seed {seed}: {} rows against {}", stretched.rows, pitch4.rows);
@@ -1334,12 +1502,12 @@ mod tests {
         let nclk = netlist.cells.iter().position(|c| c.name == "nclk").unwrap();
         let ff = netlist.cells.iter().position(|c| c.is_dff()).unwrap();
         assert_eq!(clock_inverters(&netlist, &drivers), vec![nclk]);
-        assert_eq!(gap_count(&netlist, Style::Pitch4).unwrap(), 3);
+        assert_eq!(gap_count(&netlist, Style::Pitch4, Columns::Levels).unwrap(), 3);
         let pitch4 = place(&netlist, &[1, 1, 1], Style::Pitch4).unwrap();
         assert_ne!(pitch4.gates[nclk].0, pitch4.gates[ff].0);
         assert_eq!(pitch4.stages[nclk], 2);
         for style in [Style::Packed, Style::Stretched] {
-            assert_eq!(gap_count(&netlist, style).unwrap(), 3, "{}", style.name());
+            assert_eq!(gap_count(&netlist, style, Columns::Levels).unwrap(), 3, "{}", style.name());
             let p = place(&netlist, &[1, 1, 1], style).unwrap();
             assert_eq!(p.gates[nclk].0, p.gates[ff].0, "{}", style.name());
             assert_eq!(p.stages[nclk], 1);
@@ -1419,7 +1587,7 @@ mod tests {
             let flip_flops = if seed % 3 == 2 { 1 + rng.below(3) } else { 0 };
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
             for style in Style::ALL {
-                let gaps = gap_count(&netlist, style).unwrap();
+                let gaps = gap_count(&netlist, style, Columns::Levels).unwrap();
                 let routing = vec![1; gaps];
                 let sweeps = sweeps(&netlist, &routing, style).unwrap();
                 assert_eq!(sweeps.len(), SWEEPS);

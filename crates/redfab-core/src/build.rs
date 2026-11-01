@@ -11,7 +11,7 @@ use crate::geom::Pos;
 use crate::layout::{Macro, Placed, Realized};
 use crate::lvs::lvs;
 use crate::netlist::{Driver, Netlist};
-use crate::place::{Placer, Style, estimate_routing};
+use crate::place::{Columns, Placer, Style, estimate_routing, gap_count};
 use crate::route::{Draw, History, Level, RouteFailure, route_with};
 use crate::sim::Sim;
 use crate::structure::structure_file;
@@ -52,6 +52,12 @@ pub struct Design {
     /// How the gates were placed: the name of the [`Style`] the build kept.
     #[serde(default)]
     pub placement: String,
+    /// How the gates were given their columns (`place::Columns`): `levels`, a
+    /// column per logic level, or `folded`, the sparse trailing levels folded
+    /// into shared columns. Files written before the distinction read as empty,
+    /// and were the levels.
+    #[serde(default)]
+    pub columns: String,
     /// How the rows were settled: `swept` (barycenter sweeps) or `searched`
     /// (the best sweep improved by a local search); files written before the
     /// distinction read as empty, and were swept.
@@ -324,25 +330,36 @@ pub fn build_unchecked_logged(
     // where the width is decided, when they promise a smaller footprint; each
     // routed with every draw. Each with its place in the pick's order.
     let draws = routing_draws(netlist);
-    let mut placers: Vec<(Placer, (usize, usize))> = Vec::new();
+    // The levels and, where the fold changes the columns, the folded columns.
+    let mut placers: Vec<(Placer, (usize, usize, usize))> = Vec::new();
     for (i, &style) in styles.iter().enumerate() {
-        let swept = Placer::swept(netlist, style)?;
-        if style.packs() {
-            let searched = Placer::searched(netlist, style)?;
-            let (promised, kept) = (searched.score().0, swept.score().0);
-            if promised < kept {
-                log(&format!("the searched rows promise {promised} blocks against the swept rows' {kept}"));
-                placers.push((searched, (i, 1)));
+        for (j, columns) in [Columns::Levels, Columns::Folded].into_iter().enumerate() {
+            if columns == Columns::Folded
+                && gap_count(netlist, style, Columns::Folded)? == gap_count(netlist, style, Columns::Levels)?
+            {
+                continue;
             }
+            let swept = Placer::swept(netlist, style, columns)?;
+            if style.packs() {
+                let searched = Placer::searched(netlist, style, columns)?;
+                let (promised, kept) = (searched.score().0, swept.score().0);
+                if promised < kept {
+                    log(&format!(
+                        "the searched rows promise {promised} blocks against the swept rows' {kept}{}",
+                        if columns == Columns::Folded { " with the columns folded" } else { "" }
+                    ));
+                    placers.push((searched, (i, j, 1)));
+                }
+            }
+            placers.push((swept, (i, j, 0)));
         }
-        placers.push((swept, (i, 0)));
     }
-    // Laid out in the order they can win: the searched rows first, pitch4 last.
-    placers.sort_by_key(|(placer, _)| placer.style() == Style::Pitch4);
-    let mut candidates: Vec<(Candidate, (usize, usize, usize))> = Vec::new();
+    // Laid out in the order they can win: the folded columns first, pitch4 last.
+    placers.sort_by_key(|(placer, _)| (placer.style() == Style::Pitch4, placer.columns() == Columns::Levels));
+    let mut candidates: Vec<(Candidate, (usize, usize, usize, usize))> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut pitch4_given_up = false;
-    for (placer, &(style_at, rows_at)) in placers.iter().map(|(p, at)| (p, at)) {
+    for (placer, &(style_at, columns_at, rows_at)) in placers.iter().map(|(p, at)| (p, at)) {
         for (draw_at, &draw) in draws.iter().enumerate() {
             let name = candidate_name(placer, draw);
             if placers.len() > 1 || draws.len() > 1 {
@@ -358,7 +375,7 @@ pub fn build_unchecked_logged(
             match lay_out(&library, netlist, placer, &lamp_names, draw, bound, log) {
                 Ok(Some(candidate)) => {
                     log(&format!("  {name}: {}", candidate.summary()));
-                    candidates.push((candidate, (style_at, rows_at, draw_at)));
+                    candidates.push((candidate, (style_at, columns_at, rows_at, draw_at)));
                 }
                 Ok(None) => pitch4_given_up |= placer.style() == Style::Pitch4 && draw_at == 0,
                 Err(e) => {
@@ -378,8 +395,9 @@ pub fn build_unchecked_logged(
     let mut chosen = eligible.iter().copied().min_by_key(|&i| candidates[i].rank(clocked)).unwrap_or(0);
     if placers.len() > 1 || draws.len() > 1 {
         log(&format!(
-            "keeping the {} placement, {} rows{}",
+            "keeping the {} placement, {} columns, {} rows{}",
             candidates[chosen].style.name(),
+            candidates[chosen].columns.name(),
             candidates[chosen].rows,
             draw_text(candidates[chosen].draw)
         ));
@@ -418,7 +436,7 @@ pub fn build_unchecked_logged(
             match lay_out(
                 &library,
                 netlist,
-                &Placer::swept(netlist, Style::Pitch4)?,
+                &Placer::swept(netlist, Style::Pitch4, Columns::Levels)?,
                 &lamp_names,
                 Draw::default(),
                 None,
@@ -498,12 +516,13 @@ pub fn build_unchecked_logged(
         ),
     };
     let report = format!(
-        "design {name}\n  cells: {}\n  tiles: {} ({} columns x {} rows, {routing_text})\n  placement: {}{}{}{}\n  repeaters: {}\n  blocks: {} in {sx} x {sy} x {sz}\n{timing_line}{positions}{}",
+        "design {name}\n  cells: {}\n  tiles: {} ({} columns x {} rows, {routing_text})\n  placement: {}{}{}{}{}\n  repeaters: {}\n  blocks: {} in {sx} x {sy} x {sz}\n{timing_line}{positions}{}",
         netlist.cells.len(),
         design.tiles,
         design.grid.cols,
         design.grid.rows,
         design.placement,
+        if design.columns == "folded" { ", folded columns" } else { "" },
         if design.rows == "searched" { ", searched rows" } else { "" },
         draw_text(Draw { seed: design.seed, charge_below: design.rows_below_charged }),
         if clocked {
@@ -522,6 +541,8 @@ pub fn build_unchecked_logged(
 /// A layout in one placement style, checked and timed, before the pick.
 struct Candidate {
     style: Style,
+    /// How the gates were given their columns (`Placer::columns`).
+    columns: Columns,
     /// How the rows were settled (`Placer::rows_name`).
     rows: &'static str,
     /// The routing draw (`route::route_with`).
@@ -568,12 +589,14 @@ impl Candidate {
 /// Places and routes `netlist` as `placer` has it, then realizes, checks and
 /// times the layout, lengthening the D path of any flip-flop whose hold is
 /// violated (a repeater's delay up, or a repeater into a wire) and going again.
-/// The name a candidate's log lines carry: its style, whether its rows are the
-/// searched ones, and its routing draw when not the plain router.
+/// The name a candidate's log lines carry: its style, whether its columns are
+/// folded, whether its rows are the searched ones, and its routing draw when
+/// not the plain router.
 fn candidate_name(placer: &Placer, draw: Draw) -> String {
     format!(
-        "{}{}{}",
+        "{}{}{}{}",
         placer.style().name(),
+        if placer.columns() == Columns::Folded { ", folded" } else { "" },
         if placer.rows_name() == "searched" { ", searched" } else { "" },
         match draw {
             Draw { seed: 0, charge_below: false } => String::new(),
@@ -638,6 +661,7 @@ fn lay_out(
             problems.extend(unlengthenable(&routed, netlist));
             return Ok(Some(Candidate {
                 style,
+                columns: placer.columns(),
                 rows: placer.rows_name(),
                 draw,
                 routed,
@@ -723,6 +747,7 @@ fn finish(candidate: &Candidate, netlist: &Netlist, name: &str, log: Log) -> Res
         settle_ticks: timing.settle_ticks(),
         timing: timing.clone(),
         placement: candidate.style.name().to_string(),
+        columns: candidate.columns.name().to_string(),
         rows: candidate.rows.to_string(),
         seed: candidate.draw.seed,
         rows_below_charged: candidate.draw.charge_below,
@@ -1021,7 +1046,7 @@ pub fn place_and_route(
     netlist: &Netlist,
     style: Style,
 ) -> Result<(crate::route::Routed, Vec<i32>), String> {
-    place_and_route_logged(library, netlist, &Placer::swept(netlist, style)?, &mut |_| {})
+    place_and_route_logged(library, netlist, &Placer::swept(netlist, style, Columns::Levels)?, &mut |_| {})
 }
 
 /// [`place_and_route`] with the rows `placer` settled on, telling `log` about
@@ -1434,7 +1459,7 @@ mod tests {
             let mut rng = crate::tiletest::Rng::new(seed);
             let (gates, inputs, flip_flops) = (2 + rng.below(6), 1 + rng.below(3), 1 + rng.below(3));
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
-            let placer = Placer::swept(&netlist, Style::Pitch4).unwrap();
+            let placer = Placer::swept(&netlist, Style::Pitch4, Columns::Levels).unwrap();
             let gaps = placer.gaps();
             let estimate = estimate_routing(&netlist, &placer.place(&vec![1; gaps]).unwrap());
             let mut lines: Vec<String> = Vec::new();
@@ -1681,7 +1706,7 @@ mod tests {
             let (gates, inputs, flip_flops) = (3 + rng.below(10), 1 + rng.below(4), rng.below(3));
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
             for style in Style::ALL {
-                let placer = Placer::swept(&netlist, style).unwrap();
+                let placer = Placer::swept(&netlist, style, Columns::Levels).unwrap();
                 let first = placer.place(&vec![1; placer.gaps()]).unwrap().footprint_floor();
                 let (routed, routing) = place_and_route(&library, &netlist, style).unwrap();
                 let last = placer.place(&routing).unwrap().footprint_floor();
@@ -1930,7 +1955,7 @@ mod tests {
             let inputs = 1 + rng.below(6);
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
             let style = if flip_flops > 0 { Style::Stretched } else { Style::Packed };
-            let placer = Placer::swept(&netlist, style).unwrap();
+            let placer = Placer::swept(&netlist, style, Columns::Levels).unwrap();
             let lay = |draw: Draw| -> Option<(i32, i64)> {
                 let Routing::Done(routed, routing) =
                     place_and_route_bounded(&library, &netlist, &placer, draw, None, &mut |_| {}).ok()?
