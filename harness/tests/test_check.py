@@ -50,8 +50,9 @@ def run_helpers(tmp_path: Path, body: str, only: str = "", vanilla: int = 0) -> 
     wait_background) with the script's state variables set as a run sets them."""
     script = (ROOT / "check").read_text()
     helpers = script[script.index("# record <name>"):script.index("# refused_with <message>")]
-    (tmp_path / "build" / "check").mkdir(parents=True)
+    (tmp_path / "build" / "check").mkdir(parents=True, exist_ok=True)
     summary = tmp_path / "SUMMARY"
+    summary.unlink(missing_ok=True)
     prelude = f'set -u\nSUMMARY={summary}\nPASSED=0\nFAILED=()\nONLY="{only}"\nVANILLA={vanilla}\n'
     result = subprocess.run(["bash", "-c", prelude + helpers + body], cwd=tmp_path, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -78,16 +79,20 @@ def test_a_background_check_runs_beside_the_next_ones_and_is_recorded_when_waite
 
 
 def test_a_failing_background_check_fails_the_run_with_its_log(tmp_path: Path):
+    # The seconds recorded are the job's own: it fails at once while the next check
+    # takes two seconds, and it is waited for only after that.
     out, summary = run_helpers(
         tmp_path,
         "run_background bad sh -c 'echo why it failed; exit 3'\n"
+        "run slow sh -c 'sleep 2'\n"
         "wait_background\n"
         'echo "passed=$PASSED failed=${FAILED[*]:-none}"\n',
     )
     assert "  FAIL  bad" in out and "(see build/check/bad.log)" in out, out
     assert "        | why it failed" in out, "the failing log's tail is shown"
-    assert out.splitlines()[-1] == "passed=0 failed=bad"
-    assert len(summary) == 1 and summary[0].startswith("FAIL bad ")
+    assert out.splitlines()[-1] == "passed=1 failed=bad"
+    assert [line.split()[1] for line in summary] == ["slow", "bad"], summary
+    assert summary[1].startswith("FAIL bad ") and int(summary[1].split()[2]) < 2, summary
 
 
 def test_a_background_check_runs_in_place_under_only_or_with_the_server(tmp_path: Path):
