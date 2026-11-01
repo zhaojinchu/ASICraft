@@ -146,31 +146,31 @@ circuit that passed its checks. The ceiling is capacity, not correctness:
 
 | Limit | Value | Where it comes from |
 |---|---|---|
-| Builds at all | about 150 cells with up to 20 inputs, in 2 to 3 minutes natively (random netlists, two seeds each); 100 cells in about 30 s; an 8-bit adder (102 cells, 17 inputs) in about 25 s. A combinational design is laid out in two placement styles (three under 64 cells) and a clocked one in two (the four-row pitch and stretched), and once more in each packing style with the searched rows when they promise a smaller footprint, and the best kept; the candidates are laid out in the order they can win and a combinational one whose footprint can only lose is given up on before it is routed, so a build is one to three layouts (the four-row pitch is seldom laid out), each routed three ways under 48 cells (two tie-break seeds, and once charging the router for rows below the gates) and the smallest kept; the 4-bit CPU of the capacity review (132 cells, clocked) builds in about eight minutes, since signals keep dying in its shallow rows until some are made a cell deep again. A 200-cell, 24-input netlist did not finish in 12 minutes | the router's rounds on grids of 10k tiles, then the layout check and timing on 150k-block worlds (`crates/redfab-core/src/route.rs`, `build.rs`) |
+| Builds at all | about 150 cells with up to 20 inputs, in 2 to 3 minutes natively (random netlists, two seeds each); 100 cells in about 30 s; an 8-bit adder (102 cells, 17 inputs) in about 35 s. A combinational design is laid out in two placement styles (three under 64 cells) and a clocked one in two (the four-row pitch and stretched), and once more in each packing style with the searched rows when they promise a smaller footprint, and all of these again with the sparse trailing logic levels folded into shared gate columns where that changes the columns, and the best kept; the candidates are laid out in the order they can win and a combinational one whose footprint can only lose is given up on before it is routed, so a build is one to several layouts (the four-row pitch is seldom laid out, and the levels' candidates are given up where the fold wins), each routed three ways under 48 cells (two tie-break seeds, and once charging the router for rows below the gates) and the smallest kept; the 4-bit CPU of the capacity review (132 cells, clocked) builds in about twenty minutes, since signals keep dying in its shallow rows until some are made a cell deep again and a clocked design's candidates, folded and not, are all laid out to the end. A 200-cell, 24-input netlist did not finish in 12 minutes | the router's rounds on grids of 10k tiles, then the layout check and timing on 150k-block worlds (`crates/redfab-core/src/route.rs`, `build.rs`) |
 | Routes inside the playground's 90 s compile limit | about 100 cells (`measuredCells`) | `playground/compile.js` |
-| Fits a plot on the live server | footprint up to 512 x 512 blocks: every shipped design fits, the widest is `adder8` at 323 x 99 | `server/live.mjs` |
+| Fits a plot on the live server | footprint up to 512 x 512 blocks: every shipped design fits, the widest is `adder8` at 250 x 105 | `server/live.mjs` |
 | Inputs | 64 bits | `build.rs` (`MAX_INPUTS`) |
 | Clock period | long: `counter4` needs 66 game ticks (3.3 s) per cycle, `mem2` 64 | repeaters on long feedback paths; the compaction steps and the two wire levels (`docs/PLAN.md`) shortened them |
 
 Sizes of the examples and of larger designs, for scale (cells after
 mapping, blocks, footprint in blocks, clock period in game ticks; every
-example builds in 1 to 25 s from source with the release binary; the
+example builds in 1 to 35 s from source with the release binary; the
 register file and the CPU are the capacity review's, not shipped):
 
 | Design | Cells | Blocks | Footprint | Period |
 |---|---|---|---|---|
 | `nor2` | 1 | 47 | 17 x 4 x 6 | |
 | `fa1` (full adder) | 11 | 848 | 64 x 4 x 18 | |
-| `mul2` | 12 | 1056 | 67 x 4 x 24 | |
+| `mul2` | 12 | 898 | 59 x 4 x 27 | |
 | `lfsr3` | 15 | 1785 | 72 x 4 x 42 | 38 |
-| `counter4` | 26 | 4502 | 115 x 4 x 56 | 62 |
-| `divmod` | 30 | 4687 | 139 x 4 x 48 | |
+| `counter4` | 26 | 4266 | 94 x 4 x 68 | 62 |
+| `divmod` | 30 | 4127 | 117 x 4 x 51 | |
 | `mem2` (2x2-bit memory) | 31 | 5492 | 102 x 4 x 77 | 52 |
-| `cmp4` | 32 | 2905 | 112 x 4 x 51 | |
-| `adder4` | 49 | 6063 | 172 x 4 x 60 | |
+| `cmp4` | 32 | 2833 | 87 x 4 x 54 | |
+| `adder4` | 49 | 5431 | 125 x 4 x 63 | |
 | 2x4-bit register file | 57 | 13330 | 135 x 4 x 145 | 100 |
-| 8-bit adder with carry | 102 | 18377 | 323 x 4 x 99 | |
-| 4-bit CPU, 16-word ROM | 132 | 52726 | 305 x 4 x 298 | 262 |
+| 8-bit adder with carry | 102 | 17609 | 250 x 4 x 105 | |
+| 4-bit CPU, 16-word ROM | 132 | 53374 | 317 x 4 x 284 | 240 |
 
 ## Putting it in your world
 

@@ -449,7 +449,7 @@ fn layout_command(args: &[String]) -> Result<bool, String> {
         }
         Err(e) => {
             // Show the placement alone, with one routing column.
-            let gaps = redfab_core::place::gap_count(&netlist, style)?;
+            let gaps = redfab_core::place::gap_count(&netlist, style, redfab_core::place::Columns::Levels)?;
             let placement = redfab_core::place::place(&netlist, &vec![1; gaps], style)?;
             let mut layout = redfab_core::layout::Layout::default();
             for (c, &cell) in placement.gates.iter().enumerate() {

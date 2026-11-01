@@ -1915,7 +1915,7 @@ mod tests {
     #[test]
     fn a_gap_too_narrow_is_given_up_after_stalling_and_named() {
         let netlist = braid(5);
-        let gaps = gap_count(&netlist, Style::Pitch4).unwrap();
+        let gaps = gap_count(&netlist, Style::Pitch4, crate::place::Columns::Levels).unwrap();
         // Rows a cell deep, as the braid was measured with: in shallow rows no
         // crossing fits a routing column, and every gap is too narrow.
         let mut narrow = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
@@ -2009,7 +2009,7 @@ mod tests {
     #[test]
     fn a_seeded_history_steers_nets_off_the_costly_tracks() {
         let netlist = braid(5);
-        let gaps = gap_count(&netlist, Style::Pitch4).unwrap();
+        let gaps = gap_count(&netlist, Style::Pitch4, crate::place::Columns::Levels).unwrap();
         let narrow = place(&netlist, &vec![1; gaps], Style::Pitch4).unwrap();
         // Rows a cell deep, as the braid was measured with (in shallow rows the
         // other columns of the gap, where no crossing fits, cannot take it all).
