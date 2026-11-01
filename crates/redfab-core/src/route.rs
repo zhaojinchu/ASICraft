@@ -227,7 +227,7 @@ pub fn route(
     history: Option<&History>,
     log: &mut dyn FnMut(&str),
 ) -> Result<Routed, RouteFailure> {
-    route_with_seed(library, netlist, placement, history, 0, log)
+    route_with(library, netlist, placement, history, Draw::default(), log)
 }
 
 /// [`route`] with `seed` breaking the ties between equal-cost paths: seed 0 is
@@ -241,6 +241,45 @@ pub fn route_with_seed(
     seed: u64,
     log: &mut dyn FnMut(&str),
 ) -> Result<Routed, RouteFailure> {
+    route_with(library, netlist, placement, history, Draw { seed, charge_below: false }, log)
+}
+
+/// One way of routing a placement, of several the build tries on a small
+/// design (keeping the smallest layout): the negotiation's tie-break `seed`
+/// (seed 0 is the plain router), and whether the rows below the lowest placed
+/// row ([`Placement::lowest_row`]) are charged for. The router lays a net that
+/// must change rows along any free row, and an empty row below the gates is
+/// the freest of all (counter4 kept 5 of its 18 rows that way, mem2 6 of 27),
+/// a strip of depth the layout cannot trim; charged [`BELOW_ROW_COST`] a track
+/// there, a net weaves through the free rows among the gates where it can and
+/// spills below only when it must. Over random netlists that is a third fewer
+/// such rows and 5 % less footprint, but on any one design the negotiation may
+/// come out larger (adder8 +6 %, mem2 +9 %), so it is a draw the pick judges,
+/// not the router's default. The default draw is [`route`] byte for byte.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Draw {
+    pub seed: u64,
+    pub charge_below: bool,
+}
+
+/// What a track in a row below the lowest placed row costs more than one among
+/// the gates (a plain track costs 1, a ramp 2) under a draw that charges them.
+/// Measured on the shipped designs' kept placements: at 1 the rows and the area
+/// moved both ways (divmod +16 %, counter4 -12 %), at 4 the depth fell on
+/// seven of nine (counter4 62 to 53 blocks, mem2 86 to 77, divmod 60 to 48,
+/// counter8 109 to 100) and the area on six; 8 gained nothing more.
+pub const BELOW_ROW_COST: f64 = 4.0;
+
+/// [`route`] with `draw`.
+pub fn route_with(
+    library: &Library,
+    netlist: &Netlist,
+    placement: &Placement,
+    history: Option<&History>,
+    draw: Draw,
+    log: &mut dyn FnMut(&str),
+) -> Result<Routed, RouteFailure> {
+    let Draw { seed, charge_below } = draw;
     let drivers = netlist.drivers().map_err(RouteFailure::Other)?;
     // What a pin needs at the port of the tile in front of it.
     let needs = |tile: &Tile, pin: Edge| -> Result<u8, RouteFailure> {
@@ -316,7 +355,7 @@ pub fn route_with_seed(
         nets.push((net, source, sink_list));
     }
 
-    let graph = Graph::new(placement);
+    let graph = Graph::new(placement, if charge_below { BELOW_ROW_COST } else { 0.0 });
     let key = |(cell, slot): (Cell, Slot)| (placement.column(cell.0), cell.1, slot);
     let start: Vec<f64> =
         graph.slot_of.iter().map(|&s| history.and_then(|h| h.costs.get(&key(s)).copied()).unwrap_or(0.0)).collect();
@@ -747,10 +786,15 @@ struct Graph {
     /// in a narrow column, west-east in a shallow row. None in a full cell,
     /// whose crossing turns to give either net the flat arm.
     climbs: Vec<Option<Slot>>,
+    /// Per node, what its track costs more for lying in a row below the lowest
+    /// placed row: `below_cost` there, nothing among the gates.
+    below: Vec<f64>,
 }
 
 impl Graph {
-    fn new(placement: &Placement) -> Graph {
+    fn new(placement: &Placement, below_cost: f64) -> Graph {
+        let lowest_row = placement.lowest_row();
+        let mut below = Vec::new();
         let mut nodes = Vec::new();
         let mut index = BTreeMap::new();
         let mut slot_of = Vec::new();
@@ -778,6 +822,7 @@ impl Graph {
                 for track in Track::ALL {
                     index.insert(((col, row), track), nodes.len());
                     nodes.push(((col, row), track));
+                    below.push(if row > lowest_row { below_cost } else { 0.0 });
                     slots.push(track.slots().iter().map(|&s| first + s as usize).collect());
                     base.push(first);
                 }
@@ -828,7 +873,7 @@ impl Graph {
             };
             neighbours[i] = candidates.into_iter().filter_map(|n| index.get(&n).copied()).collect();
         }
-        Graph { nodes, index, neighbours, slots, base, slot_of, crossable, climbs }
+        Graph { nodes, index, neighbours, slots, base, slot_of, crossable, climbs, below }
     }
 }
 
@@ -1012,7 +1057,9 @@ impl<'a> Negotiation<'a> {
                     let penalty = penalties.get(&node).copied().unwrap_or(0.0);
                     // A ramp holds its whole tile, and costs a tile more; a crossing
                     // that cannot turn, whose climbing net can take no repeater there,
-                    // costs more again, so that runs across many take the upper level.
+                    // costs more again, so that runs across many take the upper level;
+                    // and a track in a row below the placed rows costs what the draw
+                    // charges for the depth it would add.
                     let fixed_crossing = climbing.is_some()
                         && match track {
                             Track::X => held(Slot::LowerZ),
@@ -1025,7 +1072,7 @@ impl<'a> Negotiation<'a> {
                         FIXED_CROSSING_COST
                     } else {
                         1.0
-                    };
+                    } + graph.below[node];
                     (cost + past + penalty + jitter(seed, k, node)) * (1.0 + present_factor * overuse as f64)
                 };
                 let (tree, parent) = grow_tree(graph, start, targets, cost, &mut self.search).map_err(|target| {
@@ -1744,7 +1791,7 @@ mod tests {
             columns: (0..5).map(|offset| Column::Routing { gap: 0, offset }).collect(),
             stages: vec![1, 1],
         };
-        let graph = Graph::new(&placement);
+        let graph = Graph::new(&placement, 0.0);
         let node = |cell: Cell, track: Track| graph.index[&(cell, track)];
         let ring: BTreeSet<Cell> = [(2, 1), (3, 1), (4, 1), (4, 2), (4, 3), (3, 3), (2, 3)].into_iter().collect();
         let cost = |n: usize| {
@@ -1819,7 +1866,7 @@ mod tests {
             (PITCH, vec![1, 2, 3], false),
         ] {
             let placement = placement(width);
-            let graph = Graph::new(&placement);
+            let graph = Graph::new(&placement, 0.0);
             let mut negotiation = Negotiation::new(&graph, &nets, vec![0.0; graph.slot_of.len()], 0);
             let base = |row: i32| graph.base[graph.index[&((1, row), Track::X)]];
             // Net 0 runs down column 1 from row 0 to row 5; nets 1 on cross it in the rows given.

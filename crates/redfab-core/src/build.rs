@@ -12,7 +12,7 @@ use crate::layout::{Macro, Placed, Realized};
 use crate::lvs::lvs;
 use crate::netlist::{Driver, Netlist};
 use crate::place::{Placer, Style, estimate_routing};
-use crate::route::{History, Level, RouteFailure, route_with_seed};
+use crate::route::{Draw, History, Level, RouteFailure, route_with};
 use crate::sim::Sim;
 use crate::structure::structure_file;
 use crate::tile::Library;
@@ -57,10 +57,13 @@ pub struct Design {
     /// distinction read as empty, and were swept.
     #[serde(default)]
     pub rows: String,
-    /// The router's tie-break seed the build kept (0 or 1; files written before
-    /// the seeds read as 0, the plain router).
+    /// The routing draw the build kept (`route::Draw`): the router's tie-break
+    /// seed (0 or 1) and whether the rows below the placed rows were charged
+    /// for. Files written before the draws read as the plain router.
     #[serde(default)]
     pub seed: u64,
+    #[serde(default)]
+    pub rows_below_charged: bool,
     /// Counts of the routed layout, which the area-period baseline
     /// (`tests/baselines/area.json`) holds to: tiles, the tile grid, repeaters
     /// (in their own tiles and in crossings), and the rounds of hold fixes the
@@ -227,25 +230,33 @@ const CLOCKED_STYLES: &[Style] = &[Style::Pitch4, Style::Stretched];
 /// about 29 s more.
 const STRETCHED_UP_TO_CELLS: usize = 64;
 
-/// How many tie-break seeds every candidate of a small design is routed with.
-/// The negotiation's result moves by up to a tenth of a design's area with
-/// any change of the costs it starts from (the I/O columns step, 2026-10-31),
-/// so a second trajectory through the same placement is a second draw, and the
-/// pick keeps the smaller; the earlier seed wins ties, so a layout the second
-/// seed does not beat stays as it was.
-const ROUTING_SEEDS: u64 = 2;
+/// The routing draws every candidate of a small design is routed with, in the
+/// pick's order: the plain router; a second tie-break seed, since the
+/// negotiation's result moves by up to a tenth of a design's area with any
+/// change of the costs it starts from (the I/O columns step, 2026-10-31), so
+/// another trajectory through the same placement is another draw; and the
+/// plain seed charging the rows below the placed rows (`route::Draw`), which
+/// keeps the wiring among the gates and the depth with it on most designs
+/// (the depth kill tests, 2026-11-01: -2.5 % of the shipped sum as a third
+/// draw, +0.5 % as the only one). The pick keeps the smallest layout and the
+/// earlier draw wins ties, so a layout no other draw beats stays as it was.
+const ROUTING_DRAWS: &[Draw] = &[
+    Draw { seed: 0, charge_below: false },
+    Draw { seed: 1, charge_below: false },
+    Draw { seed: 0, charge_below: true },
+];
 
-/// Designs with fewer cells than this are routed with every seed; a larger one
+/// Designs with fewer cells than this are routed with every draw; a larger one
 /// once, for its time. Measured 2026-10-31: the second seed won eight shipped
 /// designs of 11 to 31 cells for a tenth to a sixth of their area each, at
 /// 0.1 to 3.5 s more a build; adder4 (49 cells) would take twice its 18 s and
 /// the capacity designs of 57 and 60 cells twice their 13 to 17 s for layouts
 /// it did not beat, and adder8 (102) more than the playground allows.
-const SECOND_SEED_UP_TO_CELLS: usize = 48;
+const EXTRA_DRAWS_UP_TO_CELLS: usize = 48;
 
-/// How many seeds `netlist`'s candidates are routed with.
-fn routing_seeds(netlist: &Netlist) -> u64 {
-    if netlist.cells.len() < SECOND_SEED_UP_TO_CELLS { ROUTING_SEEDS } else { 1 }
+/// The draws `netlist`'s candidates are routed with.
+fn routing_draws(netlist: &Netlist) -> &'static [Draw] {
+    if netlist.cells.len() < EXTRA_DRAWS_UP_TO_CELLS { ROUTING_DRAWS } else { &ROUTING_DRAWS[..1] }
 }
 
 /// The placement styles `netlist` is laid out in, in the pick's order.
@@ -294,9 +305,10 @@ pub fn build_unchecked(netlist: &Netlist, name: &str, fault: Break) -> Result<(B
 /// swept rows, pitch4 last, and for a combinational design one whose footprint
 /// floor already exceeds the footprint kept is given up on, since it can only
 /// lose; so pitch4 is seldom laid out at all. Every candidate of a design under
-/// [`SECOND_SEED_UP_TO_CELLS`] cells is routed with [`ROUTING_SEEDS`] tie-break
-/// seeds, the first seed earlier in the pick's order. The burnout budget is
-/// measured once, on the winner (a clocked design's clock slows until it is met).
+/// [`EXTRA_DRAWS_UP_TO_CELLS`] cells is routed with every draw of
+/// [`ROUTING_DRAWS`], the earlier draw earlier in the pick's order. The burnout
+/// budget is measured once, on the winner (a clocked design's clock slows until
+/// it is met).
 pub fn build_unchecked_logged(
     netlist: &Netlist,
     name: &str,
@@ -310,8 +322,8 @@ pub fn build_unchecked_logged(
     let styles = styles_of(netlist);
     // The swept rows in every style; the searched rows in the packing style,
     // where the width is decided, when they promise a smaller footprint; each
-    // routed with every seed. Each with its place in the pick's order.
-    let seeds = routing_seeds(netlist);
+    // routed with every draw. Each with its place in the pick's order.
+    let draws = routing_draws(netlist);
     let mut placers: Vec<(Placer, (usize, usize))> = Vec::new();
     for (i, &style) in styles.iter().enumerate() {
         let swept = Placer::swept(netlist, style)?;
@@ -327,13 +339,13 @@ pub fn build_unchecked_logged(
     }
     // Laid out in the order they can win: the searched rows first, pitch4 last.
     placers.sort_by_key(|(placer, _)| placer.style() == Style::Pitch4);
-    let mut candidates: Vec<(Candidate, (usize, usize, u64))> = Vec::new();
+    let mut candidates: Vec<(Candidate, (usize, usize, usize))> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut pitch4_given_up = false;
     for (placer, &(style_at, rows_at)) in placers.iter().map(|(p, at)| (p, at)) {
-        for seed in 0..seeds {
-            let name = candidate_name(placer, seed);
-            if placers.len() > 1 || seeds > 1 {
+        for (draw_at, &draw) in draws.iter().enumerate() {
+            let name = candidate_name(placer, draw);
+            if placers.len() > 1 || draws.len() > 1 {
                 log(&format!("{name} placement"));
             }
             // The footprint kept so far bounds a combinational candidate (a clocked
@@ -343,12 +355,12 @@ pub fn build_unchecked_logged(
             } else {
                 candidates.iter().filter(|(c, _)| c.problems.is_empty()).map(|(c, _)| c.rank(false).0).min()
             };
-            match lay_out(&library, netlist, placer, &lamp_names, seed, bound, log) {
+            match lay_out(&library, netlist, placer, &lamp_names, draw, bound, log) {
                 Ok(Some(candidate)) => {
                     log(&format!("  {name}: {}", candidate.summary()));
-                    candidates.push((candidate, (style_at, rows_at, seed)));
+                    candidates.push((candidate, (style_at, rows_at, draw_at)));
                 }
-                Ok(None) => pitch4_given_up |= placer.style() == Style::Pitch4 && seed == 0,
+                Ok(None) => pitch4_given_up |= placer.style() == Style::Pitch4 && draw_at == 0,
                 Err(e) => {
                     log(&format!("  {name} placement failed: {e}"));
                     failures.push(e);
@@ -364,16 +376,12 @@ pub fn build_unchecked_logged(
     let mut candidates: Vec<Candidate> = candidates.into_iter().map(|(c, _)| c).collect();
     let eligible: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].problems.is_empty()).collect();
     let mut chosen = eligible.iter().copied().min_by_key(|&i| candidates[i].rank(clocked)).unwrap_or(0);
-    if placers.len() > 1 || seeds > 1 {
+    if placers.len() > 1 || draws.len() > 1 {
         log(&format!(
             "keeping the {} placement, {} rows{}",
             candidates[chosen].style.name(),
             candidates[chosen].rows,
-            if candidates[chosen].seed > 0 {
-                format!(", routing seed {}", candidates[chosen].seed)
-            } else {
-                String::new()
-            }
+            draw_text(candidates[chosen].draw)
         ));
     }
 
@@ -407,7 +415,15 @@ pub fn build_unchecked_logged(
             spacing_of(&finished[chosen])
         ));
         if pitch4_given_up {
-            match lay_out(&library, netlist, &Placer::swept(netlist, Style::Pitch4)?, &lamp_names, 0, None, log) {
+            match lay_out(
+                &library,
+                netlist,
+                &Placer::swept(netlist, Style::Pitch4)?,
+                &lamp_names,
+                Draw::default(),
+                None,
+                log,
+            ) {
                 Ok(Some(candidate)) => {
                     log(&format!("  pitch4: {}", candidate.summary()));
                     candidates.insert(0, candidate);
@@ -489,7 +505,7 @@ pub fn build_unchecked_logged(
         design.grid.rows,
         design.placement,
         if design.rows == "searched" { ", searched rows" } else { "" },
-        if design.seed > 0 { format!(", routing seed {}", design.seed) } else { String::new() },
+        draw_text(Draw { seed: design.seed, charge_below: design.rows_below_charged }),
         if clocked {
             let rounds = design.hold_fix_rounds;
             format!(", hold fixes: {rounds} round{}", if rounds == 1 { "" } else { "s" })
@@ -508,8 +524,8 @@ struct Candidate {
     style: Style,
     /// How the rows were settled (`Placer::rows_name`).
     rows: &'static str,
-    /// The routing seed (`route::route_with_seed`).
-    seed: u64,
+    /// The routing draw (`route::route_with`).
+    draw: Draw,
     routed: crate::route::Routed,
     routing_cols: Vec<i32>,
     realized: Realized,
@@ -553,36 +569,53 @@ impl Candidate {
 /// times the layout, lengthening the D path of any flip-flop whose hold is
 /// violated (a repeater's delay up, or a repeater into a wire) and going again.
 /// The name a candidate's log lines carry: its style, whether its rows are the
-/// searched ones, and its routing seed when not the first.
-fn candidate_name(placer: &Placer, seed: u64) -> String {
+/// searched ones, and its routing draw when not the plain router.
+fn candidate_name(placer: &Placer, draw: Draw) -> String {
     format!(
         "{}{}{}",
         placer.style().name(),
         if placer.rows_name() == "searched" { ", searched" } else { "" },
-        if seed > 0 { format!(", seed {seed}") } else { String::new() }
+        match draw {
+            Draw { seed: 0, charge_below: false } => String::new(),
+            Draw { seed, charge_below: false } => format!(", seed {seed}"),
+            Draw { seed: 0, charge_below: true } => ", rows below charged".to_string(),
+            Draw { seed, charge_below: true } => format!(", seed {seed}, rows below charged"),
+        }
     )
 }
 
-/// Places, routes (with the tie-break `seed`), checks and times the rows
-/// `placer` settled on. `bound` is a footprint in blocks already kept: a
-/// placement whose floor exceeds it can only lose the pick, so it is given up
-/// on and `None` returned.
+/// How the report and the pick's log name the draw a layout was routed with:
+/// nothing for the plain router.
+fn draw_text(draw: Draw) -> String {
+    let mut text = String::new();
+    if draw.seed > 0 {
+        text += &format!(", routing seed {}", draw.seed);
+    }
+    if draw.charge_below {
+        text += ", the rows below the gates charged";
+    }
+    text
+}
+
+/// Places, routes (with `draw`), checks and times the rows `placer` settled
+/// on. `bound` is a footprint in blocks already kept: a placement whose floor
+/// exceeds it can only lose the pick, so it is given up on and `None` returned.
 fn lay_out(
     library: &Library,
     netlist: &Netlist,
     placer: &Placer,
     lamp_names: &[String],
-    seed: u64,
+    draw: Draw,
     bound: Option<u64>,
     log: Log,
 ) -> Result<Option<Candidate>, String> {
     let style = placer.style();
-    let (mut routed, routing_cols) = match place_and_route_bounded(library, netlist, placer, seed, bound, log)? {
+    let (mut routed, routing_cols) = match place_and_route_bounded(library, netlist, placer, draw, bound, log)? {
         Routing::Done(routed, routing_cols) => (routed, routing_cols),
         Routing::GivenUp { attempt, floor: (width, depth) } => {
             log(&format!(
                 "  {} placement {}: at least {width} x {depth} = {} blocks against the {} kept",
-                candidate_name(placer, seed),
+                candidate_name(placer, draw),
                 if attempt == 1 { "not laid out".to_string() } else { format!("given up at attempt {attempt}") },
                 width as u64 * depth as u64,
                 bound.unwrap_or(0)
@@ -606,7 +639,7 @@ fn lay_out(
             return Ok(Some(Candidate {
                 style,
                 rows: placer.rows_name(),
-                seed,
+                draw,
                 routed,
                 routing_cols,
                 realized,
@@ -691,7 +724,8 @@ fn finish(candidate: &Candidate, netlist: &Netlist, name: &str, log: Log) -> Res
         timing: timing.clone(),
         placement: candidate.style.name().to_string(),
         rows: candidate.rows.to_string(),
-        seed: candidate.seed,
+        seed: candidate.draw.seed,
+        rows_below_charged: candidate.draw.charge_below,
         tiles: layout.cells_used(),
         grid: Grid { cols, rows, routing: candidate.routing_cols.clone() },
         repeaters: repeater_count,
@@ -999,7 +1033,7 @@ pub fn place_and_route_logged(
     placer: &Placer,
     log: Log,
 ) -> Result<(crate::route::Routed, Vec<i32>), String> {
-    match place_and_route_bounded(library, netlist, placer, 0, None, log)? {
+    match place_and_route_bounded(library, netlist, placer, Draw::default(), None, log)? {
         Routing::Done(routed, routing) => Ok((routed, routing)),
         Routing::GivenUp { .. } => unreachable!("nothing is given up on without a bound"),
     }
@@ -1014,15 +1048,15 @@ pub enum Routing {
     GivenUp { attempt: usize, floor: (i32, i32) },
 }
 
-/// [`place_and_route_logged`] with the router's tie-break `seed`, giving up as
-/// soon as an attempt's footprint floor ([`Placement::footprint_floor`]) exceeds
-/// `bound` blocks: attempts only widen gaps and deepen rows, so no later attempt
-/// would come under it either.
+/// [`place_and_route_logged`] with the routing `draw`, giving up as soon as an
+/// attempt's footprint floor ([`Placement::footprint_floor`]) exceeds `bound`
+/// blocks: attempts only widen gaps and deepen rows, so no later attempt would
+/// come under it either.
 pub fn place_and_route_bounded(
     library: &Library,
     netlist: &Netlist,
     placer: &Placer,
-    seed: u64,
+    draw: Draw,
     bound: Option<u64>,
     log: Log,
 ) -> Result<Routing, String> {
@@ -1057,7 +1091,7 @@ pub fn place_and_route_bounded(
             placement.rows,
             list(&routing)
         ));
-        match route_with_seed(library, netlist, &placement, history.as_ref(), seed, log) {
+        match route_with(library, netlist, &placement, history.as_ref(), draw, log) {
             Ok(routed) => {
                 log(&format!("routed in {} rounds", routed.rounds));
                 return Ok(Routing::Done(routed, routing));
@@ -1673,7 +1707,7 @@ mod tests {
     #[test]
     fn the_candidates_laid_out_in_the_order_they_can_win_keep_what_laying_them_all_out_keeps() {
         let library = Library::builtin().unwrap();
-        let (mut given_up, mut stretched) = (0, 0);
+        let (mut given_up, mut stretched, mut repicked) = (0, 0, 0);
         for seed in 300..306u64 {
             let mut rng = crate::tiletest::Rng::new(seed);
             let gates = 2 + rng.below(10);
@@ -1701,7 +1735,19 @@ mod tests {
             let (built, problems) =
                 build_unchecked_logged(&netlist, "random", Break::None, &mut |l| lines.push(l.to_string())).unwrap();
             assert!(problems.is_empty(), "seed {seed}: {problems:?}");
-            // The test assumes the first pick stands: its inputs keep up.
+            if lines.iter().any(|l| l.contains(" blocks against the ") && l.contains(" kept")) {
+                given_up += 1;
+            }
+            if lines.iter().any(|l| l == "stretched placement") {
+                stretched += 1;
+            }
+            // The reference pick knows nothing of input spacing: where the first
+            // pick's inputs did not keep up and the pick was made again (its own
+            // test below), this one has nothing to compare.
+            if lines.iter().any(|l| l.contains("measuring the other candidates' budgets")) {
+                repicked += 1;
+                continue;
+            }
             assert_eq!(built.design.timing.input_spacing, crate::timing::MIN_INPUT_SPACING, "seed {seed}");
             let (sx, sy, sz) = expected.world.size();
             assert_eq!(
@@ -1731,15 +1777,10 @@ mod tests {
                     }
                 }
             }
-            if lines.iter().any(|l| l.contains(" blocks against the ") && l.contains(" kept")) {
-                given_up += 1;
-            }
-            if lines.iter().any(|l| l == "stretched placement") {
-                stretched += 1;
-            }
         }
         assert!(given_up > 0, "no candidate was ever given up on");
         assert!(stretched > 0, "the stretched style was never a candidate");
+        assert!(repicked <= 2, "the pick was made again on {repicked} of 6 netlists");
     }
 
     /// The stretched style, measured a loss on every combinational design at
