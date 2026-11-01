@@ -9,6 +9,51 @@ use crate::build::{Built, build_netlist, simulate};
 use crate::netlist::{Cell, Driver, NetId, Netlist, PortBit};
 use crate::tiletest::Rng;
 
+/// A netlist shaped like a ripple design: `wide` NOR2 gates read the inputs in
+/// the first level, then a tail of `tail` levels of one NOT each, every one
+/// reading the gate before it; the last NOT and the first level's other gates
+/// drive the outputs. The tail is the run of near-empty gate columns a ripple
+/// adder has (adder8's levels 15 to 19 hold 2, 3, 1, 2, 1 gates).
+pub fn ripple_netlist(wide: usize, tail: usize) -> Netlist {
+    let mut net_count = 0;
+    let mut next = || {
+        net_count += 1;
+        net_count - 1
+    };
+    let inputs: Vec<PortBit> = (0..2 * wide).map(|i| PortBit { name: format!("i{i}"), net: next() }).collect();
+    let mut cells = Vec::new();
+    let mut outputs = Vec::new();
+    for k in 0..wide {
+        let output = next();
+        cells.push(Cell {
+            name: format!("n{k}"),
+            label: format!("n{k}"),
+            kind: "NOR2".to_string(),
+            inputs: vec![inputs[2 * k].net, inputs[2 * k + 1].net],
+            output,
+            init: false,
+        });
+        if k > 0 {
+            outputs.push(PortBit { name: format!("o{k}"), net: output });
+        }
+    }
+    let mut last = cells[0].output;
+    for t in 0..tail {
+        let output = next();
+        cells.push(Cell {
+            name: format!("t{t}"),
+            label: format!("t{t}"),
+            kind: "NOT".to_string(),
+            inputs: vec![last],
+            output,
+            init: false,
+        });
+        last = output;
+    }
+    outputs.push(PortBit { name: "o0".to_string(), net: last });
+    Netlist { inputs, outputs, cells, net_count, constants: Vec::new() }
+}
+
 /// A random combinational netlist of `gates` NOT/NOR2/NOR3 cells and one to
 /// six inputs.
 pub fn random_netlist(rng: &mut Rng, gates: usize) -> Netlist {
