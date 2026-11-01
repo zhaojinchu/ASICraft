@@ -614,10 +614,12 @@ fn critical_path(
 /// in within a tick is the simulator's, which decides races: two parts due in
 /// the same tick fire in the order they were scheduled, so a torch whose input
 /// changes in the tick it fires in lights or not by that order (cmp4's `lt`
-/// output, 2026-10-31: a two-tick pulse in one order, none in the other). The
+/// output, 2026-10-31: a two-tick pulse in one order, none in the other). So the
 /// model applies simultaneous input changes in the simulator's and the harness's
-/// order (`trace::event_order` of the probes) for that reason; the propagation
-/// order within a net it takes to be the part order, which has agreed so far.
+/// order (`trace::event_order` of the probes), and tells each net's readers in
+/// the order the simulator's block update reaches them, read off a scratch
+/// simulator when the model is built (param_add, the same day: a six-tick pulse
+/// the part order missed).
 pub struct Model {
     parts: Vec<ModelPart>,
     /// Parts that read each net.
@@ -671,6 +673,7 @@ impl Model {
     pub fn new(world: &World, circuit: &Circuit, probes: &[Pos], lamps: &[(String, Pos)]) -> Result<Model, String> {
         let mut parts = Vec::new();
         let mut rest = Vec::new();
+        let mut positions: Vec<Pos> = Vec::new();
         for torch in &circuit.torches {
             let lit = match world.get(torch.pos) {
                 Block::Torch { lit } | Block::WallTorch { lit, .. } => lit,
@@ -678,6 +681,7 @@ impl Model {
             };
             parts.push(ModelPart { kind: PartKind::Torch, reads: torch.reads.clone(), drives: torch.drives.clone() });
             rest.push(lit);
+            positions.push(torch.pos);
         }
         for repeater in &circuit.repeaters {
             let (delay, powered) = match world.get(repeater.pos) {
@@ -690,6 +694,7 @@ impl Model {
                 drives: repeater.drives.clone(),
             });
             rest.push(powered);
+            positions.push(repeater.pos);
         }
         let mut lamp_parts = Vec::new();
         for (name, pos) in lamps {
@@ -705,6 +710,7 @@ impl Model {
             lamp_parts.push(parts.len());
             parts.push(ModelPart { kind: PartKind::Lamp, reads: lamp.reads.clone(), drives: Vec::new() });
             rest.push(lit);
+            positions.push(*pos);
         }
         let mut readers = vec![Vec::new(); circuit.nets.len()];
         let mut drivers = vec![Vec::new(); circuit.nets.len()];
@@ -716,10 +722,44 @@ impl Model {
                 drivers[net].push(p);
             }
         }
-        let input_nets = probes
+        let input_nets: Vec<Vec<usize>> = probes
             .iter()
             .map(|probe| circuit.sources.iter().find(|s| s.pos == *probe).map(|s| s.drives.clone()).unwrap_or_default())
             .collect();
+        // The order a net's readers schedule their ticks in is the order the
+        // block update reaches them, which decides which fires first when two
+        // fall due together: read off a scratch simulator at rest, toggling the
+        // net's driver (its torch, repeater or probe block) and recording where
+        // the update went.
+        let at_rest = Sim::new(world.clone());
+        let part_at: BTreeMap<Pos, usize> = positions.iter().enumerate().map(|(p, &pos)| (pos, p)).collect();
+        for net in 0..readers.len() {
+            if readers[net].len() < 2 {
+                continue;
+            }
+            let (pos, toggled) = if let Some(&p) = drivers[net].first() {
+                let pos = positions[p];
+                let toggled = match world.get(pos) {
+                    Block::Torch { lit } => Block::Torch { lit: !lit },
+                    Block::WallTorch { facing, lit } => Block::WallTorch { facing, lit: !lit },
+                    Block::Repeater { facing, delay, locked, powered } => {
+                        Block::Repeater { facing, delay, locked, powered: !powered }
+                    }
+                    other => return Err(format!("the driver of a net at {pos} is {other}, not a torch or repeater")),
+                };
+                (pos, toggled)
+            } else if let Some(i) = input_nets.iter().position(|nets| nets.contains(&net)) {
+                (probes[i], Block::RedstoneBlock)
+            } else {
+                continue;
+            };
+            let mut sim = at_rest.clone();
+            sim.record_notifications();
+            sim.set_block(pos, toggled, false)?;
+            let order: Vec<usize> = sim.notifications().iter().filter_map(|pos| part_at.get(pos).copied()).collect();
+            let first_at = |p: usize| order.iter().position(|&q| q == p).unwrap_or(usize::MAX);
+            readers[net].sort_by_key(|&p| (first_at(p), p));
+        }
         let mut input_order: Vec<usize> = (0..probes.len()).collect();
         input_order.sort_by_key(|&i| crate::trace::event_order(probes[i]));
         Ok(Model { parts, readers, drivers, input_nets, lamps: lamp_parts, rest, input_order })

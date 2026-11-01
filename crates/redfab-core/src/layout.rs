@@ -196,7 +196,7 @@ pub fn ramp_turn(lower: Edge) -> u8 {
 /// Columns run east, rows run south. Each column has a width and each row a
 /// depth in blocks (every one `PITCH` today), and a tile's blocks start where
 /// the columns and rows before it end.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Layout {
     pub tiles: BTreeMap<(i32, i32), Placed>,
     /// The upper wire level: wiring and repeaters above cells of `tiles` that
