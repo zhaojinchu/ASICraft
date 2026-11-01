@@ -122,6 +122,12 @@ pub struct Built {
     /// The same blocks as a vanilla structure file.
     pub structure: Vec<u8>,
     pub report: String,
+    /// The layouts the pick could not have taken, one sentence each: a
+    /// candidate whose layout check or timing found problems (named, with them),
+    /// or a placement that failed (with why). A candidate given up on before it
+    /// was routed, because its footprint could only lose, is not among them.
+    /// Empty when every layout laid out was fit to keep.
+    pub rejected: Vec<String>,
 }
 
 impl Design {
@@ -535,7 +541,7 @@ pub fn build_unchecked_logged(
         design.blocks.len(),
         if problems.is_empty() { "  layout matches the netlist\n" } else { "" },
     );
-    Ok((Built { structure: structure_file(&chosen.world), design, report }, problems))
+    Ok((Built { structure: structure_file(&chosen.world), design, report, rejected: Vec::new() }, problems))
 }
 
 /// A layout in one placement style, checked and timed, before the pick.

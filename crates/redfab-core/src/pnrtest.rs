@@ -232,13 +232,52 @@ pub fn evaluate_with_state(netlist: &Netlist, inputs: &[bool], state: &[bool]) -
     (outputs, next)
 }
 
+/// How much of a build [`build_and_verify`] holds to account. The kept layout
+/// is always checked and simulated; `Every` also refuses a build in which any
+/// other candidate laid out failed its checks or any placement failed
+/// ([`Built::rejected`]), so that a check asserts every layout it pays for,
+/// not only the one the pick took.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Strict {
+    Kept,
+    Every,
+}
+
 /// Builds the netlist and simulates it on `vectors` input vectors (every
 /// combination when there are no more than that), comparing with [`evaluate`].
 /// A clocked netlist runs one vector per clock cycle, as the harness drives the
 /// game: the edge first, then the inputs change, then the outputs are read.
 /// Returns the build report on success.
-pub fn build_and_verify(netlist: &Netlist, name: &str, vectors: usize, rng: &mut Rng) -> Result<Built, String> {
+pub fn build_and_verify(
+    netlist: &Netlist,
+    name: &str,
+    vectors: usize,
+    rng: &mut Rng,
+    strict: Strict,
+) -> Result<Built, String> {
     let built = build_netlist(netlist, name)?;
+    verify_built(netlist, name, &built, vectors, rng, strict)?;
+    Ok(built)
+}
+
+/// The checks [`build_and_verify`] makes of a finished build: under
+/// [`Strict::Every`], that no laid-out candidate was rejected; then the
+/// simulator against the netlist's own evaluation on `vectors` input vectors.
+pub fn verify_built(
+    netlist: &Netlist,
+    name: &str,
+    built: &Built,
+    vectors: usize,
+    rng: &mut Rng,
+    strict: Strict,
+) -> Result<(), String> {
+    if strict == Strict::Every && !built.rejected.is_empty() {
+        return Err(format!(
+            "{name}: {} of the layouts laid out could not have been kept:\n  - {}",
+            built.rejected.len(),
+            built.rejected.join("\n  - ")
+        ));
+    }
     let clocked = netlist.cells.iter().any(|c| c.is_dff());
     let data: Vec<usize> = (0..netlist.inputs.len()).filter(|&i| !(clocked && i == 0)).collect();
     let n = data.len();
@@ -286,7 +325,7 @@ pub fn build_and_verify(netlist: &Netlist, name: &str, vectors: usize, rng: &mut
             }
         }
     }
-    Ok(built)
+    Ok(())
 }
 
 impl Netlist {
@@ -402,7 +441,53 @@ mod tests {
             constants: vec![],
         };
         let mut rng = Rng::new(1);
-        build_and_verify(&netlist, "twins", 16, &mut rng).unwrap();
+        build_and_verify(&netlist, "twins", 16, &mut rng, Strict::Every).unwrap();
+    }
+
+    /// The strict check refuses a build with a rejected layout, naming it; the
+    /// plain one keeps to the kept layout, as the build itself does.
+    #[test]
+    fn a_rejected_layout_fails_the_strict_check_and_passes_the_plain_one() {
+        let mut rng = Rng::new(5);
+        let netlist = random_netlist(&mut rng, 4);
+        let mut built = build_netlist(&netlist, "small").unwrap();
+        assert!(built.rejected.is_empty(), "{:?}", built.rejected);
+        verify_built(&netlist, "small", &built, 16, &mut rng, Strict::Every).unwrap();
+        built.rejected.push("stretched, seed 1: 1 problems: lamp y reads net 3, the netlist says 4".into());
+        let err = verify_built(&netlist, "small", &built, 16, &mut rng, Strict::Every).unwrap_err();
+        assert!(err.contains("small: 1 of the layouts laid out could not have been kept"), "{err}");
+        assert!(err.contains("  - stretched, seed 1: 1 problems: lamp y reads net 3"), "{err}");
+        verify_built(&netlist, "small", &built, 16, &mut rng, Strict::Kept).unwrap();
+    }
+
+    /// Everything a build lays out and cannot keep is in `rejected`, as the log
+    /// tells it: a placement that failed, or a layout whose checks found problems.
+    #[test]
+    fn the_rejected_layouts_are_the_ones_the_log_names() {
+        for seed in 0..8 {
+            let mut rng = Rng::new(900 + seed);
+            let (gates, inputs) = (2 + rng.below(7), 1 + rng.below(4));
+            let netlist = random_netlist_sized(&mut rng, gates, inputs, 0);
+            let mut lines: Vec<String> = Vec::new();
+            let (built, problems) =
+                crate::build::build_unchecked_logged(&netlist, "logged", crate::build::Break::None, &mut |l| {
+                    lines.push(l.to_string())
+                })
+                .unwrap();
+            assert!(problems.is_empty(), "{problems:?}");
+            let failed = lines.iter().filter(|l| l.contains(" placement failed: ")).count();
+            let faulty = lines.iter().filter(|l| l.starts_with("  ") && l.contains(" problems")).count();
+            assert_eq!(
+                built.rejected.len(),
+                failed + faulty,
+                "seed {seed}: {:?}\n{}",
+                built.rejected,
+                lines.join("\n")
+            );
+            for r in &built.rejected {
+                assert!(r.contains("placement failed: ") || r.contains(" problems: "), "{r}");
+            }
+        }
     }
 
     #[test]
@@ -412,7 +497,7 @@ mod tests {
             let (gates, inputs, flip_flops) = (2 + rng.below(6), 1 + rng.below(3), 1 + rng.below(3));
             let netlist = random_netlist_sized(&mut rng, gates, inputs, flip_flops);
             assert!(netlist.cells.iter().any(|c| c.is_dff()));
-            build_and_verify(&netlist, &format!("clocked{seed}"), 12, &mut rng).unwrap();
+            build_and_verify(&netlist, &format!("clocked{seed}"), 12, &mut rng, Strict::Every).unwrap();
             // The Yosys JSON form keeps the flip-flops, their clock and their initial values.
             let library = Library::builtin().unwrap();
             let back = Netlist::from_yosys_json(&netlist.to_yosys_json("top"), "top", &library).unwrap();
@@ -429,7 +514,7 @@ mod tests {
         let mut rng = Rng::new(42);
         let netlist = random_netlist_sized(&mut rng, 24, 12, 0);
         assert_eq!(netlist.inputs.len(), 12);
-        build_and_verify(&netlist, "wide", 16, &mut rng).unwrap();
+        build_and_verify(&netlist, "wide", 16, &mut rng, Strict::Every).unwrap();
     }
 
     #[test]
