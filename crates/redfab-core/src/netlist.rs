@@ -206,6 +206,22 @@ impl Netlist {
         Ok(self.drivers()?[net])
     }
 
+    /// [`Netlist::sinks_of`] for every net at once, in one pass: `table[net]`
+    /// is what `sinks_of(net)` returns, in the same order. For the placer, which
+    /// asks for every net's sinks per gap per placement it scores.
+    pub fn sink_table(&self) -> Vec<Vec<(usize, usize)>> {
+        let mut table: Vec<Vec<(usize, usize)>> = vec![Vec::new(); self.net_count];
+        for (c, cell) in self.cells.iter().enumerate() {
+            for (pin, &n) in cell.inputs.iter().enumerate() {
+                table[n].push((c, pin));
+            }
+        }
+        for (o, port) in self.outputs.iter().enumerate() {
+            table[port.net].push((usize::MAX, o));
+        }
+        table
+    }
+
     /// Every pin that reads `net`: `(cell, pin)` pairs and `(usize::MAX, output index)` for outputs.
     pub fn sinks_of(&self, net: NetId) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
@@ -254,6 +270,28 @@ mod tests {
     const NOR2: &str = r#"{"modules":{"top":{
         "ports":{"a":{"direction":"input","bits":[2]},"b":{"direction":"input","bits":[3]},"y":{"direction":"output","bits":[4]}},
         "cells":{"g":{"type":"NOR2","connections":{"A":[2],"B":[3],"Y":[4]}}}}}}"#;
+
+    /// The table built in one pass says what the per-net scan says, net by net
+    /// and in the scan's order, over random netlists with fan-out, duplicate
+    /// pins, constants, unread nets and flip-flops.
+    #[test]
+    fn the_sink_table_is_every_nets_sinks_in_the_scans_order() {
+        for seed in 0..40 {
+            let mut rng = crate::tiletest::Rng::new(1_300 + seed);
+            let (gates, inputs, flip_flops) = (1 + rng.below(20), 1 + rng.below(8), rng.below(3));
+            let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
+            let table = netlist.sink_table();
+            assert_eq!(table.len(), netlist.net_count);
+            for net in 0..netlist.net_count {
+                assert_eq!(table[net], netlist.sinks_of(net), "seed {seed}, net {net}");
+            }
+            assert!(table.iter().any(|sinks| sinks.len() > 1) || gates < 2, "seed {seed}: no fan-out at all");
+        }
+        let n = Netlist::from_yosys_json(NOR2, "top", &Library::builtin().unwrap()).unwrap();
+        let table = n.sink_table();
+        assert_eq!(table[n.inputs[0].net], vec![(0, 0)]);
+        assert_eq!(table[n.outputs[0].net], vec![(usize::MAX, 0)]);
+    }
 
     #[test]
     fn reads_a_mapped_nor() {
