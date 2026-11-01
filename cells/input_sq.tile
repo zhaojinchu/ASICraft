@@ -1,0 +1,25 @@
+# The input tile three blocks wide and three deep, for a shallow row (see
+# input_n).
+tile input_sq
+size 3 4 3
+port E out 2 1 1
+probe 1 1 1
+
+legend
+  G minecraft:glass
+  # minecraft:stone
+  / minecraft:lever[face=floor,facing=east,powered=false]
+  - minecraft:redstone_wire if E
+
+layer 0
+  ...
+  ..G
+  ...
+layer 1
+  ...
+  .#-
+  ...
+layer 2
+  ...
+  ./.
+  ...

@@ -409,9 +409,15 @@ impl Layout {
             match placed {
                 Placed::Input { port, .. } => probes[*port] = tile.probe.map(at),
                 Placed::Output { port } => lamps[*port] = tile.lamp.map(at),
-                // The torch, and the first dust, on the tile's middle row.
-                Placed::TieHigh { net } => ties.push((*net, true, at(Pos::new(2, 1, tile.depth / 2)))),
-                Placed::TieLow { net } => ties.push((*net, false, at(Pos::new(3, 1, tile.depth / 2)))),
+                // The torch, and the westmost dust: the tile's own, wherever its width puts them.
+                Placed::TieHigh { net } => {
+                    let torch = blocks.iter().find(|(_, b)| matches!(b, Block::Torch { .. })).map(|(p, _)| *p);
+                    ties.push((*net, true, at(torch.expect("a constant 1 has a torch"))));
+                }
+                Placed::TieLow { net } => {
+                    let dust = blocks.iter().filter(|(_, b)| matches!(b, Block::Wire(_))).map(|(p, _)| *p);
+                    ties.push((*net, false, at(dust.min_by_key(|p| (p.x, p.z)).expect("a constant 0 has dust"))));
+                }
                 Placed::Dff { cell, .. } => {
                     let port = |edge: Edge| {
                         tile.port(edge)
