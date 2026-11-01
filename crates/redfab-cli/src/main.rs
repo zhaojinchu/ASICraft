@@ -377,7 +377,8 @@ fn pnr_random_command(args: &[String]) -> Result<bool, String> {
         let netlist = redfab_core::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
         let name = format!("random_{seed}_{i:02}");
         let started = std::time::Instant::now();
-        match redfab_core::pnrtest::build_and_verify(&netlist, &name, 16, &mut rng) {
+        match redfab_core::pnrtest::build_and_verify(&netlist, &name, 16, &mut rng, redfab_core::pnrtest::Strict::Kept)
+        {
             Ok(built) => {
                 let line = built.report.lines().find(|l| l.contains("tiles:")).unwrap_or_default().trim().to_string();
                 println!(

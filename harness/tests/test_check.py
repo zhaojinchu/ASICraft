@@ -45,6 +45,63 @@ def test_one_fast_check_runs_alone_and_the_summary_records_it(tmp_path: Path):
     assert len(summary) == 3
 
 
+def run_helpers(tmp_path: Path, body: str, only: str = "", vanilla: int = 0) -> tuple[str, list[str]]:
+    """Runs `body` after the check's verdict helpers (record, run, run_background,
+    wait_background) with the script's state variables set as a run sets them."""
+    script = (ROOT / "check").read_text()
+    helpers = script[script.index("# record <name>"):script.index("# refused_with <message>")]
+    (tmp_path / "build" / "check").mkdir(parents=True)
+    summary = tmp_path / "SUMMARY"
+    prelude = f'set -u\nSUMMARY={summary}\nPASSED=0\nFAILED=()\nONLY="{only}"\nVANILLA={vanilla}\n'
+    result = subprocess.run(["bash", "-c", prelude + helpers + body], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return result.stdout, summary.read_text().splitlines() if summary.exists() else []
+
+
+def test_a_background_check_runs_beside_the_next_ones_and_is_recorded_when_waited_for(tmp_path: Path):
+    out, summary = run_helpers(
+        tmp_path,
+        "run_background slow sh -c 'sleep 1; echo done; exit 0'\n"
+        "run quick sh -c 'exit 0'\n"
+        "wait_background\n"
+        'echo "passed=$PASSED failed=${FAILED[*]:-none}"\n',
+    )
+    lines = out.splitlines()
+    assert lines[0].startswith("  ....  slow") and "background" in lines[0], out
+    assert lines[1].startswith("  PASS  quick"), "the next check ran without waiting"
+    assert lines[2].startswith("  PASS  slow"), out
+    assert lines[3] == "passed=2 failed=none"
+    names = [line.split()[1] for line in summary]
+    assert names == ["quick", "slow"], summary
+    assert all(line.startswith("PASS ") and line.split()[2].isdigit() for line in summary)
+    assert (tmp_path / "build" / "check" / "slow.log").read_text() == "done\n"
+
+
+def test_a_failing_background_check_fails_the_run_with_its_log(tmp_path: Path):
+    out, summary = run_helpers(
+        tmp_path,
+        "run_background bad sh -c 'echo why it failed; exit 3'\n"
+        "wait_background\n"
+        'echo "passed=$PASSED failed=${FAILED[*]:-none}"\n',
+    )
+    assert "  FAIL  bad" in out and "(see build/check/bad.log)" in out, out
+    assert "        | why it failed" in out, "the failing log's tail is shown"
+    assert out.splitlines()[-1] == "passed=0 failed=bad"
+    assert len(summary) == 1 and summary[0].startswith("FAIL bad ")
+
+
+def test_a_background_check_runs_in_place_under_only_or_with_the_server(tmp_path: Path):
+    # With --only, and in the vanilla tier (beside the server it would compete for
+    # memory), the check runs like any other: its verdict comes before the next check's.
+    body = "run_background bg sh -c 'exit 0'\nrun other sh -c 'exit 0'\nwait_background\n"
+    out, summary = run_helpers(tmp_path, body, only="bg")
+    assert out.splitlines() == [line for line in out.splitlines() if "background" not in line], out
+    assert [line.split()[1] for line in summary] == ["bg"], "only the named check runs"
+    out, summary = run_helpers(tmp_path, body, vanilla=1)
+    assert "background" not in out, out
+    assert [line.split()[1] for line in summary] == ["bg", "other"], summary
+
+
 def test_the_negative_control_helper_fails_on_a_crash_without_the_message(tmp_path: Path):
     # The same assertions the check makes, run straight against the helper: a crash for
     # another reason, a success, and the message with a success are all failures.
