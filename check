@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs every acceptance check for every stage completed so far.
-#   ./check              fast checks (no Minecraft server), about five minutes
-#   ./check --vanilla    also runs the checks that need the vanilla server, about an hour
+#   ./check              fast checks (no Minecraft server), about ten minutes
+#   ./check --vanilla    also runs the checks that need the vanilla server, about an hour and a quarter
 #   ./check --only NAME  runs just that check (any name a run prints, vanilla ones included)
 #   ./check --clean      removes build/mc (old server run directories) and build/check first
 # A stage is done only when this passes. Checks are added before the code they test.
@@ -63,6 +63,22 @@ stage() {
     [ -n "$ONLY" ] || echo "$1"
 }
 
+# record <name> <secs> <status> <log>: the verdict of a finished check, printed,
+# written to the summary and counted.
+record() {
+    local name=$1 secs=$2 status=$3 log=$4
+    if [ "$status" -eq 0 ]; then
+        printf '  PASS  %-26s %5d s\n' "$name" "$secs"
+        printf 'PASS %s %d\n' "$name" "$secs" >> "$SUMMARY"
+        PASSED=$((PASSED + 1))
+    else
+        printf '  FAIL  %-26s %5d s   (see %s)\n' "$name" "$secs" "$log"
+        printf 'FAIL %s %d\n' "$name" "$secs" >> "$SUMMARY"
+        tail -n 15 "$log" | sed 's/^/        | /'
+        FAILED+=("$name")
+    fi
+}
+
 # run <name> <command...>: runs the command, logs to build/check/<name>.log, times it.
 run() {
     local name=$1; shift
@@ -70,20 +86,43 @@ run() {
         return 0
     fi
     local log="build/check/$name.log"
-    local t0
+    local t0 status
     t0=$(date +%s)
-    if "$@" >"$log" 2>&1; then
-        local secs=$(( $(date +%s) - t0 ))
-        printf '  PASS  %-26s %5d s\n' "$name" "$secs"
-        printf 'PASS %s %d\n' "$name" "$secs" >> "$SUMMARY"
-        PASSED=$((PASSED + 1))
-    else
-        local secs=$(( $(date +%s) - t0 ))
-        printf '  FAIL  %-26s %5d s   (see %s)\n' "$name" "$secs" "$log"
-        printf 'FAIL %s %d\n' "$name" "$secs" >> "$SUMMARY"
-        tail -n 15 "$log" | sed 's/^/        | /'
-        FAILED+=("$name")
+    "$@" >"$log" 2>&1
+    status=$?
+    record "$name" $(( $(date +%s) - t0 )) $status "$log"
+}
+
+# run_background <name> <command...>: like run, but the command runs beside the
+# checks that follow, and wait_background records its verdict at the end. Only in
+# the fast tier: beside the server it would compete for memory, and with --only
+# it is the one check, so in both it runs in place. One at a time.
+BG_NAME=""
+BG_PID=""
+BG_T0=0
+run_background() {
+    local name=$1; shift
+    if [ -n "$ONLY" ] || [ "$VANILLA" = 1 ]; then
+        run "$name" "$@"
+        return
     fi
+    local log="build/check/$name.log"
+    BG_NAME=$name
+    BG_T0=$(date +%s)
+    # The job writes its status and end time when it finishes, so the seconds
+    # recorded are its own, not the time until it was waited for.
+    { "$@" >"$log" 2>&1; printf '%s %s\n' $? "$(date +%s)" > "build/check/$name.done"; } &
+    BG_PID=$!
+    printf '  ....  %-26s (running in the background, recorded at the end)\n' "$name"
+}
+
+wait_background() {
+    [ -n "$BG_PID" ] || return 0
+    local status end
+    wait "$BG_PID"
+    read -r status end < "build/check/$BG_NAME.done"
+    record "$BG_NAME" $(( end - BG_T0 )) "$status" "build/check/$BG_NAME.log"
+    BG_PID=""
 }
 
 # refused_with <message> <command...>: a negative control. The command must fail AND
@@ -101,6 +140,42 @@ refused_with() {
         echo "refused, but not for the expected reason: no '$message' in the output"; return 1
     fi
     echo "refused as expected: '$message'"
+}
+
+# The gate's binary: redfab-cli built once under the `gate` profile (Cargo.toml:
+# release speed, the overflow checks and debug assertions kept), then called as
+# a file by every check. The rust-build check builds it first; a run of one check
+# with --only builds it on first use.
+GATE_BIN=target/gate/redfab
+REDFAB_BUILT=0
+redfab() {
+    if [ $REDFAB_BUILT = 0 ]; then
+        cargo build -q --locked -p redfab-cli --profile gate || return 1
+        REDFAB_BUILT=1
+    fi
+    "$GATE_BIN" "$@"
+}
+REDFAB=redfab
+
+rust_build() {
+    cargo build --locked -p redfab-cli --profile gate && REDFAB_BUILT=1
+}
+
+# Stage 6's random netlists, defined here because the check starts in stage 0
+# and runs beside the rest of the fast tier (run_background), being the longest.
+# Random combinational netlists (NOT/NOR2/NOR3 with constants and fan-out) must
+# always place, route and pass the layout-versus-netlist and signal-strength
+# checks: every layout laid out, not only the kept one (--strict; a placement
+# that could not be routed is reported, not refused: PLAN, "Gate, step A1"). Of
+# seed 1's sixty netlists, every fifth is larger (20 to 40 gates) and takes
+# minutes under the candidates a design that size gets; the first three of those
+# are built.
+pnr_random() {
+    $REDFAB pnr-random --strict --count 60 --seed 1 --large 3 &&
+    # Clocked netlists (feedback nets across every column) and wide ones (every input
+    # in one gap in front of the gates).
+    $REDFAB pnr-random --strict --count 20 --seed 2 --clocked &&
+    $REDFAB pnr-random --strict --count 10 --seed 3 --inputs 16 --gates 8
 }
 
 # ---------------------------------------------------------------- stage 0
@@ -124,7 +199,7 @@ pins_agree() {
     grep -q "\"node\": \">=$NODE_MAJOR\"" package.json &&
     [ "$(uv run --frozen python -c 'import sys; print("%d.%d" % sys.version_info[:2])')" = "$(cat .python-version)" ] &&
     grep -q "\"minecraft\": \"$MC_VERSION\"" mod/resources/fabric.mod.json &&
-    cargo run -q --locked -p redfab-cli -- --version | grep -q "(Minecraft $MC_VERSION, data version $MC_DATA_VERSION)" &&
+    $REDFAB --version | grep -q "(Minecraft $MC_VERSION, data version $MC_DATA_VERSION)" &&
     grep -q "\"mc_version\": \"$MC_VERSION\"" harness/data/block_defaults.json &&
     uv lock --check &&
     uv run --frozen python -m harness.pins
@@ -206,6 +281,10 @@ server_smoke() {
 
 stage "stage 0: setup"
 run negatives-can-fail negatives_can_fail
+run rust-build        rust_build
+# Stage 6's random netlists, the longest check, start now and run beside the
+# rest of the fast tier; their verdict is recorded at the end (run_background).
+run_background pnr-random pnr_random
 run pins-agree        pins_agree
 run tool-hashes       tool_hashes
 run python-lint       python_lint
@@ -246,8 +325,6 @@ if [ $VANILLA = 1 ]; then
 fi
 
 # ---------------------------------------------------------------- stage 2
-
-REDFAB="cargo run -q --locked -p redfab-cli --"
 
 # The simulator must reproduce every recorded mechanics fixture tick for tick,
 # block states and pending ticks, in both redstone modes.
@@ -465,17 +542,11 @@ fi
 
 # ---------------------------------------------------------------- stage 6
 
-# Random combinational netlists (NOT/NOR2/NOR3 with constants and fan-out) must
-# always place, route and pass the layout-versus-netlist and signal-strength checks.
-pnr_random() {
-    $REDFAB pnr-random --count 60 --seed 1 &&
-    # Clocked netlists (feedback nets across every column) and wide ones (every input
-    # in one gap in front of the gates).
-    $REDFAB pnr-random --count 20 --seed 2 --clocked &&
-    $REDFAB pnr-random --count 10 --seed 3 --inputs 16 --gates 8 &&
-    # One netlist of the capacity target's size (gaps up to nine routing columns);
-    # a second would put this check over a minute with the gate's binary.
-    $REDFAB pnr-random --count 1 --seed 7 --gates 100 --inputs 16
+# pnr_random itself is defined before stage 0, where it starts. One netlist of
+# the capacity target's size (gaps up to nine routing columns), about 24
+# minutes: with the server's checks, not in the fast tier.
+pnr_random_capacity() {
+    $REDFAB pnr-random --strict --count 1 --seed 7 --gates 100 --inputs 16
 }
 
 # The 4-bit adder on every one of its 512 input combinations in the game, in both
@@ -485,8 +556,9 @@ design_exhaustive_vanilla() {
 }
 
 stage "stage 6: placement and routing"
-run pnr-random          pnr_random
+# pnr-random started in stage 0 (run_background) and is recorded at the end.
 if [ $VANILLA = 1 ]; then
+    run pnr-random-capacity pnr_random_capacity
     run adder4-exhaustive   design_exhaustive_vanilla
 fi
 
@@ -698,6 +770,7 @@ fi
 
 # ---------------------------------------------------------------- summary
 
+wait_background
 ELAPSED=$(( $(date +%s) - STARTED ))
 echo
 if [ -n "$ONLY" ] && [ $PASSED -eq 0 ] && [ ${#FAILED[@]} -eq 0 ]; then

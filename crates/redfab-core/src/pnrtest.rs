@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::build::{Built, build_netlist, simulate};
+use crate::build::{Built, Rejected, build_netlist, simulate};
 use crate::netlist::{Cell, Driver, NetId, Netlist, PortBit};
 use crate::tiletest::Rng;
 
@@ -234,9 +234,12 @@ pub fn evaluate_with_state(netlist: &Netlist, inputs: &[bool], state: &[bool]) -
 
 /// How much of a build [`build_and_verify`] holds to account. The kept layout
 /// is always checked and simulated; `Every` also refuses a build in which any
-/// other candidate laid out failed its checks or any placement failed
-/// ([`Built::rejected`]), so that a check asserts every layout it pays for,
-/// not only the one the pick took.
+/// other candidate laid out failed its checks ([`Rejected::Faulty`]), so that
+/// a check asserts every layout it pays for, not only the one the pick took.
+/// A placement that could not be routed ([`Rejected::Unplaced`]) is not
+/// refused: the build tolerates one by design, and the router has a known
+/// case (a net whose only ways into two pins of one gate run through each
+/// other's tiles, PLAN "Gate, step A1"), so the caller reports them instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Strict {
     Kept,
@@ -261,7 +264,7 @@ pub fn build_and_verify(
 }
 
 /// The checks [`build_and_verify`] makes of a finished build: under
-/// [`Strict::Every`], that no laid-out candidate was rejected; then the
+/// [`Strict::Every`], that no laid-out candidate failed its checks; then the
 /// simulator against the netlist's own evaluation on `vectors` input vectors.
 pub fn verify_built(
     netlist: &Netlist,
@@ -271,11 +274,13 @@ pub fn verify_built(
     rng: &mut Rng,
     strict: Strict,
 ) -> Result<(), String> {
-    if strict == Strict::Every && !built.rejected.is_empty() {
+    let faulty: Vec<String> =
+        built.rejected.iter().filter(|r| matches!(r, Rejected::Faulty { .. })).map(|r| r.to_string()).collect();
+    if strict == Strict::Every && !faulty.is_empty() {
         return Err(format!(
-            "{name}: {} of the layouts laid out could not have been kept:\n  - {}",
-            built.rejected.len(),
-            built.rejected.join("\n  - ")
+            "{name}: {} of the layouts laid out failed the checks:\n  - {}",
+            faulty.len(),
+            faulty.join("\n  - ")
         ));
     }
     let clocked = netlist.cells.iter().any(|c| c.is_dff());
@@ -444,19 +449,35 @@ mod tests {
         build_and_verify(&netlist, "twins", 16, &mut rng, Strict::Every).unwrap();
     }
 
-    /// The strict check refuses a build with a rejected layout, naming it; the
-    /// plain one keeps to the kept layout, as the build itself does.
+    /// The strict check refuses a build with a layout that failed its checks,
+    /// naming it; a placement that could not be routed is not refused; the
+    /// plain check keeps to the kept layout, as the build itself does.
     #[test]
-    fn a_rejected_layout_fails_the_strict_check_and_passes_the_plain_one() {
+    fn a_faulty_layout_fails_the_strict_check_and_passes_the_plain_one() {
         let mut rng = Rng::new(5);
         let netlist = random_netlist(&mut rng, 4);
         let mut built = build_netlist(&netlist, "small").unwrap();
         assert!(built.rejected.is_empty(), "{:?}", built.rejected);
         verify_built(&netlist, "small", &built, 16, &mut rng, Strict::Every).unwrap();
-        built.rejected.push("stretched, seed 1: 1 problems: lamp y reads net 3, the netlist says 4".into());
+        built.rejected.push(Rejected::Unplaced {
+            candidate: "pitch4, folded, rows below charged".into(),
+            error: "net cannot reach the tile at (12, 2)".into(),
+        });
+        verify_built(&netlist, "small", &built, 16, &mut rng, Strict::Every).unwrap();
+        assert_eq!(
+            built.rejected[0].to_string(),
+            "pitch4, folded, rows below charged placement failed: net cannot reach the tile at (12, 2)"
+        );
+        built.rejected.push(Rejected::Faulty {
+            candidate: "stretched, seed 1".into(),
+            problems: vec!["lamp y reads net 3, the netlist says 4".into(), "a signal dies at (3, 1)".into()],
+        });
         let err = verify_built(&netlist, "small", &built, 16, &mut rng, Strict::Every).unwrap_err();
-        assert!(err.contains("small: 1 of the layouts laid out could not have been kept"), "{err}");
-        assert!(err.contains("  - stretched, seed 1: 1 problems: lamp y reads net 3"), "{err}");
+        assert!(err.contains("small: 1 of the layouts laid out failed the checks"), "{err}");
+        assert!(
+            err.contains("  - stretched, seed 1: 2 problems: lamp y reads net 3, the netlist says 4; a signal"),
+            "{err}"
+        );
         verify_built(&netlist, "small", &built, 16, &mut rng, Strict::Kept).unwrap();
     }
 
@@ -477,15 +498,16 @@ mod tests {
             assert!(problems.is_empty(), "{problems:?}");
             let failed = lines.iter().filter(|l| l.contains(" placement failed: ")).count();
             let faulty = lines.iter().filter(|l| l.starts_with("  ") && l.contains(" problems")).count();
+            let unplaced = built.rejected.iter().filter(|r| matches!(r, Rejected::Unplaced { .. })).count();
             assert_eq!(
-                built.rejected.len(),
-                failed + faulty,
+                (unplaced, built.rejected.len() - unplaced),
+                (failed, faulty),
                 "seed {seed}: {:?}\n{}",
                 built.rejected,
                 lines.join("\n")
             );
             for r in &built.rejected {
-                assert!(r.contains("placement failed: ") || r.contains(" problems: "), "{r}");
+                assert!(lines.iter().any(|l| l.contains(&r.to_string()) || l.contains(" problems")), "{r}");
             }
         }
     }

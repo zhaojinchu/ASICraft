@@ -52,9 +52,10 @@ Running a Minecraft server binds whoever runs it to
 acceptance in `.tools/eula-accepted`; setup, the test harness and the live
 backend refuse to start a server without that file.
 
-`./check` is the gate: every acceptance check from every stage, about five
-minutes without the game. `./check --vanilla` adds the checks that run the real
-server, about an hour. `./check --only NAME` runs one check; `--clean` removes
+`./check` is the gate: every acceptance check from every stage, about ten
+minutes without the game (the random-netlist check runs beside the rest).
+`./check --vanilla` adds the checks that run the real server and the 100-gate
+random netlist, about an hour and a quarter. `./check --only NAME` runs one check; `--clean` removes
 old server run directories first. Every run writes `build/check/SUMMARY` with
 the time, each check's verdict and seconds, and the verdict of the run; set
 `REDFAB_CHECK_SUMMARY` to write it elsewhere (two runs at once would overwrite

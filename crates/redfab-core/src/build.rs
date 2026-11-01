@@ -122,12 +122,31 @@ pub struct Built {
     /// The same blocks as a vanilla structure file.
     pub structure: Vec<u8>,
     pub report: String,
-    /// The layouts the pick could not have taken, one sentence each: a
-    /// candidate whose layout check or timing found problems (named, with them),
-    /// or a placement that failed (with why). A candidate given up on before it
-    /// was routed, because its footprint could only lose, is not among them.
-    /// Empty when every layout laid out was fit to keep.
-    pub rejected: Vec<String>,
+    /// The layouts the pick could not have taken. A candidate given up on
+    /// before it was routed, because its footprint could only lose, is not
+    /// among them. Empty when every layout laid out was fit to keep.
+    pub rejected: Vec<Rejected>,
+}
+
+/// A layout the pick could not have taken, by the candidate's name (its style,
+/// columns, rows and routing draw, as the log names it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Rejected {
+    /// A candidate laid out whose layout check or timing found problems.
+    Faulty { candidate: String, problems: Vec<String> },
+    /// A placement that could not be routed or realized at all, with why.
+    Unplaced { candidate: String, error: String },
+}
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Rejected::Faulty { candidate, problems } => {
+                write!(f, "{candidate}: {} problems: {}", problems.len(), problems.join("; "))
+            }
+            Rejected::Unplaced { candidate, error } => write!(f, "{candidate} placement failed: {error}"),
+        }
+    }
 }
 
 impl Design {
@@ -364,6 +383,10 @@ pub fn build_unchecked_logged(
     placers.sort_by_key(|(placer, _)| (placer.style() == Style::Pitch4, placer.columns() == Columns::Levels));
     let mut candidates: Vec<(Candidate, (usize, usize, usize, usize))> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
+    // What the pick could not have taken (`Built::rejected`): the placements
+    // that fail as they fail, the candidates whose checks found problems once
+    // the kept one is known.
+    let mut rejected: Vec<Rejected> = Vec::new();
     let mut pitch4_given_up = false;
     for (placer, &(style_at, columns_at, rows_at)) in placers.iter().map(|(p, at)| (p, at)) {
         for (draw_at, &draw) in draws.iter().enumerate() {
@@ -386,6 +409,7 @@ pub fn build_unchecked_logged(
                 Ok(None) => pitch4_given_up |= placer.style() == Style::Pitch4 && draw_at == 0,
                 Err(e) => {
                     log(&format!("  {name} placement failed: {e}"));
+                    rejected.push(Rejected::Unplaced { candidate: name.clone(), error: e.clone() });
                     failures.push(e);
                 }
             }
@@ -455,7 +479,10 @@ pub fn build_unchecked_logged(
                     chosen += 1;
                 }
                 Ok(None) => unreachable!("nothing is given up on without a bound"),
-                Err(e) => log(&format!("  pitch4 placement failed: {e}")),
+                Err(e) => {
+                    log(&format!("  pitch4 placement failed: {e}"));
+                    rejected.push(Rejected::Unplaced { candidate: "pitch4".into(), error: e });
+                }
             }
         }
         let eligible: Vec<usize> = (0..candidates.len()).filter(|&i| candidates[i].problems.is_empty()).collect();
@@ -478,6 +505,13 @@ pub fn build_unchecked_logged(
             chosen = again;
         }
     }
+    rejected.extend(
+        candidates
+            .iter()
+            .enumerate()
+            .filter(|&(i, c)| i != chosen && !c.problems.is_empty())
+            .map(|(_, c)| Rejected::Faulty { candidate: c.name(), problems: c.problems.clone() }),
+    );
     let (design, problems) = finished.swap_remove(chosen).expect("the kept layout is finished");
     let chosen = candidates.swap_remove(chosen);
     let realized = &chosen.realized;
@@ -541,7 +575,7 @@ pub fn build_unchecked_logged(
         design.blocks.len(),
         if problems.is_empty() { "  layout matches the netlist\n" } else { "" },
     );
-    Ok((Built { structure: structure_file(&chosen.world), design, report, rejected: Vec::new() }, problems))
+    Ok((Built { structure: structure_file(&chosen.world), design, report, rejected }, problems))
 }
 
 /// A layout in one placement style, checked and timed, before the pick.
@@ -578,6 +612,11 @@ impl Candidate {
         }
     }
 
+    /// The name the candidate's log lines carry (`candidate_name`).
+    fn name(&self) -> String {
+        name_of(self.style, self.columns, self.rows, self.draw)
+    }
+
     /// One line of what the layout came to.
     fn summary(&self) -> String {
         let (cols, rows) = self.routed.layout.size();
@@ -599,11 +638,15 @@ impl Candidate {
 /// folded, whether its rows are the searched ones, and its routing draw when
 /// not the plain router.
 fn candidate_name(placer: &Placer, draw: Draw) -> String {
+    name_of(placer.style(), placer.columns(), placer.rows_name(), draw)
+}
+
+fn name_of(style: Style, columns: Columns, rows: &str, draw: Draw) -> String {
     format!(
         "{}{}{}{}",
-        placer.style().name(),
-        if placer.columns() == Columns::Folded { ", folded" } else { "" },
-        if placer.rows_name() == "searched" { ", searched" } else { "" },
+        style.name(),
+        if columns == Columns::Folded { ", folded" } else { "" },
+        if rows == "searched" { ", searched" } else { "" },
         match draw {
             Draw { seed: 0, charge_below: false } => String::new(),
             Draw { seed, charge_below: false } => format!(", seed {seed}"),

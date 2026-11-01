@@ -48,7 +48,7 @@ Checks of the simulator and the tile set:
                       write a fixture for every tile variant, and random groups
   characterize [DIR] [--shuffles N] [--margin M] [--chosen NAME] [--tables]
                       setup, hold and clock-to-output of the flip-flop tiles
-  pnr-random [--count N] [--seed S] [--gates N] [--inputs N] [--clocked] [--dump DIR]
+  pnr-random [--count N] [--seed S] [--gates N] [--inputs N] [--clocked] [--large N] [--strict] [--dump DIR]
                       random netlists must place, route and compute correctly
 
   help                this text
@@ -330,21 +330,27 @@ fn check_fixtures_command(args: &[String]) -> Result<bool, String> {
     Ok(failed == 0 && passed > 0)
 }
 
-/// `redfab pnr-random [--count N] [--seed S] [--gates N] [--inputs N] [--clocked] [--dump DIR]`
+/// `redfab pnr-random [--count N] [--seed S] [--gates N] [--inputs N] [--clocked] [--large N] [--strict] [--dump DIR]`
 ///
 /// Generates random netlists and builds every one: placement, routing, the
 /// layout-versus-netlist and strength checks, and the simulator against a
 /// direct evaluation of the netlist on up to 16 input vectors (clock cycles for
 /// a clocked netlist). Without `--gates` the netlists are mostly small, every
-/// fifth one larger; `--gates` and `--inputs` fix the sizes, `--clocked` adds
-/// one to four flip-flops. With `--dump`, the netlists that fail are written
-/// there as Yosys JSON.
+/// fifth one larger (20 to 40 gates); `--large N` builds only the first N of
+/// those larger ones and says which it skips. `--gates` and `--inputs` fix the
+/// sizes, `--clocked` adds one to four flip-flops. `--strict` also refuses a
+/// build in which any layout laid out failed its checks or any placement
+/// failed, not only the kept layout. With `--dump`, the netlists that fail are
+/// written there as Yosys JSON.
 fn pnr_random_command(args: &[String]) -> Result<bool, String> {
+    const USAGE: &str = "usage: redfab pnr-random [--count N] [--seed S] [--gates N] [--inputs N] [--clocked] [--large N] [--strict] [--dump DIR]";
     let mut count = 20usize;
     let mut seed = 1u64;
     let mut gates: Option<usize> = None;
     let mut inputs: Option<usize> = None;
     let mut clocked = false;
+    let mut large: Option<usize> = None;
+    let mut strict = redfab_core::pnrtest::Strict::Kept;
     let mut dump: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -354,31 +360,43 @@ fn pnr_random_command(args: &[String]) -> Result<bool, String> {
             "--gates" => gates = Some(it.next().and_then(|n| n.parse().ok()).ok_or("--gates needs a number")?),
             "--inputs" => inputs = Some(it.next().and_then(|n| n.parse().ok()).ok_or("--inputs needs a number")?),
             "--clocked" => clocked = true,
+            "--large" => large = Some(it.next().and_then(|n| n.parse().ok()).ok_or("--large needs a number")?),
+            "--strict" => strict = redfab_core::pnrtest::Strict::Every,
             "--dump" => dump = Some(PathBuf::from(it.next().ok_or("--dump needs a directory")?)),
-            other => {
-                return Err(format!(
-                    "usage: redfab pnr-random [--count N] [--seed S] [--gates N] [--inputs N] [--clocked] [--dump DIR] (got {other:?})"
-                ));
-            }
+            other => return Err(format!("{USAGE} (got {other:?})")),
         }
     }
     if let Some(dir) = &dump {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let mut failures = 0;
+    let mut skipped = 0;
+    let mut unplaced = 0;
+    let mut larger_seen = 0;
     let mut cells = 0;
     let mut tiles = 0;
     for i in 0..count {
         let mut rng = redfab_core::tiletest::Rng::new(seed * 100_000 + i as u64);
-        // Mostly small, every fifth one larger.
-        let gates = gates.unwrap_or_else(|| if i % 5 == 4 { 20 + rng.below(21) } else { 1 + rng.below(16) });
+        // Mostly small, every fifth one larger (each netlist has its own seed, so
+        // skipping one leaves the others as they are).
+        let larger = gates.is_none() && i % 5 == 4;
+        if larger {
+            larger_seen += 1;
+            if let Some(n) = large
+                && larger_seen > n
+            {
+                skipped += 1;
+                println!("  skip  random_{seed}_{i:02}: a larger netlist after the first {n} (--large {n})");
+                continue;
+            }
+        }
+        let gates = gates.unwrap_or_else(|| if larger { 20 + rng.below(21) } else { 1 + rng.below(16) });
         let inputs = inputs.unwrap_or_else(|| 1 + rng.below(6));
         let flip_flops = if clocked { 1 + rng.below(4) } else { 0 };
         let netlist = redfab_core::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
         let name = format!("random_{seed}_{i:02}");
         let started = std::time::Instant::now();
-        match redfab_core::pnrtest::build_and_verify(&netlist, &name, 16, &mut rng, redfab_core::pnrtest::Strict::Kept)
-        {
+        match redfab_core::pnrtest::build_and_verify(&netlist, &name, 16, &mut rng, strict) {
             Ok(built) => {
                 let line = built.report.lines().find(|l| l.contains("tiles:")).unwrap_or_default().trim().to_string();
                 println!(
@@ -387,6 +405,12 @@ fn pnr_random_command(args: &[String]) -> Result<bool, String> {
                     netlist.inputs.len(),
                     started.elapsed().as_secs_f64()
                 );
+                // What the pick could not have taken and the check does not refuse
+                // (under --strict, only placements that could not be routed).
+                for r in &built.rejected {
+                    println!("        not kept: {r}");
+                }
+                unplaced += built.rejected.len();
                 cells += netlist.cells.len();
                 tiles += built.design.blocks.len();
             }
@@ -406,9 +430,20 @@ fn pnr_random_command(args: &[String]) -> Result<bool, String> {
             }
         }
     }
+    let built = count - skipped;
     println!(
-        "{} of {count} random netlists build and compute what they should ({cells} cells, {tiles} blocks)",
-        count - failures
+        "{} of {built} random netlists build and compute what they should ({cells} cells, {tiles} blocks{}){}{}",
+        built - failures,
+        if strict == redfab_core::pnrtest::Strict::Every { ", every layout laid out checked" } else { "" },
+        match (skipped, large) {
+            (0, _) | (_, None) => String::new(),
+            (n, Some(l)) => format!("; {n} larger netlists after the first {l} skipped"),
+        },
+        if unplaced > 0 {
+            format!("; {unplaced} layouts not kept were reported above, not refused")
+        } else {
+            String::new()
+        }
     );
     Ok(failures == 0)
 }
