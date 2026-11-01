@@ -131,6 +131,8 @@ pub struct Sim {
     /// When set, every block update is delivered to its targets in a pseudo-random
     /// order drawn from this state instead of the fixed default order.
     delivery_rng: Option<u64>,
+    /// When set, every position a block update reaches, in order (`record_notifications`).
+    notified: Option<Vec<Pos>>,
 }
 
 impl Sim {
@@ -144,7 +146,20 @@ impl Sim {
             toggles: Vec::new(),
             mutation: None,
             delivery_rng: None,
+            notified: None,
         }
+    }
+
+    /// Records, from now on, every position a block update reaches, in the order
+    /// it reaches them: the order the parts there schedule their ticks in, which
+    /// is the order they fire in when due together (`notifications`).
+    pub fn record_notifications(&mut self) {
+        self.notified = Some(Vec::new());
+    }
+
+    /// The positions recorded since `record_notifications`.
+    pub fn notifications(&self) -> &[Pos] {
+        self.notified.as_deref().unwrap_or(&[])
     }
 
     /// Delivers block updates in a shuffled order from now on (`None` restores the
@@ -492,6 +507,9 @@ impl Sim {
     }
 
     fn neighbor_changed(&mut self, pos: Pos) {
+        if let Some(log) = &mut self.notified {
+            log.push(pos);
+        }
         match self.world.get(pos) {
             Block::Wire(_) => self.update_power(pos),
             block @ (Block::Torch { lit } | Block::WallTorch { lit, .. }) => {
