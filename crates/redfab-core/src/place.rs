@@ -736,11 +736,9 @@ impl<'a> Frame<'a> {
         Ok(Placement {
             cols,
             rows: rows.count,
-            // Routing columns take the narrow wiring tiles; gates, sources and outputs a full cell.
-            col_width: columns
-                .iter()
-                .map(|c| if matches!(c, Column::Routing { .. }) { NARROW } else { PITCH })
-                .collect(),
+            // Gates take a full cell; routing columns the narrow wiring tiles, and
+            // the sources and outputs the narrow input, output and constant tiles.
+            col_width: columns.iter().map(|c| if matches!(c, Column::Gates { .. }) { PITCH } else { NARROW }).collect(),
             // Rows take the shallow tiles, but a row a flip-flop sits in, which is a cell deep.
             row_depth: (0..rows.count)
                 .map(|r| {

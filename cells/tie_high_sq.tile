@@ -1,0 +1,20 @@
+# Constant 1 three blocks wide and three deep, for a shallow row (see
+# tie_high_n).
+tile tie_high_sq
+size 3 4 3
+port E out 2 1 1
+function high
+
+legend
+  G minecraft:glass
+  T minecraft:redstone_torch
+  - minecraft:redstone_wire
+
+layer 0
+  ...
+  .GG
+  ...
+layer 1
+  ...
+  .T-
+  ...
