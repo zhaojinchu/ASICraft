@@ -14,3 +14,12 @@ unsafe_code = "forbid"
 # The router and the simulator are too slow unoptimised; 1 keeps builds quick.
 [profile.dev]
 opt-level = 1
+
+# The gate's binary (./check): release speed, with the overflow checks and debug
+# assertions the dev profile has, so a check panics where a dev build would.
+# Layouts are the same under every profile (wasm-identical holds the release
+# WebAssembly build to the native one).
+[profile.gate]
+inherits = "release"
+overflow-checks = true
+debug-assertions = true
