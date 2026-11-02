@@ -282,8 +282,8 @@ mod tests {
             let netlist = crate::pnrtest::random_netlist_sized(&mut rng, gates, inputs, flip_flops);
             let table = netlist.sink_table();
             assert_eq!(table.len(), netlist.net_count);
-            for net in 0..netlist.net_count {
-                assert_eq!(table[net], netlist.sinks_of(net), "seed {seed}, net {net}");
+            for (net, sinks) in table.iter().enumerate() {
+                assert_eq!(*sinks, netlist.sinks_of(net), "seed {seed}, net {net}");
             }
             assert!(table.iter().any(|sinks| sinks.len() > 1) || gates < 2, "seed {seed}: no fan-out at all");
         }
