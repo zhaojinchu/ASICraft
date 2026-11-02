@@ -1,0 +1,4 @@
+# Every minute, one line of the backend's status (live, plots, tick time, compiles)
+# into /var/log/redfab/status.log: the cheapest monitoring there is. About 15 MB a
+# month; prune the file when you look at it.
+* * * * * redfab /opt/redfab/deploy/status_log.sh >> /var/log/redfab/status.log 2>&1

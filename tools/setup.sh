@@ -5,6 +5,9 @@
 #   tools/setup.sh --accept-eula   accept the Minecraft server's EULA and install everything
 #   tools/setup.sh                 only if the EULA was accepted on an earlier run
 #   tools/setup.sh --clean         also remove old server run directories and gate logs under build/
+#   tools/setup.sh --server        what a deployment needs and no more: the JDK, the server jar,
+#                                  Fabric and the Node packages; no Rust, Verilator or Python
+#                                  (deploy/README.md; the core is shipped prebuilt)
 #
 # Project-local: JDK 25 and the Minecraft server jar (.tools/), Python packages
 # (.venv/), Node packages (node_modules/). Outside the project: rustup in ~/.cargo
@@ -26,12 +29,14 @@ say() { printf '== %s\n' "$*"; }
 EULA_FILE=.tools/eula-accepted
 EULA_URL=https://aka.ms/MinecraftEULA
 CLEAN=0
+SERVER=0
 for arg in "$@"; do
     case "$arg" in
         --accept-eula)
             printf 'accepted %s on %s\n' "$EULA_URL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$EULA_FILE"
             ;;
         --clean) CLEAN=1 ;;
+        --server) SERVER=1 ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
@@ -133,7 +138,8 @@ if [ "$libraries_sha256" != "$FABRIC_LIBRARIES_SHA256" ]; then
     exit 1
 fi
 
-# --- Rust (version comes from rust-toolchain.toml)
+# --- Rust (version comes from rust-toolchain.toml); a deployment gets the core prebuilt
+if [ $SERVER = 0 ]; then
 export PATH="$HOME/.cargo/bin:$PATH"
 if ! command -v rustup >/dev/null; then
     say "installing rustup (shell profile left untouched)"
@@ -142,8 +148,11 @@ if ! command -v rustup >/dev/null; then
 fi
 rustup toolchain install >/dev/null
 say "$(cargo --version)"
+fi
 
-# --- Verilator (from the system package manager; ./check asserts the version)
+# --- Verilator (from the system package manager; ./check asserts the version); the
+# checks' reference simulator, which a deployment never runs
+if [ $SERVER = 0 ]; then
 if ! command -v verilator >/dev/null; then
     if command -v brew >/dev/null; then
         say "installing Verilator with Homebrew"
@@ -158,14 +167,22 @@ fi
 say "$(verilator --version)"
 verilator --version | grep -q "Verilator $VERILATOR_VERSION " ||
     echo "warning: versions.env pins Verilator $VERILATOR_VERSION; ./check will fail on another version"
+fi
 
 # --- Node (not installed here; the version is pinned so a mismatch is said early)
 command -v node >/dev/null || { echo "Node $NODE_MAJOR is required (https://nodejs.org); install it and re-run" >&2; exit 1; }
 node --version | grep -q "^v$NODE_MAJOR\." || { echo "Node $(node --version) found; versions.env pins Node $NODE_MAJOR" >&2; exit 1; }
 
-# --- Python and Node packages (exact versions from the lock files)
+# --- Python and Node packages (exact versions from the lock files); Python is the
+# harness's, which a deployment never runs
+if [ $SERVER = 0 ]; then
 command -v uv >/dev/null || { echo "uv is required (https://docs.astral.sh/uv/); install it and re-run" >&2; exit 1; }
 uv sync --frozen
+fi
 npm ci --no-audit --no-fund
 
-say "setup complete; run ./check --vanilla"
+if [ $SERVER = 1 ]; then
+    say "setup complete for a deployment; next: tools/build_mod.sh, then deploy/README.md"
+else
+    say "setup complete; run ./check --vanilla"
+fi
