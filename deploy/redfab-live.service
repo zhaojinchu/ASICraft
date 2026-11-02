@@ -1,0 +1,32 @@
+[Unit]
+Description=redfab live playground: the backend, which starts the game and serves the page
+Documentation=file:///opt/redfab/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=redfab
+Group=redfab
+WorkingDirectory=/opt/redfab
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=NODE_OPTIONS=--max-old-space-size=2048
+# Loopback only: Caddy terminates TLS and proxies to this port, setting X-Forwarded-For
+# (--trust-proxy reads it, so the per-address limits see the client, not the proxy).
+# The core is the one deploy/ship_core.sh put in dist/, so this machine needs no Rust.
+ExecStart=/usr/local/bin/node server/live.mjs --host 127.0.0.1 --port 8766 --plots 8 --trust-proxy --wasm /opt/redfab/dist/redfab_wasm.wasm --run-dir /opt/redfab/build/mc/live
+# The backend exits 2 when the game dies; the restart brings both back.
+Restart=always
+RestartSec=5
+# The game gets SIGTERM through the backend's own stop; give it a minute to save.
+TimeoutStopSec=60
+KillMode=mixed
+# The game at -Xmx2G, a compile child capped at 2 GB, the backend itself: an 8 GB box.
+MemoryMax=7G
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/redfab
+
+[Install]
+WantedBy=multi-user.target

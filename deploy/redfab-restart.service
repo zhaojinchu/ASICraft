@@ -1,0 +1,6 @@
+[Unit]
+Description=redfab live playground: a restart when no plot is in use
+
+[Service]
+Type=oneshot
+ExecStart=/opt/redfab/deploy/restart_when_idle.sh

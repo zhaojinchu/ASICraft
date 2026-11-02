@@ -3,13 +3,16 @@
 // levers to probe blocks, and relays the observer mod's stream to viewers,
 // filtered to their plot. See README.md.
 //
-//   node server/live.mjs [--port 8766] [--host 127.0.0.1] [--plots 8] [--run-dir build/mc/live] [--trust-proxy]
+//   node server/live.mjs [--port 8766] [--host 127.0.0.1] [--plots 8] [--run-dir build/mc/live] [--trust-proxy] [--wasm PATH]
 //
 // `createLive` takes any world (the checks give it a fake one); `startLive`
-// launches the modded server and gives it the real one.
+// launches the modded server and gives it the real one. `--wasm` names a
+// prebuilt core (deploy/ship_core.sh), so the machine needs no Rust toolchain;
+// without it the core is built here first.
 
+import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LIMITS } from '../playground/compile.js';
 import { contentSecurityPolicy, serveStatic } from '../tools/playground_serve.mjs';
@@ -384,22 +387,45 @@ export async function startLive({ runDir, log = () => {}, ...options }) {
     };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    const args = process.argv.slice(2);
+const OPTIONS = ['--port', '--host', '--plots', '--run-dir', '--trust-proxy', '--wasm'];
+
+/// The command line's options (the usage at the top). Paths are taken from the
+/// working directory; `wasm` is null when the core is to be built here.
+export function cliOptions(args) {
+    for (const arg of args.filter((a, i) => a.startsWith('--') && (i === 0 || !OPTIONS.includes(args[i - 1]) || args[i - 1] === '--trust-proxy'))) {
+        if (!OPTIONS.includes(arg)) throw new Error(`unknown option ${arg}; the options are ${OPTIONS.join(', ')}`);
+    }
     const flag = (name, fallback) => {
         const i = args.indexOf(name);
+        if (i >= 0 && (i + 1 >= args.length || args[i + 1].startsWith('--'))) throw new Error(`${name} needs a value`);
         return i >= 0 ? args[i + 1] : fallback;
     };
-    const { buildWasm } = await import('../tools/common.mjs');
-    buildWasm();
-    const stamp = () => new Date().toISOString().slice(11, 19);
-    const live = await startLive({
-        runDir: join(root, flag('--run-dir', 'build/mc/live')),
+    const wasm = flag('--wasm', null);
+    return {
+        runDir: resolve(root, flag('--run-dir', 'build/mc/live')),
         port: Number(flag('--port', 8766)),
         host: flag('--host', '127.0.0.1'),
         plots: Number(flag('--plots', DEFAULTS.plots)),
         // Behind a reverse proxy only: every client would otherwise share the proxy's address and its limits.
         trustProxy: args.includes('--trust-proxy'),
+        wasm: wasm === null ? null : resolve(wasm),
+    };
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+    const options = cliOptions(process.argv.slice(2));
+    let wasm = options.wasm;
+    if (wasm === null) {
+        const { buildWasm } = await import('../tools/common.mjs');
+        wasm = buildWasm();
+    } else if (!existsSync(wasm)) {
+        console.error(`no core at ${wasm} (deploy/ship_core.sh puts one there)`);
+        process.exit(2);
+    }
+    const stamp = () => new Date().toISOString().slice(11, 19);
+    const live = await startLive({
+        ...options,
+        wasm,
         log: (m) => console.log(`[live ${stamp()}] ${m}`),
     });
     const stop = async () => {

@@ -1,0 +1,88 @@
+# Putting the live playground online
+
+Stage 13 of `docs/PLAN.md` ("Stage 13 (planned 2026-11-02)"): one machine runs
+the backend (`server/live.mjs`), which starts the Fabric server with the observer
+mod and serves the page; Caddy in front terminates TLS; `systemd` keeps the
+backend up. The game, RCON and the mod's stream stay on loopback: the page is the
+only window into the world, which is what makes `online-mode=false` acceptable.
+
+## What you need
+
+- A Debian 12 or Ubuntu 24.04 machine with 8 GB of memory (the game runs at
+  `-Xmx2G`, a compile child peaks near 900 MB under a 2 GB cap, the backend keeps
+  the plots' recordings; 4 GB swaps) and two to four cores. Ports 22, 80 and
+  443 reachable, nothing else.
+- A name pointing at it (an A record, and AAAA if the machine has IPv6). Not a
+  name with "Minecraft" in it.
+- This checkout at `/opt/redfab` on the machine, and on your own machine with the
+  Rust toolchain (for the core) and `ssh` access to the box.
+
+## Install
+
+On the machine, as root:
+
+    apt-get update && apt-get install -y git ufw
+    git clone https://github.com/zhaojinchu/ASICraft /opt/redfab
+    /opt/redfab/deploy/install.sh NAME
+
+`install.sh` stops twice, on purpose, and tells you what to do:
+
+1. The EULA. Running Mojang's server binds whoever runs it to
+   https://aka.ms/MinecraftEULA; the setup never accepts it for you. As the
+   `redfab` user, `tools/setup.sh --accept-eula --server` records your acceptance
+   in `.tools/eula-accepted`, then run `install.sh` again.
+2. The core. The backend's compiles and the page use the WebAssembly build of
+   the core, which `./check` holds byte-identical to the native one
+   (`wasm-identical`); it is built on your machine and shipped, so the box needs
+   no Rust: from your checkout, `deploy/ship_core.sh root@NAME`, then run
+   `install.sh` again.
+
+The second run installs the units and the Caddyfile and starts everything. Caddy
+fetches the certificate on the first request; within a minute:
+
+    curl -s https://NAME/api/status
+    node tools/smoke_remote.mjs https://NAME      # from any machine with this checkout
+
+The smoke submits the inverter example, opens its plot's stream with the token,
+flips the lever, waits for the lamp to follow and back, and releases the plot;
+it exits 0 only if every step passed in time.
+
+## Running it
+
+- Logs: `journalctl -u redfab-live -f` (the backend's lines, with the game's
+  console under them; no request carries its query string, so no token is ever
+  logged). Status every minute in `/var/log/redfab/status.log`.
+- `live: false` in the status means the stream is older than five seconds, RCON
+  is down, or the Java process is gone; the backend reconnects on its own, and
+  when the game dies it exits 2 and `systemd` restarts both. If it keeps dying,
+  the journal says why.
+- Updates: on the machine, as root,
+  `cd /opt/redfab && git pull && sudo -u redfab npm ci --no-audit --no-fund && sudo -u redfab tools/build_mod.sh`,
+  from your machine `deploy/ship_core.sh root@NAME` if the core changed, then
+  `systemctl restart redfab-live`. A restart releases every plot; do it when the
+  status shows none in use.
+- A weekly timer (`redfab-restart.timer`, Sunday 09:00 UTC) restarts the
+  backend if no plot is in use, so a long run's leaks in the Java process are
+  cleared without cutting anyone off.
+- The limits are the backend's (`server/README.md`): 8 plots, one plot and one
+  compile per address, 30 submissions an hour, 90 s per compile, viewers capped
+  per plot and per address. More plots: `--plots` in the unit file, then
+  `systemctl daemon-reload && systemctl restart redfab-live`.
+- Nothing needs backing up: the world is placed by command and filled with air
+  again, the run directory is rebuilt at every start, and submitted sources are
+  kept only as the placed structure and the recording while the plot is in use.
+
+## Files
+
+- `redfab-live.service`: the backend under `systemd` (`Restart=always`, loopback,
+  `--trust-proxy`, the shipped core, a memory cap).
+- `Caddyfile`: the front door; `install.sh` puts the name in and installs it as
+  `/etc/caddy/Caddyfile`.
+- `install.sh`: the steps above, idempotent.
+- `ship_core.sh`: builds the core here and copies it to the box with its checksum.
+- `status_log.sh`, `status_log.cron`: the status, one line a minute.
+- `restart_when_idle.sh`, `redfab-restart.service`, `redfab-restart.timer`: the
+  weekly restart, only when idle.
+
+NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR
+MICROSOFT.
