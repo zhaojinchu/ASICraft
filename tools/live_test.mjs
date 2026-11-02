@@ -19,7 +19,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadCore } from '../playground/core.js';
 import { LIMITS } from '../playground/compile.js';
-import { DEFAULTS, createLive } from '../server/live.mjs';
+import { DEFAULTS, cliOptions, createLive } from '../server/live.mjs';
+import { smoke } from './smoke_remote.mjs';
 import { GAMERULES, MOTD, PROFILE_FILE, javaArgs, javaPath, killLeftover, observe, requireEula, serverProperties } from '../server/minecraft.mjs';
 import { Rcon } from '../server/rcon.mjs';
 import { acceptWebSocket } from '../server/ws.mjs';
@@ -1292,6 +1293,67 @@ test('the compile child sees only the environment it needs', async () => {
         for (const k of keys) assert.match(k, /^(PATH|HOME|TMPDIR|LANG|LC_ALL|REDFAB_WASM|REDFAB_TEST_HOOKS|NODE_CHANNEL_[A-Z_]+|__CF_USER_TEXT_ENCODING)$/, `${k} is not on the allow-list`);
     } finally {
         delete process.env.REDFAB_PROBE_SECRET;
+        await backend.close();
+    }
+});
+
+test('the command line names a prebuilt core and the proxy, and refuses what it does not know', () => {
+    const options = cliOptions(['--wasm', '/opt/redfab/dist/redfab_wasm.wasm', '--trust-proxy', '--plots', '12', '--run-dir', '/opt/redfab/build/mc/live', '--port', '8766', '--host', '127.0.0.1']);
+    assert.deepEqual(options, {
+        runDir: '/opt/redfab/build/mc/live',
+        port: 8766,
+        host: '127.0.0.1',
+        plots: 12,
+        trustProxy: true,
+        wasm: '/opt/redfab/dist/redfab_wasm.wasm',
+    });
+    const defaults = cliOptions([]);
+    assert.equal(defaults.wasm, null, 'without --wasm the core is built here');
+    assert.equal(defaults.trustProxy, false);
+    assert.equal(defaults.plots, DEFAULTS.plots);
+    assert.ok(defaults.runDir.endsWith('/build/mc/live') && defaults.runDir.startsWith('/'), defaults.runDir);
+    assert.ok(cliOptions(['--wasm', 'dist/redfab_wasm.wasm']).wasm.endsWith('/dist/redfab_wasm.wasm'), 'a relative core path is taken from the working directory');
+    assert.throws(() => cliOptions(['--wat']), /unknown option --wat/);
+    assert.throws(() => cliOptions(['--wasm']), /--wasm needs a value/);
+    assert.throws(() => cliOptions(['--wasm', '--trust-proxy']), /--wasm needs a value/);
+});
+
+test('the remote smoke passes against this backend with a simulated world, and releases its plot', async () => {
+    const world = new FakeWorld({ simulate: true });
+    const { backend, base } = await live({ plots: 1 }, world);
+    try {
+        const lines = [];
+        let done = false;
+        // Settled either way before the stepping loop looks, so a failure is this test's, not an unhandled rejection.
+        const run = smoke(base, { log: (line) => lines.push(line), settleMs: 30_000 }).then(
+            (result) => ({ result }),
+            (error) => ({ error }),
+        ).finally(() => {
+            done = true;
+        });
+        // The fake world's ticks only advance when stepped; the smoke waits on them.
+        while (!done) await world.step(5);
+        const outcome = await run;
+        assert.ok(!outcome.error, `${outcome.error?.message}\n${lines.join('\n')}`);
+        const { plot } = outcome.result;
+        assert.equal(plot, 0);
+        assert.ok(lines.some((l) => l.startsWith('live: 1 of 1 plots free')), lines.join('\n'));
+        assert.ok(lines.some((l) => l.includes('the lamp followed the lever at tick')), lines.join('\n'));
+        assert.ok(lines.some((l) => l.includes('and back at tick')), lines.join('\n'));
+        assert.ok(lines.at(-1).startsWith('plot 0 released (200)'), lines.join('\n'));
+        assert.equal(backend.plots.free.length, 1, 'the smoke gave its plot back');
+    } finally {
+        await backend.close();
+    }
+});
+
+test('the remote smoke fails on a backend that is not live', async () => {
+    const world = new FakeWorld();
+    world.healthOverride = { stream_up: false, stream_age_ms: 9_000 };
+    const { backend, base } = await live({}, world);
+    try {
+        await assert.rejects(smoke(base), /not live: 200/);
+    } finally {
         await backend.close();
     }
 });

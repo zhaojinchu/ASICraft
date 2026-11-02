@@ -237,7 +237,9 @@ test('the dev server survives a malformed URL and serves nothing outside its all
         assert.equal((await fetch(`${base}/%E0%A4%A`)).status, 404);
         const page = await fetch(`${base}/`);
         assert.equal(page.status, 200, 'the server is still up after the malformed request');
-        assert.match(await page.text(), /NOT AN OFFICIAL MINECRAFT PRODUCT/);
+        const html = await page.text();
+        assert.match(html, /NOT AN OFFICIAL MINECRAFT PRODUCT/);
+        assert.match(html, /kept only as the placed circuit and its recording while the plot is yours/, 'the footer says what happens to a submitted source');
         assert.equal((await fetch(`${base}/node_modules/puppeteer-core/package.json`)).status, 404);
         assert.equal((await fetch(`${base}/pkg/puppeteer-core@1.0.0/package.json`)).status, 404);
         assert.equal((await fetch(`${base}/pkg/three@0.0.0/package.json`)).status, 200, 'the version in the path is a cache key only');
