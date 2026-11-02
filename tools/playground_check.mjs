@@ -322,6 +322,7 @@ try {
         check(await page.$eval('#source', (e) => e.value) === draft, 'the draft did not survive a reload');
         check(await page.$eval('#examples', (e) => e.value) === 'custom', 'the dropdown does not show custom after a reload with a draft');
         check(await page.$eval('footer', (e) => e.textContent.includes('NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.')), 'the footer lacks the Minecraft notice');
+        check(await page.$eval('footer', (e) => e.textContent.includes('kept only as the placed circuit and its recording while the plot is yours')), 'the footer lacks the line on what happens to a submitted source');
     }
 
     // --- a clocked design: driven by hand through the native cycle protocol, then
