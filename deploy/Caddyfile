@@ -1,0 +1,15 @@
+# The front door: TLS from Let's Encrypt, everything proxied to the backend on
+# loopback (WebSockets included; Caddy sets X-Forwarded-For, which the backend
+# reads under --trust-proxy). deploy/install.sh puts the site's name in place of
+# redfab.example and installs this as /etc/caddy/Caddyfile.
+redfab.example {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		-Server
+	}
+	# The page's own Content-Security-Policy comes from the backend with every answer.
+	reverse_proxy 127.0.0.1:8766
+}
