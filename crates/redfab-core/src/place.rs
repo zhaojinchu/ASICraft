@@ -383,11 +383,16 @@ pub fn sweeps(netlist: &Netlist, routing: &[i32], style: Style) -> Result<Vec<Pl
 /// nets over every gap, which tells apart placements the estimate cannot (the
 /// straighter the wires run, the easier the router's work).
 pub fn score(netlist: &Netlist, placement: &Placement) -> (i64, i64) {
-    let drivers = netlist.drivers().unwrap_or_default();
+    score_with(placement, &netlist.drivers().unwrap_or_default(), &netlist.sink_table())
+}
+
+/// [`score`] with the netlist's drivers and sink table already built (the
+/// placer's search scores thousands of placements of one netlist).
+fn score_with(placement: &Placement, drivers: &[Driver], sinks: &[Vec<(usize, usize)>]) -> (i64, i64) {
     let mut estimate = Vec::with_capacity(placement.routing.len());
     let mut spanned = 0i64;
     for gap in 0..placement.routing.len() {
-        let spans = spans_in(netlist, placement, &drivers, gap);
+        let spans = spans_in(placement, drivers, sinks, gap);
         spanned += spans.iter().map(|&(lo, hi)| i64::from(hi - lo)).sum::<i64>();
         estimate.push(density(&spans, placement.rows).max(1));
     }
@@ -502,6 +507,9 @@ struct Frame<'a> {
     style: Style,
     columns: Columns,
     drivers: Vec<Driver>,
+    /// Every net's sinks (`Netlist::sink_table`), asked for per net, per gap,
+    /// per placement the search scores.
+    sinks: Vec<Vec<(usize, usize)>>,
     stage: Vec<usize>,
     gaps: usize,
     has_dff: bool,
@@ -519,12 +527,13 @@ struct Frame<'a> {
 impl<'a> Frame<'a> {
     fn new(netlist: &'a Netlist, style: Style, columns: Columns) -> Result<Frame<'a>, String> {
         let drivers = netlist.drivers()?;
+        let sinks = netlist.sink_table();
         let level = levels(netlist, &drivers)?;
         let has_dff = netlist.cells.iter().any(|c| c.is_dff());
         let (stage, gaps) = stages(netlist, &level, &drivers, style, columns);
         let inverters = if style.packs() { clock_inverters(netlist, &drivers) } else { Vec::new() };
         let used_constants: Vec<(NetId, bool)> =
-            netlist.constants.iter().copied().filter(|(net, _)| !netlist.sinks_of(*net).is_empty()).collect();
+            netlist.constants.iter().copied().filter(|(net, _)| !sinks[*net].is_empty()).collect();
         let mut by_stage: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for (c, &s) in stage.iter().enumerate() {
             by_stage.entry(s).or_default().push(c);
@@ -541,10 +550,7 @@ impl<'a> Frame<'a> {
                 Driver::Cell(d) => stage[d] as i32,
                 _ => 0,
             };
-            let sinks = netlist
-                .sinks_of(net)
-                .into_iter()
-                .map(|(c, _)| if c == usize::MAX { gaps as i32 } else { stage[c] as i32 });
+            let sinks = sinks[net].iter().map(|&(c, _)| if c == usize::MAX { gaps as i32 } else { stage[c] as i32 });
             sinks.chain(std::iter::once(driver)).fold((i32::MAX, i32::MIN), |(lo, hi), l| (lo.min(l), hi.max(l)))
         };
         let crossing_of_stage: Vec<i32> = (0..gaps)
@@ -572,6 +578,7 @@ impl<'a> Frame<'a> {
             style,
             columns,
             drivers,
+            sinks,
             stage,
             gaps,
             has_dff,
@@ -709,7 +716,7 @@ impl<'a> Frame<'a> {
         }
         // Inputs and constants: by the average row of what they feed.
         let sink_row = |net: NetId| -> f64 {
-            let sinks = netlist.sinks_of(net);
+            let sinks = &self.sinks[net];
             let sum: f64 = sinks
                 .iter()
                 .map(|&(c, o)| if c == usize::MAX { f64::from(rows.of_output[o]) } else { f64::from(rows.of_cell[c]) })
@@ -733,7 +740,7 @@ impl<'a> Frame<'a> {
     /// What `rows` scores (the score does not depend on the routing columns).
     fn score_of(&self, rows: &Rows) -> (i64, i64) {
         let placement = self.assemble(rows, &vec![1; self.gaps]).expect("one routing column a gap is valid");
-        score(self.netlist, &placement)
+        score_with(&placement, &self.drivers, &self.sinks)
     }
 
     /// The local search: every swap of two gates of a stage and every move of
@@ -877,14 +884,15 @@ impl<'a> Frame<'a> {
 /// therefore a lower bound on the columns, the channel density of the gap.
 pub fn estimate_routing(netlist: &Netlist, placement: &Placement) -> Vec<i32> {
     let drivers = netlist.drivers().unwrap_or_default();
+    let sinks = netlist.sink_table();
     (0..placement.routing.len())
-        .map(|gap| density(&spans_in(netlist, placement, &drivers, gap), placement.rows).max(1))
+        .map(|gap| density(&spans_in(placement, &drivers, &sinks, gap), placement.rows).max(1))
         .collect()
 }
 
 /// The rows each net changes between in gap `gap`, lowest to highest, for the
-/// nets that change rows there at all.
-fn spans_in(netlist: &Netlist, placement: &Placement, drivers: &[Driver], gap: usize) -> Vec<(i32, i32)> {
+/// nets that change rows there at all. `sinks` is the netlist's sink table.
+fn spans_in(placement: &Placement, drivers: &[Driver], sinks: &[Vec<(usize, usize)>], gap: usize) -> Vec<(i32, i32)> {
     let gaps = placement.routing.len();
     let mut spans: Vec<(i32, i32)> = Vec::new();
     for (net, &driver) in drivers.iter().enumerate() {
@@ -900,7 +908,7 @@ fn spans_in(netlist: &Netlist, placement: &Placement, drivers: &[Driver], gap: u
         // whose sink is in its driver's own stage (a clock inverter's) turns
         // round in the gap east of that stage.
         let mut rows: Vec<i32> = Vec::new();
-        for (c, pin) in netlist.sinks_of(net) {
+        for &(c, pin) in &sinks[net] {
             let (sink_stage, row) = if c == usize::MAX {
                 (gaps, placement.outputs[pin].1)
             } else {
