@@ -130,3 +130,43 @@ def test_the_setup_script_has_a_server_mode_without_the_development_tools():
     assert re.search(r"^MC_CLIENT_SHA1=[0-9a-f]{40}$", versions, re.M)
     build = (ROOT / "tools" / "build_mod.sh").read_text()
     assert 'CLIENT_JAR=.tools/mc/client-$MC_VERSION.jar' in build, "the mod build looks for the jar where setup.sh --client puts it"
+
+
+def test_the_pc_side_runs_from_a_clone_as_two_scheduled_tasks():
+    """Stage 14, the PC: deploy/pc/ holds the tunnel in a loop, the start (and restart) of the
+    game and OBS, and the installer of the two scheduled tasks; the config is one git-ignored
+    file copied from an example that defines every variable the scripts read; the runbook walks
+    from the clone to the tasks, through Prism's command line, which the nightly restart needs."""
+    pc = DEPLOY / "pc"
+    scripts = {name: (pc / name).read_text() for name in ("tunnel.ps1", "start.ps1", "install.ps1")}
+    example = (pc / "config.example.ps1").read_text()
+    assert "/deploy/pc/config.ps1" in (ROOT / ".gitignore").read_text(), "the filled config stays out of git"
+    defined = set(re.findall(r"^\$(\w+)\s*=", example, re.M))
+    for name, text in scripts.items():
+        assert '"$PSScriptRoot\\config.ps1"' in text, f"{name} reads the config beside it"
+        for brace in "{}", "()":
+            assert text.count(brace[0]) == text.count(brace[1]), f"{name}: unbalanced {brace}"
+        used = {v for v in re.findall(r"\$([A-Z]\w+)\b", text) if v not in ("PSScriptRoot", "ErrorActionPreference")}
+        assert used <= defined, f"{name} reads {used - defined} that config.example.ps1 does not define"
+    assert "while ($true)" in scripts["tunnel.ps1"], "the tunnel comes back after any drop"
+    assert "-N -L 25565:127.0.0.1:25565" in scripts["tunnel.ps1"] and "ExitOnForwardFailure=yes" in scripts["tunnel.ps1"]
+    assert '"camera@$Name"' in scripts["tunnel.ps1"], "the tunnel user is camera, the host the site's name"
+    start = scripts["start.ps1"]
+    assert "redfab.camera.url" in start, "the game is found by the mod's property, so nothing else is killed"
+    assert "'--launch', $Instance, '--server', 'localhost:25565'" in start, "Prism launches the instance joining through the tunnel"
+    assert "'--startstreaming'" in start and "'--disable-shutdown-check'" in start, "OBS streams at once and skips the safe-mode question after a kill"
+    assert "-WorkingDirectory (Split-Path $Obs)" in start, "OBS wants its own folder as the working directory"
+    install = scripts["install.ps1"]
+    assert "Register-ScheduledTask" in install and "-AtLogOn" in install and "-Daily -At" in install
+    assert "-ExecutionPolicy Bypass" in install and "-WindowStyle Hidden" in install
+    assert "-LogonType Interactive" in install, "the game and OBS need the user's desktop"
+    for task in ("'redfab tunnel'", "'redfab camera'"):
+        assert task in install, task
+    assert "'redfab tunnel'" in start, "the restart brings the tunnel task back too"
+    for script in ("tunnel.ps1", "start.ps1"):
+        assert script in install, f"the installer registers {script}"
+    doc = (DEPLOY / "CAMERA.md").read_text()
+    for name in ("git clone", "config.example.ps1", "config.ps1", "install.ps1", "tunnel.ps1", "start.ps1", "Prism", "-Dredfab.camera.url=wss://NAME/camera?key=KEY", "/camera/camera/whip"):
+        assert name in doc, f"the runbook does not mention {name}"
+    assert "passphrase" in doc, "the runbook says the tunnel's key has none, since the task runs unattended"
+    assert "`pc/`" in (DEPLOY / "README.md").read_text(), "deploy/README.md names the PC's folder"
