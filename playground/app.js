@@ -1,8 +1,10 @@
-// The page: an editor, a compile button, the worker that compiles and
-// simulates, a panel of levers and lamps, and the 3D view. The simulator runs
-// at the game's 20 ticks a second. Served by the live backend (server/), the
-// page can also send the source there: the server builds it, places it on the
-// Minecraft server, and the view then shows the server's blocks instead.
+// The page: the circuit view with its levers and lamps, a status line, the
+// editor, and the result. The worker compiles and simulates at the game's 20
+// ticks a second. The page opens with an example the server built already (the
+// counter, counting), before the compiler is fetched. Served by the live backend
+// (server/), the page can also send the source there: the server builds it,
+// places it on the Minecraft server, and the view then shows the server's
+// blocks instead.
 
 import { View } from './view.js';
 import { LIMITS, detectTop, nameFor } from './compile.js';
@@ -12,6 +14,8 @@ const EXAMPLES = ['not1', 'nor2', 'nor3', 'fa1', 'adder4', 'consts', 'counter4',
 // The dropdown entry for the user's own source, kept in this browser.
 const CUSTOM = 'custom';
 const DRAFT_KEY = 'redfab.draft';
+// The example the page opens with, as the server built it (tools/playground_serve.mjs, OPENING).
+const OPENING = 'counter4';
 
 const TICKS_PER_SECOND = 20;
 
@@ -20,6 +24,11 @@ const source = el('source');
 const topField = el('top');
 const status = el('status');
 const log = el('log');
+const logDetails = el('log-details');
+const reportText = el('report-text');
+const summary = el('summary');
+const capacity = el('capacity');
+const modeBadge = el('mode');
 const inputsPanel = el('inputs');
 const outputsPanel = el('outputs');
 const tickLabel = el('tick');
@@ -50,8 +59,9 @@ let tick = 0;
 let timer = null;
 // The step in flight, so a hand-driven step can wait for it instead of being dropped.
 let stepping = null;
-// The last successful local build: the worker holds its structure, and its
-// footprint is known before a live submission.
+// The last successful build: the worker holds its structure (or, for the
+// opening circuit, the server does under `files`), and its footprint is known
+// before a live submission.
 let built = null;
 // 'sim': the worker's simulator drives the view. 'live': the server's stream does.
 let mode = 'sim';
@@ -61,10 +71,23 @@ let liveTick = 0;
 // What the examples dropdown last put in the editor, to tell an edit from it.
 let loaded = { example: null, text: '' };
 let lastPick = null;
+// The opening circuit: 'loading' until it shows ('shown') or cannot ('none').
+let opening = 'loading';
+// Counts the compiles and live runs, so an opening still loading stands down.
+let generation = 0;
+// The bus rows on show: bus name -> its pins' indices, most significant bit first.
+let buses = { inputs: new Map(), outputs: new Map() };
 
 function setStatus(text, kind = '') {
     status.textContent = text;
     status.className = kind;
+}
+
+/// The badge on the view: what drives what is shown, or nothing when the view is empty.
+function setMode(text, live = false) {
+    modeBadge.hidden = text === null;
+    modeBadge.textContent = text ?? '';
+    modeBadge.classList.toggle('live', live);
 }
 
 /// Starts (or restarts) the worker; whatever was waiting fails with `reason`.
@@ -146,14 +169,19 @@ function topAndName() {
     return { top, name };
 }
 
-// --- compiling
+// --- compiling, and the result
 
-function describeBuilt(reply) {
-    const { design: d, cells, name } = reply;
-    const capacity = cells > limits.measuredCells
+/// The cell count a report states.
+function cellsOf(report) {
+    return Number(report?.match(/cells: (\d+)/)?.[1] ?? 0);
+}
+
+/// The one-line summary of a build, after `lead` ("Built NAME", or "NAME, as built").
+function describeBuilt({ design: d, cells }, lead) {
+    const capacityNote = cells > limits.measuredCells
         ? `more than the ${limits.measuredCells} the router had managed when last measured`
         : `the router manages about ${limits.measuredCells} today`;
-    const parts = [`${cells} cells (${capacity})`, `${Object.keys(d.blocks).length} blocks in ${d.size[0]} x ${d.size[2]}`];
+    const parts = [`${cells} cells (${capacityNote})`, `${Object.keys(d.blocks).length} blocks in ${d.size[0]} x ${d.size[2]}`];
     let kind = 'ok';
     if (limits.plotSize) {
         if (fitsPlot(d)) parts.push(`fits the server's ${limits.plotSize[0]} x ${limits.plotSize[1]} plot`);
@@ -164,23 +192,46 @@ function describeBuilt(reply) {
     }
     const seq = d.timing?.sequential;
     parts.push(seq ? `clock ${seq.clock} at ${seq.period} ticks a cycle` : `outputs settle within ${d.settle_ticks} ticks`);
-    return { text: `Built ${name}: ${parts.join('; ')}.`, kind };
+    return { text: `${lead}: ${parts.join('; ')}.`, kind };
 }
 
 function fitsPlot(d) {
     return !limits.plotSize || (d.size[0] <= limits.plotSize[0] && d.size[2] <= limits.plotSize[1]);
 }
 
+/// The result card: the numbers, and the report.
+function renderResult({ design: d, cells, report }) {
+    const items = [`${cells} cells`, `${Object.keys(d.blocks).length} blocks`, `${d.size[0]} x ${d.size[2]} footprint`];
+    const seq = d.timing?.sequential;
+    items.push(seq ? `clock ${seq.clock}, ${seq.period} ticks a cycle` : `outputs settle within ${d.settle_ticks} ticks`);
+    if (limits.plotSize) items.push(`${fitsPlot(d) ? 'fits' : 'too large for'} the server's ${limits.plotSize[0]} x ${limits.plotSize[1]} plot`);
+    summary.replaceChildren(...items.map((text) => {
+        const li = document.createElement('li');
+        li.textContent = text;
+        return li;
+    }));
+    reportText.textContent = typeof report === 'string' ? report : '';
+}
+
+function clearResult() {
+    summary.replaceChildren();
+    reportText.textContent = '';
+    log.textContent = '';
+    logDetails.open = false;
+}
+
 async function compile() {
+    generation += 1;
     stopRunning();
     leaveLive();
     design = null;
     built = null;
     view.clear();
+    setMode(null);
     compileButton.disabled = true;
     runButton.disabled = true;
     enableDownloads(false);
-    log.textContent = '';
+    clearResult();
     clearPanels();
     let top;
     let name;
@@ -204,18 +255,22 @@ async function compile() {
         const reply = await ask({ op: 'compile', source: text, top, name }, { phase: (p) => { phase = p; progress(); } });
         design = reply.design;
         built = { source: text, top, name, design: reply.design, cells: reply.cells, report: reply.report };
-        const { text: summary, kind } = describeBuilt(reply);
-        setStatus(summary, kind);
+        const { text: summaryText, kind } = describeBuilt(reply, `Built ${name}`);
+        setStatus(summaryText, kind);
+        renderResult(built);
         showDesign();
     } catch (err) {
         setStatus(err.message.split('\n')[0], 'bad');
         log.textContent += `\n${err.message}\n`;
+        logDetails.open = true;
     } finally {
         clearInterval(ticker);
         clearTimeout(deadline);
         compileButton.disabled = false;
     }
 }
+
+// --- the panel: levers, lamps, buses
 
 function label(text) {
     const span = document.createElement('span');
@@ -228,6 +283,82 @@ function clearPanels() {
     inputsPanel.replaceChildren(label('inputs'));
     outputsPanel.replaceChildren(label('outputs'));
     tickLabel.textContent = '';
+    buses = { inputs: new Map(), outputs: new Map() };
+}
+
+/// `name[3]` is bit 3 of the bus `name`; a plain name is a single pin.
+function busOf(name) {
+    const m = name.match(/^(.+)\[(\d+)\]$/);
+    return m ? { bus: m[1], bit: Number(m[2]) } : null;
+}
+
+/// Fills a pins row: single pins as they come, the bits of a bus in one box,
+/// most significant bit first, with the bus's value beside them. `make(i, pin,
+/// inBus)` gives the lever or lamp for a pin. Returns the bus rows' pin
+/// indices, most significant bit first.
+function fillPins(container, pins, make) {
+    const members = new Map();
+    for (const [i, pin] of pins.entries()) {
+        const b = busOf(pin.name);
+        if (!b) continue;
+        if (!members.has(b.bus)) members.set(b.bus, []);
+        members.get(b.bus).push({ i, bit: b.bit });
+    }
+    const rows = new Map();
+    for (const [i, pin] of pins.entries()) {
+        const b = busOf(pin.name);
+        if (!b) {
+            container.appendChild(make(i, pin, false));
+            continue;
+        }
+        if (rows.has(b.bus)) continue;
+        const bits = members.get(b.bus).sort((p, q) => q.bit - p.bit);
+        const row = document.createElement('span');
+        row.className = 'bus';
+        row.dataset.bus = b.bus;
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = b.bus;
+        row.appendChild(name);
+        for (const m of bits) row.appendChild(make(m.i, pins[m.i], true));
+        const value = document.createElement('span');
+        value.className = 'value';
+        row.appendChild(value);
+        container.appendChild(row);
+        rows.set(b.bus, bits.map((m) => m.i));
+    }
+    return rows;
+}
+
+/// Writes every bus's value from its levers or lamps: the bits, then the number.
+function renderValues() {
+    if (!design) return;
+    const lit = (o) => outputsPanel.querySelector(`[data-output="${CSS.escape(design.outputs[o].name)}"]`).dataset.lit;
+    const write = (container, rows, bit) => {
+        for (const [bus, indices] of rows) {
+            const bits = indices.map(bit).join('');
+            container.querySelector(`.bus[data-bus="${CSS.escape(bus)}"] > .value`).textContent = `${bits} (${parseInt(bits, 2)})`;
+        }
+    };
+    write(inputsPanel, buses.inputs, (i) => inputState[i]);
+    write(outputsPanel, buses.outputs, lit);
+}
+
+/// Shows the lamps as the simulator or the server reports them.
+function setLamps(lamps) {
+    for (const [o, pin] of design.outputs.entries()) {
+        outputsPanel.querySelector(`[data-output="${CSS.escape(pin.name)}"]`).dataset.lit = String(lamps[o]);
+    }
+    renderValues();
+}
+
+/// Shows the levers as the state says (the server's word in live mode).
+function setLevers(states) {
+    inputState = states.slice();
+    for (const [i, pin] of design.inputs.entries()) {
+        inputsPanel.querySelector(`[data-input="${CSS.escape(pin.name)}"]`).dataset.on = String(inputState[i]);
+    }
+    renderValues();
 }
 
 function showDesign() {
@@ -236,33 +367,39 @@ function showDesign() {
     pendingInputs = new Map();
     tick = 0;
     const seq = design.timing?.sequential;
-    for (const [i, pin] of design.inputs.entries()) {
+    buses.inputs = fillPins(inputsPanel, design.inputs, (i, pin, inBus) => {
         const button = document.createElement('button');
         button.className = 'lever';
-        button.textContent = pin.name;
         button.dataset.input = pin.name;
         button.dataset.on = '0';
+        if (inBus) {
+            button.title = pin.name;
+            button.setAttribute('aria-label', pin.name);
+        } else {
+            button.textContent = pin.name; // text, never markup: escaped identifiers reach here
+        }
         button.disabled = Boolean(seq && pin.name === seq.clock); // the clock is driven, not clicked
         button.addEventListener('click', () => toggle(i));
-        inputsPanel.appendChild(button);
-    }
-    for (const pin of design.outputs) {
+        return button;
+    });
+    buses.outputs = fillPins(outputsPanel, design.outputs, (o, pin, inBus) => {
         const lamp = document.createElement('span');
         lamp.className = 'lamp';
         lamp.dataset.output = pin.name;
         lamp.dataset.lit = '0';
         const bulb = document.createElement('span');
         bulb.className = 'bulb';
-        lamp.append(bulb, pin.name); // text, never markup: escaped identifiers reach here
-        outputsPanel.appendChild(lamp);
-    }
+        lamp.appendChild(bulb);
+        if (inBus) lamp.title = pin.name;
+        else lamp.append(pin.name);
+        return lamp;
+    });
     // A clocked design gets its clock from the page (or the server), at the reported period.
     if (seq) {
-        const note = document.createElement('span');
-        note.className = 'label';
-        note.textContent = `clock ${seq.clock}: period ${seq.period} ticks, driven by the ${mode === 'live' ? 'server' : 'page'}; outputs are valid ${seq.sample_at} ticks after the edge`;
-        inputsPanel.appendChild(note);
+        inputsPanel.appendChild(label(`clock ${seq.clock}: period ${seq.period} ticks, driven by the ${mode === 'live' ? 'server' : 'page'}; outputs are valid ${seq.sample_at} ticks after the edge`));
     }
+    renderValues();
+    setMode(mode === 'live' ? `plot ${livePlot.plot}, settling` : 'simulated here', mode === 'live');
     runButton.disabled = mode === 'live';
     // In live mode the structure comes from the matching local build, or from the server.
     enableDownloads(true);
@@ -302,9 +439,9 @@ function showPending() {
     const seq = design?.timing?.sequential;
     for (const [i, pin] of design.inputs.entries()) {
         const button = inputsPanel.querySelector(`[data-input="${CSS.escape(pin.name)}"]`);
-        const pending = pendingInputs.has(i);
-        button.dataset.pending = pending ? '1' : '0';
-        button.title = pending ? `${pin.name} changes at cycle tick ${seq.input_change_at}, the next input window` : '';
+        const held = pendingInputs.has(i);
+        button.dataset.pending = held ? '1' : '0';
+        button.title = held ? `${pin.name} changes at cycle tick ${seq.input_change_at}, the next input window` : (button.textContent ? '' : pin.name);
     }
 }
 
@@ -322,6 +459,7 @@ async function applyPendingInputs() {
 async function setInput(i, on) {
     inputState[i] = on ? 1 : 0;
     inputsPanel.querySelector(`[data-input="${CSS.escape(design.inputs[i].name)}"]`).dataset.on = String(inputState[i]);
+    renderValues();
     const reply = await ask({ op: 'set', input: i, on });
     view.update(reply.changes);
 }
@@ -353,14 +491,12 @@ async function step(ticks) {
     const auto = running;
     stepping = (async () => {
         const reply = await ask({ op: 'step', ticks });
-        // The page may have moved on while the worker stepped (Run on the
-        // server, a new compile): the reply belongs to a design that is gone.
+        // The page may have moved on while the worker stepped (Run in the
+        // game, a new compile): the reply belongs to a design that is gone.
         if (!design) return;
         tick = reply.tick;
         view.update(reply.changes);
-        for (const [o, pin] of design.outputs.entries()) {
-            outputsPanel.querySelector(`[data-output="${CSS.escape(pin.name)}"]`).dataset.lit = String(reply.lamps[o]);
-        }
+        setLamps(reply.lamps);
         const seq = design.timing?.sequential;
         tickLabel.textContent = seq ? `tick ${tick}, cycle tick ${tick % seq.period} of ${seq.period}` : `tick ${tick}`;
         if (auto) await clockEdges(tick);
@@ -403,10 +539,43 @@ function stopRunning() {
     timer = null;
 }
 
+// --- the opening circuit: built by the server from an example, shown at once
+
+/// Shows the example the server built, running, before any compile. With a
+/// draft in the editor the status says so: the view and the editor differ.
+async function openWith(name, { draft }) {
+    const g = generation;
+    try {
+        const [d, r] = await Promise.all([fetch(`/designs/${name}/design.json`), fetch(`/designs/${name}/report.txt`)]);
+        if (!d.ok) throw new Error(`no opening circuit (${d.status})`);
+        const text = await d.text();
+        const report = r.ok ? await r.text() : null;
+        if (g !== generation) return; // the visitor compiled or went live first
+        const reply = await ask({ op: 'open', design: text });
+        if (g !== generation) return;
+        design = reply.design;
+        const cells = cellsOf(report);
+        built = { source: null, top: null, name, design, cells, report, designText: text, files: `/designs/${name}` };
+        const { text: summaryText, kind } = describeBuilt(built, `${name}, as built`);
+        setStatus(`${summaryText}${draft ? ' Your draft is in the editor; Compile builds it.' : ''}`, kind);
+        renderResult(built);
+        showDesign();
+        // The counter counts only when enabled: on, so the circuit moves on its own.
+        const en = design.inputs.findIndex((p) => p.name === 'en');
+        if (en >= 0) await toggle(en);
+        opening = 'shown';
+    } catch (err) {
+        if (g === generation) setStatus(`Ready: pick an example or paste a module, then Compile. (${err.message})`);
+    } finally {
+        if (opening === 'loading') opening = 'none';
+    }
+}
+
 // --- the live server
 
 /// Sends the source to the server, which builds it and places it in the game.
 async function goLive() {
+    generation += 1;
     stopRunning();
     leaveLive();
     let top;
@@ -428,9 +597,10 @@ async function goLive() {
     liveButton.disabled = true;
     runButton.disabled = true;
     enableDownloads(false);
-    log.textContent = '';
+    clearResult();
     clearPanels();
     view.clear();
+    setMode('building on the server', true);
     setStatus('Sent to the server; building…');
     try {
         const reply = await fetch('/api/submit', {
@@ -442,15 +612,17 @@ async function goLive() {
         if (!reply.ok) throw new Error(body.error || `the server answered ${reply.status}`);
         design = body.design;
         livePlot = { plot: body.plot, token: body.token, origin: body.origin, source: source.value, top, name, levers: body.levers, report: body.report };
-        log.textContent = body.report;
+        renderResult({ design: body.design, cells: cellsOf(body.report), report: body.report });
         setStatus(`On the server at plot ${body.plot}, settling…`);
         showDesign();
         releaseButton.hidden = false;
         connectLive();
     } catch (err) {
         mode = 'sim';
+        setMode(null);
         setStatus(err.message.split('\n')[0], 'bad');
         log.textContent += `\n${err.message}\n`;
+        logDetails.open = true;
     } finally {
         compileButton.disabled = false;
         liveButton.disabled = false;
@@ -478,18 +650,12 @@ function connectLive() {
             tickLabel.textContent = `server tick ${liveTick}`;
         }
         if (m.changes) view.update(m.changes);
-        if (m.lamps) {
-            for (const [o, pin] of design.outputs.entries()) {
-                outputsPanel.querySelector(`[data-output="${CSS.escape(pin.name)}"]`).dataset.lit = String(m.lamps[o]);
-            }
+        if (m.lamps) setLamps(m.lamps);
+        if (m.inputs) setLevers(m.inputs);
+        if (m.state === 'live') {
+            setStatus(`Live on the server at plot ${livePlot.plot}${leverPacing(m.levers || livePlot.levers)}.`, 'ok');
+            setMode(`live in the game, plot ${livePlot.plot}`, true);
         }
-        if (m.inputs) {
-            inputState = m.inputs.slice();
-            for (const [i, pin] of design.inputs.entries()) {
-                inputsPanel.querySelector(`[data-input="${CSS.escape(pin.name)}"]`).dataset.on = String(m.inputs[i]);
-            }
-        }
-        if (m.state === 'live') setStatus(`Live on the server at plot ${livePlot.plot}${leverPacing(m.levers || livePlot.levers)}.`, 'ok');
         // A lever change asked for before its slot goes out at the tick the server names.
         if (m.ok === true && m.queued) setStatus(`Lever ${m.set} queued for tick ${m.tick}, the next slot its timing allows.`, 'ok');
         if (m.state === 'released') {
@@ -528,7 +694,9 @@ function leaveLive({ release = true } = {}) {
 function clearAfterLive() {
     design = null;
     view.clear();
+    setMode(null);
     clearPanels();
+    clearResult();
     runButton.disabled = true;
     enableDownloads(false);
 }
@@ -542,6 +710,8 @@ async function release() {
     await gone;
     setStatus(`Released plot ${plot}. Compile to simulate here again.`);
 }
+
+// --- the files
 
 /// Hands the browser a file to save.
 function save(filename, bytes, type) {
@@ -560,6 +730,14 @@ async function download() {
     if (mode === 'live' && !(built && built.source === livePlot.source && built.top === livePlot.top)) {
         // Nothing built here matches what runs on the server; ask the server for it.
         const reply = await fetch(`/api/plots/${livePlot.plot}/structure?token=${livePlot.token}`).catch(() => null);
+        if (!reply?.ok) {
+            setStatus('The server does not offer the structure; Compile here to download world.nbt for the same source.', 'bad');
+            return;
+        }
+        bytes = new Uint8Array(await reply.arrayBuffer());
+    } else if (built?.files) {
+        // The opening circuit: the server built it and keeps its structure.
+        const reply = await fetch(`${built.files}/world.nbt`).catch(() => null);
         if (!reply?.ok) {
             setStatus('The server does not offer the structure; Compile here to download world.nbt for the same source.', 'bad');
             return;
@@ -588,15 +766,20 @@ async function downloadDesign() {
     if (!design) return;
     const name = livePlot ? livePlot.name : built?.name || 'design';
     // The worker keeps the text the core wrote, byte for byte what `redfab
-    // build` writes; the server's design comes parsed.
-    const text = mode === 'live' ? JSON.stringify(design) : (await ask({ op: 'design' })).design;
+    // build` writes (the opening circuit's came from the server as text); the
+    // server's design comes parsed.
+    const text = mode === 'live' ? JSON.stringify(design) : (built?.designText ?? (await ask({ op: 'design' })).design);
     save(`${name}.design.json`, text, 'application/json');
 }
 
-// The live button appears only when the page is served by the live backend.
+// --- wiring
+
+// The live button appears, as the main action, only when the page is served by the live backend.
 fetch('/api/status').then((r) => (r.ok ? r.json() : null)).then((s) => {
     if (!s?.live) return;
     liveButton.hidden = false;
+    liveButton.classList.add('primary');
+    compileButton.classList.remove('primary');
     if (Array.isArray(s.limits?.plotSize)) limits.plotSize = s.limits.plotSize;
     liveButton.title = `build on the server and run it in the game (plots are ${limits.plotSize ? limits.plotSize.join(' x ') : 'of limited'} blocks)`;
 }).catch(() => {});
@@ -669,21 +852,20 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-{
-    const draft = readDraft();
-    if (draft) {
-        source.value = draft.source;
-        topField.value = draft.top || '';
-        examples.value = CUSTOM;
-        lastPick = CUSTOM;
-    } else {
-        loadExample(EXAMPLES[0]);
-    }
-}
+// What size works, under the editor.
+capacity.textContent = `About ${limits.measuredCells} cells (an 8-bit adder) compile inside the ${limits.compileSeconds} s limit.`;
 
-// What size works, before the first compile.
-setStatus(`Ready. About ${limits.measuredCells} cells (an 8-bit adder) compile inside the ${limits.compileSeconds} s limit.`);
+const draft = readDraft();
+if (draft) {
+    source.value = draft.source;
+    topField.value = draft.top || '';
+    examples.value = CUSTOM;
+    lastPick = CUSTOM;
+} else {
+    loadExample(OPENING);
+}
 startWorker();
+openWith(OPENING, { draft: draft !== null });
 
 // For the automated checks: the state the page holds, and a way to step
 // deterministically with the clock stopped.
@@ -691,6 +873,7 @@ window.redfab = {
     get design() { return design; },
     get tick() { return tick; },
     get built() { return built; },
+    get opening() { return opening; },
     limits,
     inputs: () => inputState.slice(),
     pendingInputs: () => Object.fromEntries(pendingInputs),

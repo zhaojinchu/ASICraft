@@ -1176,7 +1176,7 @@ test('the backend serves the playground page and its files, and nothing else', a
     try {
         const page = await fetch(`${base}/`);
         assert.equal(page.status, 200);
-        assert.match(await page.text(), /redfab playground/);
+        assert.match(await page.text(), /<title>redfab<\/title>/);
         const core = await fetch(`${base}/core/redfab_wasm.wasm`);
         assert.equal(core.status, 200);
         assert.equal(core.headers.get('content-type'), 'application/wasm');

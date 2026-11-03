@@ -13,7 +13,7 @@ parentPort.on('message', async (request) => {
     try {
         const yosys = request.hang ? () => new Promise(() => {}) : runYosys;
         const built = await compile({ ...request, core, runYosys: yosys, log: () => {} });
-        parentPort.postMessage({ ok: true, designText: built.designText, report: built.report });
+        parentPort.postMessage({ ok: true, designText: built.designText, report: built.report, structure: built.structure });
     } catch (err) {
         parentPort.postMessage({ ok: false, error: err.message });
     }

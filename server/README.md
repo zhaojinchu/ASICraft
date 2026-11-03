@@ -9,7 +9,7 @@ in the world; nothing else from a browser ever reaches the game.
 
 That starts a Fabric server with the observer mod (`tools/setup.sh` and
 `tools/build_mod.sh` first), then serves the page at http://127.0.0.1:8766/.
-Click **Run on the server**. The server does not start until the Minecraft
+Click **Run in the game**. The server does not start until the Minecraft
 EULA has been accepted on this machine: `tools/setup.sh --accept-eula`
 records that in `.tools/eula-accepted`, and without the file the backend
 refuses with the EULA's link. Java is `.tools/java` (the link setup.sh makes)
