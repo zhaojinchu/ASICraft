@@ -101,8 +101,12 @@ click and stops while hidden.
 - `redfab-relay.service`, `mediamtx.yml`: the video relay (MediaMTX) under
   `systemd` and its config: WebRTC only, the HTTP side on loopback behind
   Caddy, the media on 8189, reads open and publishing behind the password.
-- `CAMERA.md`: the PC's runbook: the Fabric loader and the camera mod, the
-  tunnel, OBS, the nightly restart.
+- `CAMERA.md`: the PC's runbook, from a clone on the PC: Prism Launcher with
+  the camera mod, the tunnel, OBS, the two scheduled tasks.
+- `pc/`: the PC's scripts: `tunnel.ps1` (the tunnel in a loop), `start.ps1`
+  (the game and OBS started, or restarted), `install.ps1` (both registered
+  as scheduled tasks), and `config.example.ps1`, copied to a git-ignored
+  `config.ps1` and filled in.
 - `Caddyfile`: the front door; `install.sh` puts the name in and installs it as
   `/etc/caddy/Caddyfile`.
 - `install.sh`: the steps above, idempotent.
