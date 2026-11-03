@@ -6,7 +6,7 @@ blocks instead of its own simulation. Levers on the page reach probe blocks
 in the world; nothing else from a browser ever reaches the game.
 
     node server/live.mjs [--port 8766] [--host 127.0.0.1] [--plots 8] [--run-dir build/mc/live] [--trust-proxy]
-                         [--wasm PATH] [--camera-key KEY] [--relay-api URL]
+                         [--wasm PATH] [--camera-key KEY] [--relay-api URL] [--game-port N]
 
 That starts a Fabric server with the observer mod (`tools/setup.sh` and
 `tools/build_mod.sh` first), then serves the page at http://127.0.0.1:8766/.
@@ -137,8 +137,12 @@ backend takes one more socket, `/camera?key=KEY`: the camera mod
 the server through an SSH tunnel as a spectator, whose view OBS streams to a
 relay on the box and the page plays (stage 14 of `docs/PLAN.md`;
 `server/camera.mjs`). The mod says `{"hello": "redfab-camera", "player":
-NAME}`; the backend runs `gamemode spectator NAME` once and answers
-`{"hello": "redfab-live", "frame": ...}`. From then on it sends the mod where
+NAME}`; the backend runs `gamemode spectator NAME` and `whitelist add NAME`
+once (the whitelist is on in the profile, and nobody reads the run's RCON
+password for it) and answers `{"hello": "redfab-live", "frame": ...}`. The
+game's port is a free one at every start unless `--game-port N` fixes it
+(still on loopback), which a deployment with a camera does, so the PC's
+tunnel can name it. From then on it sends the mod where
 to look: `{"frame": {"plot": N, "origin": [x, y, z], "size": [sx, sy, sz]}}`
 on every placement and lever change while nobody drives, and a driver's
 inputs, `{"drive": {"move": [x, y, z], "look": [yaw, pitch], "plot": N,

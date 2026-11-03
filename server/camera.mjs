@@ -128,11 +128,15 @@ export function createCamera({ plots, world, log = () => {}, relayApi = null, ..
                     player = message.player;
                     mod = { connection, player };
                     log(`camera: ${player} connected`);
+                    // A spectator touches nothing; whitelisted here, so that no operator has to
+                    // read the run's RCON password for it (the whitelist is on in the profile).
                     if (typeof world.command === 'function') {
-                        try {
-                            await world.command(`gamemode spectator ${player}`);
-                        } catch (err) {
-                            log(`camera: gamemode spectator ${player}: ${err.message}`);
+                        for (const command of [`gamemode spectator ${player}`, `whitelist add ${player}`]) {
+                            try {
+                                await world.command(command);
+                            } catch (err) {
+                                log(`camera: ${command}: ${err.message}`);
+                            }
                         }
                     }
                     send(connection, { hello: 'redfab-live', frame: framed && framed.design && !driver ? frameOf(framed) : null });

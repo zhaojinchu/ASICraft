@@ -34,11 +34,12 @@ keep it running.
     chown camera:camera /home/camera/.ssh/authorized_keys && chmod 600 /home/camera/.ssh/authorized_keys
 
 The key can open one tunnel, to the game port on loopback, and nothing else:
-no shell, no other forwarding. The game port never opens to the internet
-and `online-mode` stays off, which is acceptable only because this tunnel is
-the one way in. Put the account's name on the server's whitelist (`whitelist
-add NAME` and `whitelist on` over RCON, or in the run directory's
-`whitelist.json`) so that nobody else can join through a leaked key.
+no shell, no other forwarding. The game's port is fixed at 25565 by the
+backend's unit (`--game-port 25565`; without it the backend takes a free
+port at every start). It never opens to the internet and `online-mode`
+stays off, which is acceptable only because this tunnel is the one way in.
+The whitelist is on, and the backend adds your player's name to it when the
+mod says hello, so that nobody else can join through a leaked key.
 
 ## On the PC, once
 
