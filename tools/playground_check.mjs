@@ -14,16 +14,21 @@
 // dust behind a lever recolouring at once, a clocked design both free-running
 // under the page's own clock and driven cycle by cycle against the native
 // simulator, live mode against a faked backend, and that nothing the page does
-// violates the server's Content-Security-Policy. Screenshots go to
-// build/playground/. Needs Brave or Chrome; set REDFAB_BROWSER to another
-// Chromium binary.
+// violates the server's Content-Security-Policy. Also the page as a visitor
+// meets it: it opens with the counter already built and counting before the
+// compiler is fetched, the heading font loads, the repository is linked, a bus
+// reads as a value most significant bit first, the result card shows the
+// numbers with the report open and the log closed, the main action follows
+// whether a game is behind the page, and a phone gets no horizontal scroll and
+// levers big enough to touch. Screenshots go to build/playground/. Needs Brave
+// or Chrome; set REDFAB_BROWSER to another Chromium binary.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import puppeteer from 'puppeteer-core';
-import { buildWasm, findBrowser, root } from './common.mjs';
-import { serve } from './playground_serve.mjs';
+import { buildWasm, findBrowser, root, wasmPath } from './common.mjs';
+import { OPENING, prepareOpening, serve } from './playground_serve.mjs';
 
 const out = join(root, 'build/playground');
 mkdirSync(out, { recursive: true });
@@ -60,6 +65,7 @@ const INV = 'module inv(input logic a, output logic y);\n  assign y = ~a;\nendmo
 const BROKEN = 'module top(input logic a, output logic y)\n  assign y = ~a;\nendmodule\n';
 const ESCAPED = 'module top(input logic a, output logic \\y<b> );\n  assign \\y<b> = ~a;\nendmodule\n';
 
+await prepareOpening({ wasm: wasmPath, name: OPENING });
 const { server, port } = await serve(0);
 const base = `http://127.0.0.1:${port}`;
 const browser = await puppeteer.launch({ executablePath: browserPath, headless: !show, args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox'] });
@@ -80,6 +86,8 @@ async function open(page, errors) {
         throw new Error(`the page did not start: ${errors.join(' | ') || 'no errors reported'}`);
     }
     await page.evaluate(() => window.redfab.ready());
+    // The page opens with a circuit, or says it could not.
+    await page.waitForFunction(() => window.redfab.opening !== 'loading', { timeout: 30_000 });
 }
 
 /// Clicks Compile and returns [className, text] of the status once it settles,
@@ -137,11 +145,54 @@ try {
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+    const fetched = [];
+    page.on('request', (r) => fetched.push(new URL(r.url()).pathname));
     const dialogs = [];
     let answer = true;
     page.on('dialog', (d) => { dialogs.push(d.message()); d[answer ? 'accept' : 'dismiss'](); });
     await open(page, errors);
-    check(/^Ready\. About \d+ cells \(an 8-bit adder\) compile inside the \d+ s limit\.$/.test(await page.$eval('#status', (e) => e.textContent)), 'the page does not state the size that works before a compile');
+
+    // --- the page opens with the counter already built and counting, before the compiler is fetched
+    {
+        check(await page.evaluate(() => window.redfab.opening) === 'shown', `the page did not open with the ${OPENING} circuit`);
+        check(await page.evaluate((n) => window.redfab.design?.name === n && window.redfab.mode === 'sim' && window.redfab.running, OPENING), 'the opening circuit is not running in the simulator');
+        check(await page.$eval('#examples', (e) => e.value) === OPENING, 'the dropdown does not show the opening example');
+        const status = await page.$eval('#status', (e) => [e.className, e.textContent]);
+        check(status[0] === 'ok' && new RegExp(`^${OPENING}, as built: \\d+ cells \\(the router manages about \\d+ today\\); \\d+ blocks in \\d+ x \\d+; clock clk at \\d+ ticks a cycle\\.`).test(status[1]), `the opening status reads ${JSON.stringify(status)}`);
+        check(/^About \d+ cells \(an 8-bit adder\) compile inside the \d+ s limit\.$/.test(await page.$eval('#capacity', (e) => e.textContent.trim())), 'the page does not state the size that works');
+        check(!fetched.some((p) => p.includes('/pkg/@yowasp/yosys')), 'the compiler was fetched before anyone asked to compile');
+        check(await page.$('a[href="https://github.com/zhaojinchu/ASICraft"]') !== null, 'no link to the repository');
+        check(await page.evaluate(async () => { await document.fonts.ready; return document.fonts.check('20px Monocraft'); }), 'the heading font did not load');
+        check(await page.$eval('#mode', (e) => e.textContent.trim()) === 'simulated here', 'the mode badge does not say simulated here');
+        check(await page.$eval('#compile', (e) => e.classList.contains('primary')) && await page.$eval('#live', (e) => e.hidden), 'without a game behind the page, Compile is not the main action');
+        // The counter counts on its own: the page switched its enable on, and the count row reads as a value.
+        const value = () => page.$eval('.bus[data-bus="count"] .value', (e) => e.textContent.trim());
+        const started = Date.now();
+        const before = await value();
+        let after = before;
+        while (after === before && Date.now() - started < 15_000) {
+            await sleep(500);
+            after = await value();
+        }
+        check(/^[01]{4} \(\d+\)$/.test(after), `the count row reads ${JSON.stringify(after)}`);
+        check(after !== before, `the count did not move in 15 s (${before})`);
+        const bus = await page.evaluate(() => {
+            const row = document.querySelector('.bus[data-bus="count"]');
+            const lamps = [...row.querySelectorAll('.lamp')];
+            const bits = lamps.map((l) => l.dataset.lit).join('');
+            return { bits, text: row.querySelector('.value').textContent.trim(), order: lamps.map((l) => l.dataset.output).join(','), value: parseInt(bits, 2) };
+        });
+        check(bus.order === 'count[3],count[2],count[1],count[0]', `the bus lamps are not most-significant-first: ${bus.order}`);
+        check(bus.text === `${bus.bits} (${bus.value})`, `the bus value ${JSON.stringify(bus.text)} does not read its lamps ${bus.bits}`);
+        // The opening circuit's structure downloads as the native build wrote it.
+        const client = await page.createCDPSession();
+        await client.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: out, eventsEnabled: true });
+        const bytes = await downloaded(page, '#download', join(out, `${OPENING}.nbt`));
+        if (!bytes) failures.push('the opening circuit offered no world.nbt');
+        else check(bytes.equals(readFileSync(join(root, 'build/designs', OPENING, 'world.nbt'))), "the opening circuit's world.nbt differs from the native build's");
+        await client.detach();
+        console.log(`the page opened with ${OPENING} counting (${before}, then ${after}) before the compiler was fetched`);
+    }
 
     // --- the examples: every input combination against the native simulator
     for (const name of DESIGNS) {
@@ -191,6 +242,51 @@ try {
             console.log(`${name}: ${vectors.length} input combinations show the right lamps in the browser`);
         }
         await page.screenshot({ path: join(out, `${name}.png`) });
+    }
+    check(fetched.some((p) => p.includes('/pkg/@yowasp/yosys')), 'the compiler was never fetched for a compile');
+
+    // --- a bus reads as a value, most significant bit first; the result card shows the numbers and the report
+    {
+        await loadExample(page, 'adder4');
+        const status = await compileAndWait(page, 180_000);
+        check(status.kind === 'ok', `adder4: ${status.text}`);
+        await page.evaluate(() => window.redfab.stop());
+        for (const n of ['a[0]', 'a[1]', 'b[2]']) await page.click(`[data-input="${n}"]`);
+        await page.evaluate(async () => window.redfab.step(window.redfab.design.settle_ticks + 2));
+        const rows = await page.evaluate(() => Object.fromEntries([...document.querySelectorAll('.bus')].map((b) => [b.dataset.bus, {
+            value: b.querySelector('.value').textContent.trim(),
+            order: [...b.querySelectorAll('[data-input],[data-output]')].map((e) => e.dataset.input ?? e.dataset.output).join(','),
+        }])));
+        check(rows.a?.value === '0011 (3)' && rows.b?.value === '0100 (4)', `the input buses read ${JSON.stringify(rows)}`);
+        check(rows.sum?.value === '0111 (7)', `the sum reads ${JSON.stringify(rows.sum)}`);
+        check(rows.a?.order === 'a[3],a[2],a[1],a[0]' && rows.sum?.order === 'sum[3],sum[2],sum[1],sum[0]', `the buses are not most-significant-first: ${JSON.stringify(rows)}`);
+        check(await page.$('#outputs > .lamp[data-output="cout"]') !== null && await page.$('#inputs > .lever[data-input="cin"]') !== null, 'a single-bit pin was put in a bus');
+        const card = await page.evaluate(() => ({
+            summary: document.getElementById('summary').textContent,
+            report: document.getElementById('report-text').textContent,
+            reportOpen: document.getElementById('report-details').open,
+            logOpen: document.getElementById('log-details').open,
+        }));
+        check(/\b49 cells\b/.test(card.summary) && /\d+ blocks/.test(card.summary) && /\d+ x \d+/.test(card.summary), `the summary reads ${JSON.stringify(card.summary)}`);
+        check(card.report.includes('cells: 49') && card.reportOpen && !card.logOpen, `the report is ${card.reportOpen ? 'open' : 'closed'} (${card.report.includes('cells: 49') ? 'with' : 'without'} its text), the log ${card.logOpen ? 'open' : 'closed'}`);
+        console.log('adder4: the buses read 3 + 4 = 7, most significant bit first; the result card shows the numbers and the report');
+    }
+
+    // --- a phone: nothing wider than the screen, the circuit and the levers usable by touch
+    {
+        await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+        await sleep(500);
+        const phone = await page.evaluate(() => {
+            const view = document.getElementById('view').getBoundingClientRect();
+            const lever = document.querySelector('#inputs .lever')?.getBoundingClientRect();
+            return { overflow: document.documentElement.scrollWidth - window.innerWidth, viewHeight: view.height, viewWidth: view.width, lever: lever ? [lever.width, lever.height] : null };
+        });
+        check(phone.overflow <= 0, `the page is ${phone.overflow} px wider than a phone`);
+        check(phone.viewHeight >= 200 && phone.viewWidth >= 360, `the view is ${phone.viewWidth} x ${phone.viewHeight} on a phone`);
+        check(phone.lever !== null && phone.lever[1] >= 28, `a lever is ${phone.lever} px on a phone, too small to touch`);
+        await page.screenshot({ path: join(out, 'phone.png') });
+        await page.setViewport({ width: 1400, height: 900 });
+        console.log('on a phone: no horizontal scroll, the view and the levers sized for touch');
     }
 
     // --- the dust behind a lever recolours the moment the lever flips, before any tick
@@ -321,6 +417,7 @@ try {
         await open(page, errors);
         check(await page.$eval('#source', (e) => e.value) === draft, 'the draft did not survive a reload');
         check(await page.$eval('#examples', (e) => e.value) === 'custom', 'the dropdown does not show custom after a reload with a draft');
+        check(await page.evaluate(() => window.redfab.opening === 'shown') && /Your draft is in the editor/.test(await page.$eval('#status', (e) => e.textContent)), 'with a draft, the page did not open its circuit and say the draft is in the editor');
         check(await page.$eval('footer', (e) => e.textContent.includes('NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.')), 'the footer lacks the Minecraft notice');
         check(await page.$eval('footer', (e) => e.textContent.includes('kept only as the placed circuit and its recording while the plot is yours')), 'the footer lacks the line on what happens to a submitted source');
     }
@@ -483,6 +580,8 @@ try {
         submitAnswer = { status: 200, body: { plot: 3, token: 'tok', design, report: 'design not1', origin: [0, 64, 0], placed_tick: 1, state: 'settling' } };
         await page.click('#live');
         await page.waitForFunction(() => window.redfab.livePlot !== null, { timeout: 10_000 });
+        check(/plot 3/.test(await page.$eval('#mode', (e) => e.textContent)), 'the mode badge does not name the plot in live mode');
+        check(await page.$eval('#live', (e) => e.classList.contains('primary') && !e.hidden) && !(await page.$eval('#compile', (e) => e.classList.contains('primary'))), 'with a game behind the page, Run in the game is not the main action');
         check(await page.$eval('#download', (e) => !e.disabled), 'the world.nbt button is disabled in live mode');
         check(await page.$eval('#inputs', (e) => e.querySelectorAll('.lever').length) === 1, 'live mode shows no levers');
         requests.length = 0;

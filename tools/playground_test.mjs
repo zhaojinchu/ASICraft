@@ -14,7 +14,7 @@ import { runYosys } from '@yowasp/yosys';
 import { loadCore } from '../playground/core.js';
 import { compile, countCells, detectTop, explain, LIMITS, moduleNames, nameFor } from '../playground/compile.js';
 import { buildWasm, root, wasmPath as wasm } from './common.mjs';
-import { PACKAGES, cacheControl, contentSecurityPolicy, resolve, serve } from './playground_serve.mjs';
+import { OPENING, PACKAGES, cacheControl, contentSecurityPolicy, prepareOpening, resolve, serve } from './playground_serve.mjs';
 
 // REDFAB_NO_BUILD=1 skips the cargo builds and uses the core and the CLI as
 // last built, to iterate on the page while the crates are being worked on.
@@ -305,6 +305,60 @@ test('the dev server lets the browser keep the packages and the core, never the 
         server.close();
     }
     assert.equal(cacheControl('/pkg/x@1/y.js?q=1'), 'public, max-age=31536000, immutable');
+});
+
+// --- the page a visitor meets: the opening circuit, the font, the compiler loaded late
+
+test('the opening circuit is prepared once from the examples and served as the native build wrote it', async () => {
+    const first = await prepareOpening({ wasm, name: OPENING });
+    assert.equal(OPENING, 'counter4', 'the opening example is the counter: it moves on its own');
+    const started = Date.now();
+    const again = await prepareOpening({ wasm, name: OPENING });
+    assert.equal(again.built, false, 'the second preparation built again');
+    assert.ok(Date.now() - started < 1000, 'the second preparation was not answered from the cache');
+    assert.equal(again.dir, first.dir);
+    const { server, port } = await serve(0);
+    try {
+        const base = `http://127.0.0.1:${port}`;
+        for (const [file, type] of [['design.json', 'application/json'], ['report.txt', 'text/plain; charset=utf-8'], ['world.nbt', 'application/octet-stream']]) {
+            const reply = await fetch(`${base}/designs/${OPENING}/${file}`);
+            assert.equal(reply.status, 200, file);
+            assert.equal(reply.headers.get('content-type'), type, file);
+            assert.equal(reply.headers.get('cache-control'), 'no-cache', `${file} is kept by the browser and revalidated`);
+            assert.ok(reply.headers.get('etag'), `${file} carries an ETag`);
+            const bytes = Buffer.from(await reply.arrayBuffer());
+            assert.ok(bytes.equals(readFileSync(join(root, 'build/designs', OPENING, file))), `${file} differs from the native build's`);
+        }
+        assert.equal((await fetch(`${base}/designs/${OPENING}/top.sv`)).status, 200, 'the source is still served from designs/');
+        assert.equal((await fetch(`${base}/designs/${OPENING}/key`)).status, 404, 'the cache key is not served');
+        assert.equal((await fetch(`${base}/designs/not1/design.json`)).status, 404, 'only the prepared example has a design to open');
+    } finally {
+        server.close();
+    }
+    assert.match(resolve(`/designs/${OPENING}/design.json`), /build\/playground\/opening\/counter4\/design\.json$/);
+    assert.match(resolve(`/designs/${OPENING}/top.sv`), /designs\/counter4\/top\.sv$/);
+});
+
+test('the page carries its font, its introduction and the repository link, and loads the compiler only when asked', async () => {
+    const html = readFileSync(join(root, 'playground/index.html'), 'utf8');
+    assert.match(html, /href="https:\/\/github\.com\/zhaojinchu\/ASICraft"/, 'the introduction links to the repository');
+    assert.match(html, /@font-face[^}]*Monocraft/, 'the heading font is declared in the page');
+    assert.match(html, /Run in the game/, 'the live button says what it does');
+    assert.ok(existsSync(join(root, 'playground/fonts/Monocraft-LICENSE.txt')), 'the font ships with its license');
+    const worker = readFileSync(join(root, 'playground/worker.js'), 'utf8');
+    assert.ok(!/^import .*yosys/m.test(worker), 'the worker imports Yosys at start: 67 MB before the page can show anything');
+    assert.match(worker, /import\(['"]\/pkg\/@yowasp\/yosys@/, 'the worker loads Yosys on demand, from the versioned path');
+    const { server, port } = await serve(0);
+    try {
+        const base = `http://127.0.0.1:${port}`;
+        const font = await fetch(`${base}/fonts/Monocraft.ttf`);
+        assert.equal(font.status, 200);
+        assert.equal(font.headers.get('content-type'), 'font/ttf');
+        assert.equal(font.headers.get('cache-control'), 'no-cache', 'the font is kept by the browser and revalidated');
+        assert.equal((await fetch(`${base}/fonts/Monocraft-LICENSE.txt`)).status, 200);
+    } finally {
+        server.close();
+    }
 });
 
 test('the versions the page pins in its package paths are the installed ones', () => {
