@@ -16,8 +16,9 @@ EnvironmentFile=-/etc/redfab/camera.env
 # Loopback only: Caddy terminates TLS and proxies to this port, setting X-Forwarded-For
 # (--trust-proxy reads it, so the per-address limits see the client, not the proxy).
 # The core is the one deploy/ship_core.sh put in dist/, so this machine needs no Rust.
-# The relay's API on loopback tells the status whether the camera's stream is up.
-ExecStart=/usr/local/bin/node server/live.mjs --host 127.0.0.1 --port 8766 --plots 8 --trust-proxy --wasm /opt/redfab/dist/redfab_wasm.wasm --run-dir /opt/redfab/build/mc/live --relay-api http://127.0.0.1:9997
+# The relay's API on loopback tells the status whether the camera's stream is up; the game's
+# port is fixed (still on loopback) so the camera's tunnel from the PC can name it.
+ExecStart=/usr/local/bin/node server/live.mjs --host 127.0.0.1 --port 8766 --plots 8 --trust-proxy --wasm /opt/redfab/dist/redfab_wasm.wasm --run-dir /opt/redfab/build/mc/live --relay-api http://127.0.0.1:9997 --game-port 25565
 # The backend exits 2 when the game dies; the restart brings both back.
 Restart=always
 RestartSec=5
