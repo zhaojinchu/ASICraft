@@ -12,7 +12,7 @@
 import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
 import { connect as netConnect, createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -1196,6 +1196,26 @@ test('the backend serves the playground page and its files, and nothing else', a
             assert.match(answer.headers.get('content-security-policy') ?? '', /default-src 'self'/, `${path} carries the policy`);
             assert.equal(answer.headers.get('x-content-type-options'), 'nosniff', `${path} is nosniff`);
         }
+    } finally {
+        await backend.close();
+    }
+});
+
+test('the core the page fetches is the one --wasm names, as on a deployment without a Rust build', async () => {
+    // deploy/ship_core.sh puts the core in dist/ and the box has no target/: the
+    // page must get that file. The first deploy served a 404 whose text the page
+    // handed to WebAssembly.instantiate ("expected magic word").
+    const dir = mkdtempSync(join(tmpdir(), 'redfab-shipped-core-'));
+    const shipped = join(dir, 'redfab_wasm.wasm');
+    writeFileSync(shipped, readFileSync(wasmPath));
+    const { backend, base } = await live({ plots: 1, wasm: shipped });
+    try {
+        const core = await fetch(`${base}/core/redfab_wasm.wasm`);
+        assert.equal(core.status, 200);
+        assert.equal(core.headers.get('content-type'), 'application/wasm');
+        const info = statSync(shipped); // the ETag is size and mtime: the copy's, not the build's
+        assert.equal(core.headers.get('etag'), `"${info.size.toString(16)}-${Math.floor(info.mtimeMs).toString(16)}"`, 'served from the shipped file');
+        assert.deepEqual([...new Uint8Array(await core.arrayBuffer()).subarray(0, 4)], [0, 0x61, 0x73, 0x6d], 'WebAssembly magic');
     } finally {
         await backend.close();
     }
