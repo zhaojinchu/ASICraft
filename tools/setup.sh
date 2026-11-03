@@ -8,6 +8,10 @@
 #   tools/setup.sh --server        what a deployment needs and no more: the JDK, the server jar,
 #                                  Fabric and the Node packages; no Rust, Verilator or Python
 #                                  (deploy/README.md; the core is shipped prebuilt)
+#   tools/setup.sh --client        also the official client jar (.tools/mc/client-VERSION.jar), which
+#                                  tools/build_mod.sh compiles the camera mod against; for a machine
+#                                  that builds that mod, never a deployment (the jar is Mojang's and
+#                                  stays here)
 #
 # Project-local: JDK 25 and the Minecraft server jar (.tools/), Python packages
 # (.venv/), Node packages (node_modules/). Outside the project: rustup in ~/.cargo
@@ -30,6 +34,7 @@ EULA_FILE=.tools/eula-accepted
 EULA_URL=https://aka.ms/MinecraftEULA
 CLEAN=0
 SERVER=0
+CLIENT=0
 for arg in "$@"; do
     case "$arg" in
         --accept-eula)
@@ -37,6 +42,7 @@ for arg in "$@"; do
             ;;
         --clean) CLEAN=1 ;;
         --server) SERVER=1 ;;
+        --client) CLIENT=1 ;;
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
@@ -99,6 +105,18 @@ else
     say "downloading Minecraft server $MC_VERSION"
     curl -fsSL "$MC_SERVER_URL" -o "$JAR"
     echo "$MC_SERVER_SHA1  $JAR" | shasum -a 1 -c -
+fi
+
+# --- Minecraft client jar (--client): for compiling the camera mod here, nothing else
+if [ $CLIENT = 1 ]; then
+    CLIENT_JAR=.tools/mc/client-$MC_VERSION.jar
+    if [ -f "$CLIENT_JAR" ] && [ "$(shasum -a 1 "$CLIENT_JAR" | cut -d' ' -f1)" = "$MC_CLIENT_SHA1" ]; then
+        say "Minecraft client $MC_VERSION already downloaded"
+    else
+        say "downloading Minecraft client $MC_VERSION (for compiling the camera mod; it stays on this machine)"
+        curl -fsSL "$MC_CLIENT_URL" -o "$CLIENT_JAR"
+        echo "$MC_CLIENT_SHA1  $CLIENT_JAR" | shasum -a 1 -c -
+    fi
 fi
 
 # --- Fabric Loader: the launcher jar, run once so it installs the loader and Mixin

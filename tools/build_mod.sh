@@ -50,7 +50,7 @@ rm -rf "$CAM" && mkdir -p "$CAM/classes" "$CAM/test-classes"
 for test in $(find mod-camera/test -name '*Test.java' -exec basename {} .java \;); do
     "$JDK/java" -cp "$CAM/test-classes:$CAM/classes" "$test" || { echo "camera mod test $test failed"; exit 1; }
 done
-CLIENT_JAR=.tools/mc/client.jar
+CLIENT_JAR=.tools/mc/client-$MC_VERSION.jar
 if [ -f "$CLIENT_JAR" ] && [ -d mod-camera/src/dev/redfab/camera/mc ]; then
     "$JDK/javac" --release 25 -Xlint:all,-classfile -Werror -proc:none -cp "$CLIENT_JAR:$CP:$CAM/classes" -d "$CAM/classes" $(find mod-camera/src/dev/redfab/camera/mc -name '*.java')
     cp mod-camera/resources/* "$CAM/classes/"
