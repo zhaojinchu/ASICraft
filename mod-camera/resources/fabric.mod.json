@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "redfab-camera",
+  "version": "0.1.0",
+  "name": "redfab camera",
+  "description": "Flies this client's spectator where the redfab backend says, so the page can show and drive it. Idle without -Dredfab.camera.url.",
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": { "client": ["dev.redfab.camera.mc.CameraMod"] },
+  "mixins": ["redfab-camera.mixins.json"],
+  "depends": { "fabricloader": ">=0.19.0", "minecraft": "26.3", "java": ">=25" }
+}

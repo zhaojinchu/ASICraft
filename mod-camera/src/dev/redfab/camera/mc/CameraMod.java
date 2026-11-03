@@ -1,0 +1,144 @@
+// The camera mod's game-facing part: a client mod that flies the user's own
+// spectator where the backend says. Started with
+// -Dredfab.camera.url=wss://NAME/camera?key=KEY it connects to the backend
+// (dev.redfab.camera.Backend) with the launcher's player name, and from then
+// on, every client tick (MinecraftMixin): a driver's input moves and turns the
+// character in its own frame; with no input for a couple of seconds the
+// automatic camera glides to the framing pose above the plot the backend
+// last named and orbits it slowly. The position is set outright each tick,
+// so the keyboard at the PC does nothing, and the character never leaves the
+// plots' area. Without the property the mod loads and does nothing.
+package dev.redfab.camera.mc;
+
+import java.net.URI;
+import java.util.ArrayDeque;
+
+import dev.redfab.camera.Backend;
+import dev.redfab.camera.CameraMath;
+import dev.redfab.camera.CameraMath.Pose;
+import net.fabricmc.api.ClientModInitializer;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.LocalPlayer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public final class CameraMod implements ClientModInitializer {
+    public static final Logger LOGGER = LoggerFactory.getLogger("redfab-camera");
+    /// The backend's /camera socket with the key; null means the mod stays idle.
+    public static final String URL = System.getProperty("redfab.camera.url");
+
+    /// Blocks per tick when driven (12 blocks a second), and up or down.
+    static final double SPEED = 0.6;
+    /// The glide's fraction of what is left, per tick.
+    static final double APPROACH = 0.08;
+    /// The idle orbit, degrees per tick (a turn in about 40 s).
+    static final double ORBIT = 0.15;
+    /// Ticks without a driver's input before the automatic camera takes over again.
+    static final int HANDS_OFF_TICKS = 40;
+
+    record Frame(int plot, int[] origin, int[] size) {}
+
+    record Drive(double[] move, double[] look, int plot, boolean owner) {}
+
+    private static Backend backend;
+    private static volatile boolean connected;
+    private static volatile Frame pendingFrame;
+    private static final ArrayDeque<Drive> drives = new ArrayDeque<>();
+
+    // The client thread's own.
+    private static Pose pose;
+    private static Frame framed;
+    private static Pose framing;
+    private static double[] centre;
+    private static double angle;
+    private static double[] area;
+    private static double floorY;
+    private static long tick;
+    private static long lastDriveTick = Long.MIN_VALUE;
+    private static boolean lastOwner;
+
+    @Override
+    public void onInitializeClient() {
+        LOGGER.info(URL == null ? "no redfab.camera.url: the camera mod stays idle" : "the camera mod will connect to the backend once the game ticks");
+    }
+
+    /// One client tick, from the end of Minecraft.tick.
+    public static void tick(Minecraft mc) {
+        if (URL == null) return;
+        tick += 1;
+        if (backend == null) {
+            String player = mc.getUser().getName();
+            backend = new Backend(URI.create(URL), player, new Backend.Listener() {
+                @Override
+                public void frame(int plot, int[] origin, int[] size) {
+                    pendingFrame = new Frame(plot, origin, size);
+                }
+
+                @Override
+                public void drive(double[] move, double[] look, int plot, boolean owner) {
+                    synchronized (drives) {
+                        drives.add(new Drive(move, look, plot, owner));
+                    }
+                }
+
+                @Override
+                public void connected(boolean up) {
+                    connected = up;
+                    LOGGER.info(up ? "connected to the backend" : "the backend went; connecting again");
+                }
+            }, LOGGER::info);
+            LOGGER.info("connecting to the backend as {}", player);
+            backend.start();
+        }
+        LocalPlayer player = mc.player;
+        if (player == null || mc.level == null || !player.isSpectator()) {
+            pose = null; // the next pose starts from wherever the character is
+            return;
+        }
+        if (pose == null) pose = new Pose(player.getX(), player.getY(), player.getZ(), player.getYRot(), player.getXRot());
+
+        Frame fresh = pendingFrame;
+        if (fresh != null) {
+            pendingFrame = null;
+            double aspect = mc.getWindow().getGuiScaledHeight() == 0 ? 16.0 / 9.0 : mc.getWindow().getGuiScaledWidth() / (double) mc.getWindow().getGuiScaledHeight();
+            framed = fresh;
+            framing = CameraMath.frame(fresh.origin(), fresh.size(), aspect);
+            centre = new double[] { fresh.origin()[0] + fresh.size()[0] / 2.0, fresh.origin()[1] + fresh.size()[1] / 2.0, fresh.origin()[2] + fresh.size()[2] / 2.0 };
+            angle = 0;
+            floorY = fresh.origin()[1];
+            double[] box = { fresh.origin()[0], fresh.origin()[1], fresh.origin()[2], fresh.origin()[0] + fresh.size()[0], fresh.origin()[1] + fresh.size()[1], fresh.origin()[2] + fresh.size()[2] };
+            area = area == null ? box : new double[] { Math.min(area[0], box[0]), Math.min(area[1], box[1]), Math.min(area[2], box[2]), Math.max(area[3], box[3]), Math.max(area[4], box[4]), Math.max(area[5], box[5]) };
+            LOGGER.info("framing plot {} at {}", fresh.plot(), framing);
+        }
+
+        Drive drive = null;
+        synchronized (drives) {
+            while (!drives.isEmpty()) drive = drives.poll(); // the latest input wins; they come ten a second
+        }
+        if (drive != null) {
+            pose = CameraMath.look(pose, drive.look()[0], drive.look()[1]);
+            double[] v = CameraMath.velocity(pose.yaw(), drive.move(), SPEED);
+            pose = new Pose(pose.x() + v[0], pose.y() + v[1], pose.z() + v[2], pose.yaw(), pose.pitch());
+            lastDriveTick = tick;
+            lastOwner = drive.owner();
+        } else if (framing != null && tick - lastDriveTick > HANDS_OFF_TICKS) {
+            angle += ORBIT;
+            pose = CameraMath.approach(pose, CameraMath.orbit(framing, centre, angle), APPROACH);
+        }
+        if (area != null) {
+            double[] p = CameraMath.clamp(new double[] { pose.x(), pose.y(), pose.z() }, area, floorY);
+            pose = new Pose(p[0], p[1], p[2], pose.yaw(), pose.pitch());
+        }
+        player.snapTo(pose.x(), pose.y(), pose.z(), (float) pose.yaw(), (float) pose.pitch());
+        player.setDeltaMovement(0, 0, 0);
+    }
+
+    /// One line for an overlay: the plot framed and who drives.
+    public static String overlay() {
+        if (URL == null) return null;
+        if (!connected) return "redfab camera: connecting to the backend";
+        String where = framed == null ? "no plot yet" : "plot " + framed.plot();
+        boolean driven = tick - lastDriveTick <= HANDS_OFF_TICKS;
+        return "redfab camera: " + where + (driven ? (lastOwner ? ", driven by its owner" : ", driven by a visitor") : ", automatic");
+    }
+}
