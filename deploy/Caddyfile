@@ -10,6 +10,14 @@ redfab.example {
 		Referrer-Policy no-referrer
 		-Server
 	}
-	# The page's own Content-Security-Policy comes from the backend with every answer.
-	reverse_proxy 127.0.0.1:8766
+	# The camera's video relay (stage 14): WHIP from the user's PC and WHEP to the page
+	# go through here, with the /camera prefix stripped; the media itself goes over 8189.
+	handle_path /camera/* {
+		reverse_proxy 127.0.0.1:8889
+	}
+	# Everything else is the backend. The page's own Content-Security-Policy comes
+	# from the backend with every answer.
+	handle {
+		reverse_proxy 127.0.0.1:8766
+	}
 }

@@ -11,10 +11,13 @@ Group=redfab
 WorkingDirectory=/opt/redfab
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
 Environment=NODE_OPTIONS=--max-old-space-size=2048
+# The camera mod's key (REDFAB_CAMERA_KEY), written by install.sh; without the file there is no camera.
+EnvironmentFile=-/etc/redfab/camera.env
 # Loopback only: Caddy terminates TLS and proxies to this port, setting X-Forwarded-For
 # (--trust-proxy reads it, so the per-address limits see the client, not the proxy).
 # The core is the one deploy/ship_core.sh put in dist/, so this machine needs no Rust.
-ExecStart=/usr/local/bin/node server/live.mjs --host 127.0.0.1 --port 8766 --plots 8 --trust-proxy --wasm /opt/redfab/dist/redfab_wasm.wasm --run-dir /opt/redfab/build/mc/live
+# The relay's API on loopback tells the status whether the camera's stream is up.
+ExecStart=/usr/local/bin/node server/live.mjs --host 127.0.0.1 --port 8766 --plots 8 --trust-proxy --wasm /opt/redfab/dist/redfab_wasm.wasm --run-dir /opt/redfab/build/mc/live --relay-api http://127.0.0.1:9997
 # The backend exits 2 when the game dies; the restart brings both back.
 Restart=always
 RestartSec=5
