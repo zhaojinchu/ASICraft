@@ -272,7 +272,9 @@ export async function createLive(options) {
             }
             if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'no such endpoint' });
             if (req.method !== 'GET') return json(res, 405, { error: 'method not allowed' });
-            return await serveStatic(req, res);
+            // The page compiles with the same core the sandbox runs: on a deployment
+            // that is the shipped file, not a build under target/ (there is none).
+            return await serveStatic(req, res, { core: opts.wasm });
         } catch (err) {
             const known = err instanceof PlotError || err instanceof SandboxError;
             // The path only: a query string may carry a plot token.
