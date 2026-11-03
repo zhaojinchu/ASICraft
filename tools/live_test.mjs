@@ -1323,7 +1323,7 @@ test('the compile child sees only the environment it needs', async () => {
 });
 
 test('the command line names a prebuilt core and the proxy, and refuses what it does not know', () => {
-    const options = cliOptions(['--wasm', '/opt/redfab/dist/redfab_wasm.wasm', '--trust-proxy', '--plots', '12', '--run-dir', '/opt/redfab/build/mc/live', '--port', '8766', '--host', '127.0.0.1', '--camera-key', 'secret', '--relay-api', 'http://127.0.0.1:9997']);
+    const options = cliOptions(['--wasm', '/opt/redfab/dist/redfab_wasm.wasm', '--trust-proxy', '--plots', '12', '--run-dir', '/opt/redfab/build/mc/live', '--port', '8766', '--host', '127.0.0.1', '--camera-key', 'secret', '--relay-api', 'http://127.0.0.1:9997', '--game-port', '25565']);
     assert.deepEqual(options, {
         runDir: '/opt/redfab/build/mc/live',
         port: 8766,
@@ -1333,12 +1333,15 @@ test('the command line names a prebuilt core and the proxy, and refuses what it 
         wasm: '/opt/redfab/dist/redfab_wasm.wasm',
         cameraKey: 'secret',
         relayApi: 'http://127.0.0.1:9997',
+        gamePort: 25565,
     });
     const defaults = cliOptions([]);
     assert.equal(defaults.wasm, null, 'without --wasm the core is built here');
     assert.equal(defaults.trustProxy, false);
     assert.equal(defaults.cameraKey, null, 'without a key there is no camera socket');
     assert.equal(defaults.relayApi, null);
+    assert.equal(defaults.gamePort, null, 'without --game-port the game takes a free port at every start');
+    assert.throws(() => cliOptions(['--game-port', 'any']), /--game-port must be a port number/);
     // The key may come from the environment, so the unit file need not carry it on its command line.
     assert.equal(cliOptions([], { REDFAB_CAMERA_KEY: 'from-env' }).cameraKey, 'from-env');
     assert.equal(cliOptions(['--camera-key', 'on-the-line'], { REDFAB_CAMERA_KEY: 'from-env' }).cameraKey, 'on-the-line');
@@ -1431,6 +1434,8 @@ test('the camera socket takes the mod by its key, puts its player in spectator m
         assert.equal(hello.hello, 'redfab-live');
         await waitFor(() => world.commands.includes('gamemode spectator Steve_7'));
         assert.equal(world.commands.filter((c) => c.startsWith('gamemode')).length, 1);
+        // The camera's player is whitelisted by the backend, so no operator reads the run's RCON password for it.
+        assert.ok(world.commands.includes('whitelist add Steve_7'), `the player was not whitelisted: ${world.commands}`);
         assert.deepEqual((await api(base, '/api/status')).body.camera, { connected: true, player: 'Steve_7', driver: null, queue: 0, plot: null, streaming: null });
         // A placement frames its plot: the plot's number, its origin and the design's size, for the mod to fly to.
         const first = await livePlot(base, wsBase, world, 'not1');
@@ -1455,7 +1460,7 @@ test('the camera socket takes the mod by its key, puts its player in spectator m
         const refused = await bad.next((m) => m.error !== undefined);
         assert.match(refused.error, /player name/);
         await waitFor(() => bad.ws.readyState === WebSocket.CLOSED);
-        assert.equal(world.commands.filter((c) => c.startsWith('gamemode')).length, 1, 'the bad name reached the game');
+        assert.equal(world.commands.filter((c) => c.startsWith('gamemode') || c.startsWith('whitelist')).length, 2, 'the bad name reached the game');
         // Without a key configured there is no camera at all.
         const plain = await live({ plots: 1 });
         try {
