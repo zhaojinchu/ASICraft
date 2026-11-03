@@ -76,6 +76,13 @@ Files:
   the first compile rather than when the page opens. The page stops it if a
   compile takes longer than the limit.
 - `fonts/`: Monocraft, the heading font, with its license (OFL 1.1).
+- `camera.js`: the camera panel (stage 14), shown when the backend has a
+  camera: the game itself, the user's own client streamed from the relay on
+  the box, played over WebRTC (WHEP at `/camera/camera/whep`) on click and
+  stopped while the page is hidden; "Take the camera" and the keys (W A S D,
+  space, shift, a drag on the video to look) drive the character through the
+  plot's live socket, as `server/README.md` describes; "on camera" when the
+  camera is on your plot.
 - `compile.js`: the pipeline, the same as `redfab build`: synthesis, the
   equivalence proof, then placement, routing and the checks in the core. Also
   the limits: source size, cells, blocks, and the compile time the page
