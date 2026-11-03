@@ -15,7 +15,7 @@ import { createServer } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LIMITS } from '../playground/compile.js';
-import { contentSecurityPolicy, serveStatic } from '../tools/playground_serve.mjs';
+import { contentSecurityPolicy, prepareOpening, serveStatic } from '../tools/playground_serve.mjs';
 import { PlotError, Plots } from './plots.mjs';
 import { SandboxError, createSandbox } from './sandbox.mjs';
 import { acceptWebSocket } from './ws.mjs';
@@ -366,8 +366,10 @@ export async function createLive(options) {
     };
 }
 
-/// The backend with its own Minecraft server: launches it, then serves.
+/// The backend with its own Minecraft server: launches it, then serves. The
+/// opening circuit is built first (once per core), so the page shows it at once.
 export async function startLive({ runDir, log = () => {}, ...options }) {
+    await prepareOpening({ wasm: options.wasm ?? DEFAULTS.wasm, log });
     const { launchMinecraft } = await import('./minecraft.mjs');
     const minecraft = await launchMinecraft({ runDir, log });
     let live;

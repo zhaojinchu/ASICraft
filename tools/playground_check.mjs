@@ -262,7 +262,7 @@ try {
         check(rows.a?.order === 'a[3],a[2],a[1],a[0]' && rows.sum?.order === 'sum[3],sum[2],sum[1],sum[0]', `the buses are not most-significant-first: ${JSON.stringify(rows)}`);
         check(await page.$('#outputs > .lamp[data-output="cout"]') !== null && await page.$('#inputs > .lever[data-input="cin"]') !== null, 'a single-bit pin was put in a bus');
         const card = await page.evaluate(() => ({
-            summary: document.getElementById('summary').textContent,
+            summary: [...document.querySelectorAll('#summary li')].map((li) => li.textContent).join('; '),
             report: document.getElementById('report-text').textContent,
             reportOpen: document.getElementById('report-details').open,
             logOpen: document.getElementById('log-details').open,

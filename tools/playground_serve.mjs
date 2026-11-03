@@ -8,24 +8,31 @@
 //                              (index.html, worker.js), so these are immutable
 // /node_modules/...            the same two packages, unversioned (revalidated)
 // /designs/NAME/top.sv         the example designs
+// /designs/NAME/design.json    the opening circuit, as built by `prepareOpening`
+//   (also report.txt, world.nbt) from the example, so the page can show it at
+//                              once without fetching the compiler
+// /fonts/...                   the heading font, with its license
 // /core/redfab_wasm.wasm       the core, built for wasm32 in release mode (the live
 //                              backend serves the file its --wasm names instead)
 // /api/status                  {"live": false}: no live backend here (see server/)
 //
 // Every answer carries a Content-Security-Policy that keeps the page to this
-// origin (see `contentSecurityPolicy`). `serveStatic`, `resolve` and
-// `cacheControl` are shared with the live backend (server/).
+// origin (see `contentSecurityPolicy`). `serveStatic`, `resolve`,
+// `cacheControl` and `prepareOpening` are shared with the live backend (server/).
 
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Worker } from 'node:worker_threads';
 import { buildWasm, root } from './common.mjs';
 const TYPES = {
     '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
     '.wasm': 'application/wasm', '.json': 'application/json', '.sv': 'text/plain; charset=utf-8', '.tar': 'application/x-tar',
-    '.css': 'text/css', '.map': 'application/json', '.d.ts': 'text/plain',
+    '.css': 'text/css', '.map': 'application/json', '.d.ts': 'text/plain', '.txt': 'text/plain; charset=utf-8',
+    '.ttf': 'font/ttf', '.nbt': 'application/octet-stream',
 };
 
 // The only packages the page loads; nothing else under node_modules is served.
@@ -36,6 +43,46 @@ export const PACKAGES = ['@yowasp/yosys', 'three'];
 /// live backend passes the file deploy/ship_core.sh put in dist/ (its --wasm),
 /// the same one its own compiles run.
 export const CORE_DEFAULT = join(root, 'target/wasm32-unknown-unknown/release/redfab_wasm.wasm');
+
+// The example the page opens with, already built: the counter, which moves on
+// its own once the page switches its enable on.
+export const OPENING = 'counter4';
+const OPENING_FILES = ['design.json', 'report.txt', 'world.nbt'];
+const openingDir = (name) => join(root, 'build/playground/opening', name);
+
+/// Builds the opening example once with the page's own pipeline (YoWASP Yosys
+/// and the core at `wasm`, in a worker thread that is gone afterwards) and
+/// keeps its design, report and structure under build/playground/opening/,
+/// keyed by the core and the source, so a changed core rebuilds it. Returns
+/// the directory and whether it was built now.
+export async function prepareOpening({ wasm, name = OPENING, log = () => {} }) {
+    const source = readFileSync(join(root, 'designs', name, 'top.sv'), 'utf8');
+    const key = createHash('sha256').update(readFileSync(wasm)).update(source).digest('hex');
+    const dir = openingDir(name);
+    const keyFile = join(dir, 'key');
+    if (existsSync(keyFile) && readFileSync(keyFile, 'utf8') === key && OPENING_FILES.every((f) => existsSync(join(dir, f)))) {
+        return { dir, built: false };
+    }
+    log(`building the opening circuit (${name})`);
+    const started = Date.now();
+    const built = await new Promise((resolve, reject) => {
+        const worker = new Worker(join(root, 'tools/playground_worker.mjs'), { workerData: { wasm } });
+        worker.on('message', (reply) => {
+            if (reply.ready) return worker.postMessage({ source, top: 'top', name });
+            worker.terminate();
+            if (reply.ok) resolve(reply);
+            else reject(new Error(`the opening circuit ${name} does not build: ${reply.error}`));
+        });
+        worker.on('error', reject);
+    });
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'design.json'), built.designText);
+    writeFileSync(join(dir, 'report.txt'), built.report);
+    writeFileSync(join(dir, 'world.nbt'), Buffer.from(built.structure, 'hex'));
+    writeFileSync(keyFile, key);
+    log(`the opening circuit ${name} built in ${Math.round((Date.now() - started) / 1000)} s`);
+    return { dir, built: true };
+}
 
 /// The file a request path maps to, or null when there is none to serve.
 export function resolve(url, core = CORE_DEFAULT) {
@@ -53,17 +100,21 @@ export function resolve(url, core = CORE_DEFAULT) {
         const name = PACKAGES.find((p) => path.startsWith(`/node_modules/${p}/`));
         return name ? join(root, path) : null;
     }
+    const opening = path.match(/^\/designs\/([^/]+)\/(design\.json|report\.txt|world\.nbt)$/);
+    if (opening) return join(openingDir(opening[1]), opening[2]);
     if (path.startsWith('/designs/')) return join(root, path);
     return join(root, 'playground', path === '/' ? 'index.html' : path);
 }
 
 /// The cache-control header for a request path: the page and the designs
-/// are never cached, versioned packages are kept for good, and the core and
-/// the unversioned package paths are kept but revalidated (with an ETag).
+/// are never cached, versioned packages are kept for good, and the core, the
+/// font, the opening circuit's files and the unversioned package paths are
+/// kept but revalidated (with an ETag).
 export function cacheControl(url) {
     const path = url.split('?')[0];
     if (path.startsWith('/pkg/')) return 'public, max-age=31536000, immutable';
-    if (path === '/core/redfab_wasm.wasm' || path.startsWith('/node_modules/')) return 'no-cache';
+    if (path === '/core/redfab_wasm.wasm' || path.startsWith('/node_modules/') || path.startsWith('/fonts/')) return 'no-cache';
+    if (/^\/designs\/[^/]+\/(design\.json|report\.txt|world\.nbt)$/.test(path)) return 'no-cache';
     return 'no-store';
 }
 
@@ -141,8 +192,10 @@ export function serve(port = 0) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    // Build the core first, so the page is always running the current one.
-    buildWasm();
+    // Build the core first, so the page is always running the current one, and
+    // the opening circuit with it.
+    const wasm = buildWasm();
+    await prepareOpening({ wasm, log: console.log });
     const { port } = await serve(Number(process.argv[2] || 8765));
     console.log(`playground at http://127.0.0.1:${port}/`);
 }

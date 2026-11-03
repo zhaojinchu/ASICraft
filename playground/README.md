@@ -19,24 +19,42 @@ scripts, workers, styles, fetches and WebSockets to the page's own origin
 (WebAssembly allowed; the inline import map and stylesheet allowed by hash),
 and the headless check fails on any violation.
 
+What a visitor meets: the circuit view across the top with the counter example
+already built and counting (the server built it once from `designs/counter4`
+with the page's own pipeline, `prepareOpening` in `tools/playground_serve.mjs`,
+and serves its design, report and structure under `/designs/counter4/`; the
+page simulates it at once, switches its enable on, and fetches the 67 MB Yosys
+core only when someone compiles). Under the view, the levers and lamps: a bus
+(`name[i]` pins) sits in one box, most significant bit first, with its value
+beside it; a clocked design's clock is a lever the page drives. A badge on the
+view says what drives it (simulated here, or live in the game at a plot). Then
+one status line, and below it the editor and the result card: the numbers
+(cells, blocks, footprint, timing, whether it fits the server's plot), the
+three files, the report open and the raw log closed. The page is black on
+white in the code font, with a redstone block's red where the circuit's state
+shows and Monocraft (`fonts/`, OFL 1.1) for the headings; it lays out for a
+phone as well.
+
 Using it: pick an example or paste your own module. The top module is the one
 named `top`, or the only module in the source; name another one in the `top`
 field. Compile with the button or Ctrl+Enter (Cmd+Enter on a Mac). Edited
 source turns the dropdown to `custom` and is kept in the browser's local
-storage across reloads; switching back to an example asks first. The status
-line says what size works before the first compile, shows the phase and the
-elapsed seconds while compiling, then the cell count against what the router
-manages today (`LIMITS.measuredCells` in `compile.js`: about 100 cells compile
-inside the 90 s limit, measured on 2026-10-07 and held to by a test that
-compiles an 8-bit adder through the WebAssembly pipeline; 150 take 2 to 3
+storage across reloads (the page still opens with the counter, and says the
+draft is in the editor); switching back to an example asks first. The line
+under the editor says what size works; the status line shows the phase and
+the elapsed seconds while compiling, then the cell count against what the
+router manages today (`LIMITS.measuredCells` in `compile.js`: about 100 cells
+compile inside the 90 s limit, measured on 2026-10-07 and held to by a test
+that compiles an 8-bit adder through the WebAssembly pipeline; 150 take 2 to 3
 minutes natively, which the limit cuts off) and, when a live server is behind
 the page, whether the design fits its plot. A design that does not fit is not
 sent. A design over the hard limit of 400 cells is refused right after
 synthesis, before the proof and the build, and one above the measured size
-gets a warning in the log at the same point. The three buttons after Run
-download what `redfab build` writes, byte for byte: `NAME.nbt` (the
+gets a warning in the log at the same point. The three buttons in the result
+card download what `redfab build` writes, byte for byte: `NAME.nbt` (the
 structure, for `/place template`; Litematica should load it too, untested),
-`NAME.report.txt` and `NAME.design.json`.
+`NAME.report.txt` and `NAME.design.json`; for the opening circuit they come
+from the server.
 
 Files:
 
@@ -52,8 +70,10 @@ Files:
   a click waits for the cycle's input window (`input_change_at` after the
   edge, the report's rule and what the server does in live mode): the button
   shows a dashed border until then, and a second click takes it back.
-- `worker.js`: compiles and simulates off the main thread. The page stops it
-  if a compile takes longer than the limit.
+- `worker.js`: compiles and simulates off the main thread, and loads Yosys on
+  the first compile rather than when the page opens. The page stops it if a
+  compile takes longer than the limit.
+- `fonts/`: Monocraft, the heading font, with its license (OFL 1.1).
 - `compile.js`: the pipeline, the same as `redfab build`: synthesis, the
   equivalence proof, then placement, routing and the checks in the core. Also
   the limits: source size, cells, blocks, and the compile time the page
@@ -67,7 +87,7 @@ Files:
 Served this way, nothing is sent anywhere, so nothing needs guarding beyond
 the browser's own sandbox and the limits that keep a bad design from hanging
 the page. Served by the live backend (`server/`, stage 12) the page also
-offers **Run on the server**: the source goes to the server, which builds it,
+offers **Run in the game**, as its main action: the source goes to the server, which builds it,
 places it in the game, and streams the game's blocks back; the view then
 shows those, and the levers reach the probe blocks in the world. The plot is
 given back when you Stop, compile again, or leave the page. The world.nbt
