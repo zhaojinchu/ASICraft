@@ -218,7 +218,9 @@ export function observe(port, onMessage, { log = () => {}, onReconnect = () => {
     };
 }
 
-export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_000 }) {
+/// `gamePort` fixes the game's port (on loopback, as always) so that the camera's
+/// tunnel can name it; null takes a free one at every start.
+export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_000, gamePort: fixedGamePort = null }) {
     const pins = readVersions();
     requireEula();
     const java = javaPath();
@@ -228,7 +230,7 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
     for (const [what, path] of [['the JDK', java], ['the server jar', jar], ['Fabric', join(fabric, 'fabric-server-launch.jar')], ['the observer mod', mod]]) {
         if (!existsSync(path)) throw new Error(`${what} is missing at ${path}; run tools/setup.sh and tools/build_mod.sh`);
     }
-    const [gamePort, rconPort, observerPort] = [await freePort(), await freePort(), await freePort()];
+    const [gamePort, rconPort, observerPort] = [fixedGamePort ?? await freePort(), await freePort(), await freePort()];
     const password = randomBytes(16).toString('hex');
 
     // A server left behind by a backend that was killed would have the run directory pulled from under it.

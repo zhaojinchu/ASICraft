@@ -4,7 +4,7 @@
 // filtered to their plot. See README.md.
 //
 //   node server/live.mjs [--port 8766] [--host 127.0.0.1] [--plots 8] [--run-dir build/mc/live] [--trust-proxy] [--wasm PATH]
-//                        [--camera-key KEY] [--relay-api URL]
+//                        [--camera-key KEY] [--relay-api URL] [--game-port N]
 //
 // `createLive` takes any world (the checks give it a fake one); `startLive`
 // launches the modded server and gives it the real one. `--wasm` names a
@@ -400,7 +400,7 @@ export async function createLive(options) {
 export async function startLive({ runDir, log = () => {}, ...options }) {
     await prepareOpening({ wasm: options.wasm ?? DEFAULTS.wasm, log });
     const { launchMinecraft } = await import('./minecraft.mjs');
-    const minecraft = await launchMinecraft({ runDir, log });
+    const minecraft = await launchMinecraft({ runDir, log, gamePort: options.gamePort ?? null });
     let live;
     try {
         live = await createLive({ ...options, world: minecraft.world, source: minecraft.source, log });
@@ -420,7 +420,7 @@ export async function startLive({ runDir, log = () => {}, ...options }) {
     };
 }
 
-const OPTIONS = ['--port', '--host', '--plots', '--run-dir', '--trust-proxy', '--wasm', '--camera-key', '--relay-api'];
+const OPTIONS = ['--port', '--host', '--plots', '--run-dir', '--trust-proxy', '--wasm', '--camera-key', '--relay-api', '--game-port'];
 
 /// The command line's options (the usage at the top). Paths are taken from the
 /// working directory; `wasm` is null when the core is to be built here; the
@@ -435,6 +435,10 @@ export function cliOptions(args, env = process.env) {
         return i >= 0 ? args[i + 1] : fallback;
     };
     const wasm = flag('--wasm', null);
+    const gamePort = flag('--game-port', null);
+    if (gamePort !== null && !/^\d{1,5}$/.test(gamePort) || (gamePort !== null && (Number(gamePort) < 1 || Number(gamePort) > 65535))) {
+        throw new Error('--game-port must be a port number');
+    }
     return {
         runDir: resolve(root, flag('--run-dir', 'build/mc/live')),
         port: Number(flag('--port', 8766)),
@@ -445,6 +449,8 @@ export function cliOptions(args, env = process.env) {
         wasm: wasm === null ? null : resolve(wasm),
         cameraKey: flag('--camera-key', env.REDFAB_CAMERA_KEY ?? null),
         relayApi: flag('--relay-api', null),
+        // Fixed on a deployment with a camera, so the PC's tunnel can name it; else a free one each start.
+        gamePort: gamePort === null ? null : Number(gamePort),
     };
 }
 
