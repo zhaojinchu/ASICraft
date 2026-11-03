@@ -79,6 +79,11 @@ def test_the_video_relay_runs_as_a_unit_on_loopback_behind_the_proxy_with_its_me
     assert "REDFAB_CAMERA_KEY" in install and "/etc/redfab/camera.env" in install and "RELAY_PASSWORD" in install
     live = (DEPLOY / "redfab-live.service").read_text()
     assert "EnvironmentFile=-/etc/redfab/camera.env" in live and "--relay-api http://127.0.0.1:9997" in live
+    # The game's port is fixed on the box, so the PC's tunnel and its key's permitopen can name it.
+    assert "--game-port 25565" in live
+    camera_doc = (DEPLOY / "CAMERA.md").read_text()
+    assert 'permitopen="127.0.0.1:25565"' in camera_doc and "-L 25565:127.0.0.1:25565" in camera_doc
+    assert "whitelist add" not in camera_doc, "the backend whitelists the camera's player; the operator need not"
     versions = (ROOT / "versions.env").read_text()
     assert re.search(r"^MEDIAMTX_VERSION=v1\.\d+\.\d+$", versions, re.M) and re.search(r"^MEDIAMTX_SHA256=[0-9a-f]{64}$", versions, re.M)
     readme = (DEPLOY / "README.md").read_text()
