@@ -38,7 +38,7 @@ def test_the_caddyfile_proxies_to_the_units_port_and_takes_the_name_from_the_ins
     unit = unit_fields((DEPLOY / "redfab-live.service").read_text())
     port = re.search(r"--port (\d+)", unit["ExecStart"]).group(1)
     assert f"reverse_proxy 127.0.0.1:{port}" in caddy
-    assert caddy.count("reverse_proxy") == 1, "one backend"
+    assert caddy.count("reverse_proxy") == 2, "the backend and the video relay, nothing else"
     assert "redfab.example" in caddy, "the placeholder install.sh replaces"
     install = (DEPLOY / "install.sh").read_text()
     assert "s/redfab.example/$DOMAIN/" in install and "/etc/caddy/Caddyfile" in install
@@ -52,6 +52,40 @@ def test_the_installer_never_accepts_the_eula_or_builds_the_core_itself():
     for unit in ("redfab-live.service", "redfab-restart.service", "redfab-restart.timer"):
         assert f"deploy/{unit}" in install, unit
     assert "status_log.cron" in install
+
+
+def test_the_video_relay_runs_as_a_unit_on_loopback_behind_the_proxy_with_its_media_ports_open():
+    """Stage 14: MediaMTX takes the camera's WHIP publish behind a password and serves WHEP reads
+    to anyone, its HTTP under Caddy at /camera/, its ICE listeners on 8189; the backend asks its
+    API on loopback whether the stream is up; the camera key reaches the backend from a file."""
+    unit = unit_fields((DEPLOY / "redfab-relay.service").read_text())
+    assert unit["Restart"] == "always" and unit["User"] == "redfab"
+    assert unit["ExecStart"].endswith("/usr/local/bin/mediamtx /etc/redfab/mediamtx.yml")
+    conf = (DEPLOY / "mediamtx.yml").read_text()
+    for line in ("webrtcAddress: 127.0.0.1:8889", "webrtcLocalUDPAddress: :8189", "webrtcLocalTCPAddress: :8189", "apiAddress: 127.0.0.1:9997", "api: yes"):
+        assert line in conf, line
+    for off in ("rtsp: no", "rtmp: no", "hls: no", "srt: no", "moq: no"):
+        assert off in conf, f"{off}: every protocol but WebRTC stays off"
+    assert "redfab.example" in conf and "RELAY_PASSWORD" in conf, "the installer puts the name and the password in"
+    assert re.search(r"user: camera\n\s+pass: RELAY_PASSWORD", conf), "the publisher is the camera user with the installer's password"
+    assert "action: publish" in conf and "action: read" in conf
+    assert re.search(r"^paths:\n\s+camera:", conf, re.M), "the one path is camera"
+    caddy = (DEPLOY / "Caddyfile").read_text()
+    assert "handle_path /camera/*" in caddy and "reverse_proxy 127.0.0.1:8889" in caddy
+    install = (DEPLOY / "install.sh").read_text()
+    assert "8189/udp" in install and "8189/tcp" in install
+    assert "MEDIAMTX_VERSION" in install and "MEDIAMTX_SHA256" in install and "sha256sum -c" in install, "the relay is fetched by its pinned checksum"
+    assert "deploy/redfab-relay.service" in install and "deploy/mediamtx.yml" in install
+    assert "REDFAB_CAMERA_KEY" in install and "/etc/redfab/camera.env" in install and "RELAY_PASSWORD" in install
+    live = (DEPLOY / "redfab-live.service").read_text()
+    assert "EnvironmentFile=-/etc/redfab/camera.env" in live and "--relay-api http://127.0.0.1:9997" in live
+    versions = (ROOT / "versions.env").read_text()
+    assert re.search(r"^MEDIAMTX_VERSION=v1\.\d+\.\d+$", versions, re.M) and re.search(r"^MEDIAMTX_SHA256=[0-9a-f]{64}$", versions, re.M)
+    readme = (DEPLOY / "README.md").read_text()
+    assert "8189" in readme and "camera" in readme.lower(), "the runbook says what to open for the camera and where its setup lives"
+    assert (DEPLOY / "CAMERA.md").exists(), "the PC's runbook"
+    smoke = (ROOT / "tools" / "smoke_remote.mjs").read_text()
+    assert "/camera/camera/whep" in smoke and "502" in smoke, "the smoke reaches the relay through the proxy"
 
 
 def test_the_restart_timer_runs_the_idle_check_weekly():
