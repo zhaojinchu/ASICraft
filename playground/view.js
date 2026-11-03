@@ -58,13 +58,6 @@ export class View {
         this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.enableDamping = true;
-        // The view sits at the top of a page that scrolls: the wheel scrolls the
-        // page unless Ctrl (Cmd on a Mac) is held, which zooms the view instead.
-        // Pinching on a touch screen still zooms. The listener runs before the
-        // controls' own, on the same element, and keeps the event from them.
-        this.renderer.domElement.addEventListener('wheel', (e) => {
-            if (!e.ctrlKey && !e.metaKey) e.stopImmediatePropagation();
-        }, { capture: true, passive: true });
         this.scene.add(new THREE.AmbientLight(0xffffff, 0.9));
         const sun = new THREE.DirectionalLight(0xffffff, 1.2);
         sun.position.set(0.4, 1, 0.3);
