@@ -4,6 +4,7 @@
 // filtered to their plot. See README.md.
 //
 //   node server/live.mjs [--port 8766] [--host 127.0.0.1] [--plots 8] [--run-dir build/mc/live] [--trust-proxy] [--wasm PATH]
+//                        [--camera-key KEY] [--relay-api URL]
 //
 // `createLive` takes any world (the checks give it a fake one); `startLive`
 // launches the modded server and gives it the real one. `--wasm` names a
@@ -16,6 +17,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LIMITS } from '../playground/compile.js';
 import { contentSecurityPolicy, prepareOpening, serveStatic } from '../tools/playground_serve.mjs';
+import { createCamera } from './camera.mjs';
 import { PlotError, Plots } from './plots.mjs';
 import { SandboxError, createSandbox } from './sandbox.mjs';
 import { acceptWebSocket } from './ws.mjs';
@@ -37,6 +39,9 @@ export const DEFAULTS = {
     perIp: { plots: 1, compiles: 1, submissionsPerHour: 30 },
     origins: [], // Origins allowed besides the page's own host
     trustProxy: false, // take the client address from X-Forwarded-For (behind a reverse proxy only)
+    cameraKey: null, // the camera mod's key for /camera (server/camera.mjs); null means no camera
+    relayApi: null, // the video relay's API on loopback (MediaMTX with api: true), for the status
+    camera: {}, // turnSeconds, idleSeconds, pollSeconds: CAMERA_DEFAULTS in server/camera.mjs
     tickEverySeconds: 5,
     wasm: join(root, 'target/wasm32-unknown-unknown/release/redfab_wasm.wasm'),
     source: { kind: 'live' },
@@ -94,6 +99,8 @@ export async function createLive(options) {
         maxRecordedChanges: opts.maxRecordedChanges,
         log,
     });
+
+    const camera = opts.cameraKey ? createCamera({ plots, world, log, relayApi: opts.relayApi, ...opts.camera }) : null;
 
     let tickTime = null;
     const sampleTick = async () => {
@@ -164,6 +171,7 @@ export async function createLive(options) {
             },
             compiling: sandbox.busy,
             compile_cache: sandbox.cache,
+            camera: camera ? camera.status() : null,
         };
     };
 
@@ -212,6 +220,7 @@ export async function createLive(options) {
             const built = await sandbox.compile({ source: body.source, top, name }).finally(() => compileDone(ip));
             await plots.place(plot, built);
             log(`plot ${plot.index}: ${name} placed at ${plot.origin.join(',')}, tick ${plot.placedTick}`);
+            camera?.placed(plot);
             json(res, 200, {
                 plot: plot.index,
                 token: plot.token,
@@ -291,6 +300,15 @@ export async function createLive(options) {
 
     server.on('upgrade', (req, socket, head) => {
         const url = new URL(req.url, 'http://localhost');
+        if (url.pathname === '/camera') {
+            // The camera mod, from the user's PC, with the shared key; one at a time.
+            if (!camera) return refuse(socket, 404, 'Not Found');
+            if (url.searchParams.get('key') !== opts.cameraKey) return refuse(socket, 403, 'Forbidden');
+            if (camera.connected) return refuse(socket, 409, 'Conflict');
+            const connection = acceptWebSocket(req, socket, head, { maxBuffered: opts.viewers.maxBufferedBytes });
+            if (connection) camera.attach(connection);
+            return undefined;
+        }
         if (url.pathname !== '/live') return refuse(socket, 404, 'Not Found');
         if (!originAllowed(req)) return refuse(socket, 403, 'Forbidden');
         const id = url.searchParams.get('plot');
@@ -322,6 +340,14 @@ export async function createLive(options) {
                 return connection.send(JSON.stringify({ ok: false, error: 'the message must be JSON' }));
             }
             if (!message || typeof message !== 'object') return connection.send(JSON.stringify({ ok: false, error: 'the message must be an object' }));
+            if ('drive' in message) {
+                // The camera: taking it, giving it back, or driving it (server/camera.mjs decides).
+                if (!camera) return connection.send(JSON.stringify({ ok: false, error: 'no camera: this server has none' }));
+                if (plot.generation !== generation) return connection.send(JSON.stringify({ ok: false, error: 'the plot was released' }));
+                const reply = camera.request(viewer, plot, message.drive);
+                if (reply) connection.send(JSON.stringify(reply));
+                return undefined;
+            }
             const fields = Object.keys(message).sort().join(',');
             if (fields !== 'on,set') return connection.send(JSON.stringify({ ok: false, error: 'a lever message has the fields "set" (an input name) and "on" (true or false), nothing else' }));
             if (typeof message.set !== 'string' || typeof message.on !== 'boolean') {
@@ -332,12 +358,14 @@ export async function createLive(options) {
             try {
                 const { tick, queued } = await plot.setLever(message.set, message.on);
                 connection.send(JSON.stringify({ ok: true, set: message.set, on: message.on, tick, queued }));
+                camera?.touched(plot);
             } catch (err) {
                 connection.send(JSON.stringify({ ok: false, error: err.message }));
             }
         };
         connection.onClose = () => {
             plot.viewers.delete(viewer);
+            camera?.viewerLeft(viewer);
             if (connection.dropped) log(`plot ${plot.index}: dropped a viewer that was not reading`);
             if (viewer.controls && plot.generation === generation) plots.controllerLeft(plot);
         };
@@ -359,6 +387,7 @@ export async function createLive(options) {
         },
         async close() {
             clearInterval(sampler);
+            camera?.close();
             await plots.closeAll();
             server.closeAllConnections?.();
             await new Promise((ok) => server.close(() => ok()));
@@ -391,11 +420,12 @@ export async function startLive({ runDir, log = () => {}, ...options }) {
     };
 }
 
-const OPTIONS = ['--port', '--host', '--plots', '--run-dir', '--trust-proxy', '--wasm'];
+const OPTIONS = ['--port', '--host', '--plots', '--run-dir', '--trust-proxy', '--wasm', '--camera-key', '--relay-api'];
 
 /// The command line's options (the usage at the top). Paths are taken from the
-/// working directory; `wasm` is null when the core is to be built here.
-export function cliOptions(args) {
+/// working directory; `wasm` is null when the core is to be built here; the
+/// camera's key may come from REDFAB_CAMERA_KEY instead of the command line.
+export function cliOptions(args, env = process.env) {
     for (const arg of args.filter((a, i) => a.startsWith('--') && (i === 0 || !OPTIONS.includes(args[i - 1]) || args[i - 1] === '--trust-proxy'))) {
         if (!OPTIONS.includes(arg)) throw new Error(`unknown option ${arg}; the options are ${OPTIONS.join(', ')}`);
     }
@@ -413,6 +443,8 @@ export function cliOptions(args) {
         // Behind a reverse proxy only: every client would otherwise share the proxy's address and its limits.
         trustProxy: args.includes('--trust-proxy'),
         wasm: wasm === null ? null : resolve(wasm),
+        cameraKey: flag('--camera-key', env.REDFAB_CAMERA_KEY ?? null),
+        relayApi: flag('--relay-api', null),
     };
 }
 
