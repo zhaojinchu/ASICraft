@@ -1,0 +1,65 @@
+# The video relay for the camera (stage 14): MediaMTX, taking the camera's
+# stream from OBS on the user's PC over WHIP and handing it to the page over
+# WHEP, both through Caddy at /camera/ (handle_path strips the prefix, so the
+# relay sees /camera/whip and /camera/whep for the path named camera). The
+# media itself goes straight to the ICE listeners on 8189 (UDP, and TCP for
+# viewers behind strict networks), which ufw and the Azure network rules open.
+# deploy/install.sh puts the site's name in place of redfab.example and the
+# publisher's password in place of RELAY_PASSWORD, and installs this as
+# /etc/redfab/mediamtx.yml, readable by the redfab user only.
+
+logLevel: info
+logDestinations: [stdout]
+readTimeout: 10s
+writeTimeout: 10s
+
+# The control API on loopback: the backend asks it whether the camera path is being published.
+api: yes
+apiAddress: 127.0.0.1:9997
+metrics: no
+pprof: no
+playback: no
+
+# WebRTC only; every other protocol stays off.
+rtsp: no
+rtmp: no
+hls: no
+srt: no
+moq: no
+webrtc: yes
+webrtcAddress: 127.0.0.1:8889
+webrtcEncryption: no
+webrtcAllowOrigins: ['https://redfab.example']
+webrtcTrustedProxies: ['127.0.0.1']
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcIPsFromInterfaces: yes
+webrtcAdditionalHosts: ['redfab.example']
+webrtcICEServers2: []
+
+# Anyone may read the camera; only the camera user (OBS, with the installer's
+# password as its bearer token, camera:PASSWORD) may publish it; the API is
+# loopback's.
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: read
+        path: camera
+  - user: camera
+    pass: RELAY_PASSWORD
+    ips: []
+    permissions:
+      - action: publish
+        path: camera
+  - user: any
+    pass:
+    ips: ['127.0.0.1', '::1']
+    permissions:
+      - action: api
+
+paths:
+  camera:
+    source: publisher

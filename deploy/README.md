@@ -72,10 +72,37 @@ it exits 0 only if every step passed in time.
   again, the run directory is rebuilt at every start, and submitted sources are
   kept only as the placed structure and the recording while the plot is in use.
 
+## The camera (stage 14)
+
+The user's own game client, on their PC, joined to the server as a spectator
+and streamed to the page; `deploy/CAMERA.md` is the PC's side. On the box,
+`install.sh` adds the video relay (MediaMTX, `redfab-relay.service`, its
+config from `mediamtx.yml` with the site's name and a generated password put
+in, at `/etc/redfab/mediamtx.yml`), opens 8189 udp and tcp in ufw for the
+media, and makes the two secrets once: `/etc/redfab/camera.env` (the mod's
+key, `REDFAB_CAMERA_KEY`, which the backend's unit reads) and
+`/etc/redfab/relay.env` (the publisher's password). Two things it cannot do:
+**open 8189 udp and tcp in the cloud's network rules** (the Azure network
+security group, beside 22, 80 and 443), and make the tunnel user the PC
+connects through (`CAMERA.md`). Caddy passes `/camera/*` to the relay with
+the prefix stripped, so the page plays `https://NAME/camera/camera/whep` and
+OBS publishes to `https://NAME/camera/camera/whip`; the backend asks the
+relay's API on loopback whether the stream is up and says so in
+`/api/status` under `camera`. The smoke posts to the WHEP endpoint and fails
+on a 502, which means the relay is down. Every viewer of the stream costs
+about $0.10 an hour of egress at 3 Mbps, which is why the page plays only on
+click and stops while hidden.
+
 ## Files
 
 - `redfab-live.service`: the backend under `systemd` (`Restart=always`, loopback,
-  `--trust-proxy`, the shipped core, a memory cap).
+  `--trust-proxy`, the shipped core, a memory cap, the camera key from
+  `/etc/redfab/camera.env`, the relay's API for the status).
+- `redfab-relay.service`, `mediamtx.yml`: the video relay (MediaMTX) under
+  `systemd` and its config: WebRTC only, the HTTP side on loopback behind
+  Caddy, the media on 8189, reads open and publishing behind the password.
+- `CAMERA.md`: the PC's runbook: the Fabric loader and the camera mod, the
+  tunnel, OBS, the nightly restart.
 - `Caddyfile`: the front door; `install.sh` puts the name in and installs it as
   `/etc/caddy/Caddyfile`.
 - `install.sh`: the steps above, idempotent.
