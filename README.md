@@ -235,10 +235,13 @@ cargo build -p redfab-wasm --target wasm32-unknown-unknown --release
 node tools/playground_serve.mjs
 ```
 
-Open http://127.0.0.1:8765/. The page compiles the source in a worker in your
-browser (YoWASP Yosys plus the core built for WebAssembly; nothing is sent
-anywhere), draws the blocks, and runs them with the same simulator the game was
-checked against. Click a lever in the view or in the panel. A clocked design's
+Open http://127.0.0.1:8765/. The page opens with the counter example already
+built and counting (the server builds it once from `designs/counter4`), then
+compiles your source in a worker in your browser (YoWASP Yosys, fetched on the
+first compile, plus the core built for WebAssembly; nothing is sent anywhere),
+draws the blocks, and runs them with the same simulator the game was checked
+against. Click a lever in the view or in the panel; a bus reads as a value
+beside its bits. A clocked design's
 clock is driven by the page at the reported period, counted in simulated
 ticks. The top module is the one named `top` or the only module in the
 source; the `top` field names another. See `playground/README.md`.
@@ -250,7 +253,7 @@ tools/build_mod.sh
 node server/live.mjs
 ```
 
-Open http://127.0.0.1:8766/ and click **Run on the server**. The backend starts
+Open http://127.0.0.1:8766/ and click **Run in the game**. The backend starts
 a Fabric server with the observer mod (`mod/`), compiles your source in a
 sandboxed child process, places the result in a free plot, and streams the
 game's own block changes back to the page; the levers reach the probe blocks in

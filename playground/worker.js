@@ -2,23 +2,39 @@
 // Everything slow lives here so the page stays responsive; the page terminates
 // the worker when a compile takes too long.
 
-// The package path carries its version so the server can let the browser keep
-// the 67 MB Yosys core for good (see tools/playground_serve.mjs).
-import { runYosys } from '/pkg/@yowasp/yosys@0.68.1207/gen/bundle.js';
 import { loadCore } from './core.js';
 import { compile } from './compile.js';
 
-let core = null;
+// The Yosys core is 67 MB: it is fetched on the first compile, not when the
+// page opens, so the opening circuit shows at once. The package path carries
+// its version so the server can let the browser keep it for good (see
+// tools/playground_serve.mjs).
+let yosys = null;
+async function runYosys(...args) {
+    if (!yosys) yosys = (await import('/pkg/@yowasp/yosys@0.68.1207/gen/bundle.js')).runYosys;
+    return yosys(...args);
+}
+
+let core = null; // the one load in flight or done: two requests arriving together share it
 let handle = null;
 let structure = null;
 let designText = null;
 
-async function ready() {
+function ready() {
     if (!core) {
-        const bytes = await (await fetch('/core/redfab_wasm.wasm')).arrayBuffer();
-        core = await loadCore(bytes);
+        core = (async () => loadCore(await (await fetch('/core/redfab_wasm.wasm')).arrayBuffer()))();
     }
     return core;
+}
+
+/// A new simulation of `text` (a design file) in place of the one in hand.
+function simulate(c, text) {
+    if (handle !== null) {
+        c.call({ op: 'sim_free', handle });
+        handle = null;
+    }
+    handle = c.call({ op: 'sim_new', design: text }).handle;
+    designText = text;
 }
 
 self.onmessage = async ({ data }) => {
@@ -28,10 +44,6 @@ self.onmessage = async ({ data }) => {
         const c = await ready();
         switch (op) {
             case 'compile': {
-                if (handle !== null) {
-                    c.call({ op: 'sim_free', handle });
-                    handle = null;
-                }
                 const built = await compile({
                     source: data.source,
                     top: data.top,
@@ -41,12 +53,17 @@ self.onmessage = async ({ data }) => {
                     log: (text) => self.postMessage({ id, log: text }),
                     phase: (name) => self.postMessage({ id, phase: name }),
                 });
-                handle = c.call({ op: 'sim_new', design: built.designText }).handle;
+                simulate(c, built.designText);
                 structure = built.structure;
-                designText = built.designText;
                 reply({ design: built.design, report: built.report, top: built.top, name: built.name, cells: built.cells });
                 break;
             }
+            case 'open':
+                // A design built elsewhere (the opening circuit): simulated as is; its structure is the server's.
+                simulate(c, data.design);
+                structure = null;
+                reply({ design: JSON.parse(data.design) });
+                break;
             case 'structure':
                 reply({ structure });
                 break;

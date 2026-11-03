@@ -3,86 +3,122 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>redfab playground</title>
+<title>redfab</title>
 <link rel="icon" href="data:,">
 <style>
-  :root {
-    --bg: #15171a; --panel: #1e2126; --edge: #2e3238; --text: #e6e6e6; --dim: #9aa0a8;
-    --accent: #e8552d; --ok: #58c26a; --bad: #e0574f;
-  }
+  /* A plain page: the browser's own controls, the code font for the text, black
+     on white, and one colour, a redstone block's red, where the circuit's state
+     shows. The headings are in Monocraft (fonts/, OFL 1.1). */
+  @font-face { font-family: Monocraft; src: url(./fonts/Monocraft.ttf) format("truetype"); font-display: swap; }
+  :root { --red: #d81e1e; --lit: #ffd34d; --ground: #dcdcdc; }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
-  body { display: grid; grid-template-rows: auto 1fr auto; }
-  header { display: flex; align-items: center; gap: 16px; padding: 8px 16px; border-bottom: 1px solid var(--edge); background: var(--panel); }
-  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  header .hint { color: var(--dim); font-size: 13px; }
-  main { display: grid; grid-template-columns: minmax(320px, 2fr) 3fr; min-height: 0; }
-  #left { display: grid; grid-template-rows: auto 1fr auto 1fr; min-height: 0; border-right: 1px solid var(--edge); }
-  #toolbar { display: flex; gap: 8px; align-items: center; padding: 8px; border-bottom: 1px solid var(--edge); flex-wrap: wrap; }
-  button { background: #2b3038; color: var(--text); border: 1px solid #3a4049; border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit; }
-  button:hover { background: #343a44; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
-  button:disabled { opacity: .5; cursor: default; }
-  select, input[type="text"] { background: #2b3038; color: var(--text); border: 1px solid #3a4049; border-radius: 6px; padding: 6px; font: inherit; }
-  #top { width: 9em; font-family: ui-monospace, Menlo, monospace; }
-  #toolbar label { color: var(--dim); font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
-  #source { width: 100%; height: 100%; resize: none; border: 0; padding: 10px; background: #0f1113; color: #f0f0f0;
-            font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 4; outline: none; }
-  #status { padding: 6px 10px; border-top: 1px solid var(--edge); border-bottom: 1px solid var(--edge); color: var(--dim); min-height: 30px; }
-  #status.ok { color: var(--ok); } #status.bad { color: var(--bad); } #status.warn { color: #e8b23d; }
-  #log { margin: 0; padding: 8px 10px; overflow: auto; font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--dim); white-space: pre-wrap; }
-  #right { display: grid; grid-template-rows: auto 1fr; min-height: 0; }
-  #panel { display: flex; gap: 16px; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--edge); flex-wrap: wrap; min-height: 48px; }
-  .pins { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .pins .label { color: var(--dim); font-size: 12px; margin-right: 4px; }
-  .lever { padding: 4px 10px; border-radius: 6px; border: 1px solid #3a4049; background: #2b3038; }
-  .lever[data-on="1"] { background: #5a2a1a; border-color: var(--accent); }
-  .lever[data-pending="1"] { border-style: dashed; border-color: var(--accent); }
-  .lamp { display: inline-flex; align-items: center; gap: 6px; }
-  .lamp .bulb { width: 14px; height: 14px; border-radius: 50%; background: #3a2a1a; border: 1px solid #5a4a2a; }
-  .lamp[data-lit="1"] .bulb { background: #ffd34d; box-shadow: 0 0 8px #ffd34d; border-color: #ffe08a; }
-  #tick { color: var(--dim); font-variant-numeric: tabular-nums; margin-left: auto; }
-  #view { position: relative; min-height: 0; }
+  html { background: #fff; color: #000; }
+  body { margin: 0; font: 13px/1.45 ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace; }
+  h1, h2 { font-family: Monocraft, monospace; font-weight: normal; margin: 0; }
+  h1 { font-size: 28px; line-height: 1; color: var(--red); }
+  h2 { font-size: 16px; line-height: 1.2; padding: 8px 16px 0; }
+  header { padding: 12px 16px 10px; border-bottom: 1px solid #000; }
+  header p { margin: 8px 0 0; max-width: 100ch; }
+  #view { position: relative; height: 56vh; min-height: 240px; background: var(--ground); }
   #view canvas { display: block; width: 100%; height: 100%; }
-  #view .help { position: absolute; left: 10px; bottom: 8px; color: var(--dim); font-size: 12px; pointer-events: none; }
-  footer { padding: 6px 16px; border-top: 1px solid var(--edge); color: var(--dim); font-size: 11px; display: flex; gap: 16px; flex-wrap: wrap; justify-content: space-between; }
-  @media (max-width: 800px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; } #left { border-right: 0; border-bottom: 1px solid var(--edge); } }
+  #view .help { position: absolute; left: 10px; bottom: 6px; font-size: 12px; pointer-events: none; }
+  #mode { position: absolute; left: 10px; top: 8px; padding: 3px 8px; border: 1px solid #000; background: #fff; font-family: Monocraft, monospace; font-size: 14px; }
+  #mode.live { border-color: var(--red); color: var(--red); }
+  #panel { padding: 6px 16px; border-top: 1px solid #000; display: flex; flex-direction: column; gap: 2px; }
+  #controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-height: 32px; }
+  #tick { margin-left: auto; font-variant-numeric: tabular-nums; }
+  .pins { display: flex; gap: 4px 14px; align-items: center; flex-wrap: wrap; min-height: 34px; }
+  .pins > .label { font-style: italic; min-width: 6ch; }
+  .bus { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px 1px 0; border: 1px solid #000; }
+  .bus > .name { padding: 0 6px; font-weight: 700; }
+  .bus > .value { padding-left: 6px; font-variant-numeric: tabular-nums; }
+  .lever { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 2px 6px 2px 3px; background: #fff; color: #000;
+           border: 1px solid #000; border-radius: 0; font: inherit; cursor: pointer; }
+  .lever::before { content: ""; width: 28px; height: 16px; border: 1px solid #000; border-radius: 8px;
+                   background: #fff radial-gradient(circle at 8px 50%, #000 5px, transparent 5.5px); }
+  .lever[data-on="1"]::before { border-color: var(--red); background: var(--red) radial-gradient(circle at 20px 50%, #fff 5px, transparent 5.5px); }
+  .lever[data-pending="1"]::before { border-style: dashed; }
+  .lever:disabled { cursor: default; opacity: .55; }
+  .bus > .lever { border: 0; padding: 2px 2px; }
+  .lamp { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; }
+  .lamp .bulb { width: 16px; height: 16px; border: 1px solid #000; background: #fff; }
+  .lamp[data-lit="1"] .bulb { background: var(--lit); }
+  #status { padding: 6px 16px; border-top: 1px solid #000; border-bottom: 1px solid #000; min-height: 30px; }
+  #status.bad { color: var(--red); font-weight: 700; } #status.warn { color: var(--red); }
+  #work { display: grid; grid-template-columns: 1fr 1fr; }
+  #editor { border-right: 1px solid #000; display: flex; flex-direction: column; }
+  #toolbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 6px 16px; }
+  #toolbar label { display: inline-flex; align-items: center; gap: 4px; }
+  #top { width: 8em; font: inherit; }
+  button.primary { font-weight: 700; }
+  #source { width: 100%; height: 46vh; min-height: 240px; resize: vertical; border: 0; border-top: 1px solid #000; padding: 8px 16px;
+            background: #fff; color: #000; font: inherit; tab-size: 4; outline: none; }
+  #capacity { margin: 0; padding: 6px 16px; border-top: 1px solid #000; }
+  #result { display: flex; flex-direction: column; min-width: 0; }
+  #summary { list-style: none; margin: 0; padding: 6px 16px; display: flex; flex-wrap: wrap; gap: 2px 18px; }
+  #files { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 16px 8px; }
+  details { border-top: 1px solid #000; }
+  summary { padding: 6px 16px; cursor: pointer; }
+  details pre { margin: 0; padding: 0 16px 8px; white-space: pre-wrap; overflow: auto; max-height: 50vh; font: 12px/1.4 inherit; }
+  footer { padding: 6px 16px; border-top: 1px solid #000; font-size: 12px; display: flex; gap: 16px; flex-wrap: wrap; justify-content: space-between; }
+  @media (max-width: 800px) {
+    #view { height: 44vh; }
+    #work { grid-template-columns: 1fr; }
+    #editor { border-right: 0; border-bottom: 1px solid #000; }
+    #source { height: 40vh; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>redfab playground</h1>
-  <span class="hint">SystemVerilog in, a redstone circuit out: simulated here with the game's own rules, or run live on the server.</span>
+  <h1>redfab</h1>
+  <p>SystemVerilog in, a redstone circuit out: synthesised, proven equal to the source, placed and routed into redstone, and checked against the game itself. This page runs the same compiler in your browser; with a game behind it, <b>Run in the game</b> places your design on a live server and streams its blocks back. <a href="https://github.com/zhaojinchu/ASICraft">Source on GitHub</a>.</p>
 </header>
 <main>
-  <section id="left">
-    <div id="toolbar">
-      <select id="examples" aria-label="examples"></select>
-      <label>top <input id="top" type="text" placeholder="auto" spellcheck="false" aria-label="top module" title="the top module's name; empty: the module named top, or the only one"></label>
-      <button id="compile" class="primary" title="Ctrl+Enter or Cmd+Enter">Compile</button>
-      <button id="run" disabled>Pause</button>
-      <button id="download" disabled title="the structure file: /place template loads it; Litematica should load it too, but that is untested">world.nbt</button>
-      <button id="report" disabled title="the build report: cells, blocks, footprint, lever and lamp positions, timing">report.txt</button>
-      <button id="design-json" disabled title="the design file: the layout, timing and pins the simulator and the view use">design.json</button>
-      <button id="live" hidden title="build on the server and run it in the game">Run on the server</button>
-      <button id="release" hidden title="give the plot back">Stop</button>
+  <section id="stage">
+    <div id="view">
+      <span id="mode" hidden>simulated here</span>
+      <div class="help">drag to orbit, Ctrl+scroll (Cmd on a Mac) to zoom, click a lever to flip it</div>
     </div>
-    <textarea id="source" spellcheck="false" aria-label="SystemVerilog source"></textarea>
-    <div id="status">Ready.</div>
-    <pre id="log"></pre>
-  </section>
-  <section id="right">
     <div id="panel">
+      <div id="controls">
+        <button id="run" disabled>Pause</button>
+        <button id="release" hidden title="give the plot back">Stop</button>
+        <span id="tick"></span>
+      </div>
       <div class="pins" id="inputs"><span class="label">inputs</span></div>
       <div class="pins" id="outputs"><span class="label">outputs</span></div>
-      <span id="tick"></span>
     </div>
-    <div id="view"><div class="help">drag to orbit, scroll to zoom, click a lever to flip it</div></div>
+    <div id="status">Loading the opening circuit…</div>
+  </section>
+  <section id="work">
+    <div id="editor">
+      <h2>source</h2>
+      <div id="toolbar">
+        <select id="examples" aria-label="examples"></select>
+        <label>top <input id="top" type="text" placeholder="auto" spellcheck="false" aria-label="top module" title="the top module's name; empty: the module named top, or the only one"></label>
+        <button id="compile" class="primary" title="build and simulate it here (Ctrl+Enter or Cmd+Enter)">Compile</button>
+        <button id="live" hidden title="build on the server and run it in the game">Run in the game</button>
+      </div>
+      <textarea id="source" spellcheck="false" aria-label="SystemVerilog source"></textarea>
+      <p id="capacity"></p>
+    </div>
+    <div id="result">
+      <h2>result</h2>
+      <ul id="summary"></ul>
+      <div id="files">
+        <button id="download" disabled title="the structure file: /place template loads it; Litematica should load it too, but that is untested">world.nbt</button>
+        <button id="report" disabled title="the build report: cells, blocks, footprint, lever and lamp positions, timing">report.txt</button>
+        <button id="design-json" disabled title="the design file: the layout, timing and pins the simulator and the view use">design.json</button>
+      </div>
+      <details id="report-details" open><summary>report</summary><pre id="report-text"></pre></details>
+      <details id="log-details"><summary>log</summary><pre id="log"></pre></details>
+    </div>
   </section>
 </main>
 <footer>
   <span>Compile with Ctrl+Enter or Cmd+Enter. Your edited source is kept in this browser.</span>
-  <span>Run on the server sends your source there; it is kept only as the placed circuit and its recording while the plot is yours. Nothing else is recorded.</span>
+  <span>Run in the game sends your source there; it is kept only as the placed circuit and its recording while the plot is yours. Nothing else is recorded.</span>
   <span>NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</span>
 </footer>
 <script type="importmap">
