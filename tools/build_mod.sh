@@ -46,9 +46,10 @@ done
 CAM=build/mod-camera
 rm -rf "$CAM" && mkdir -p "$CAM/classes" "$CAM/test-classes"
 "$JDK/javac" --release 25 -Xlint:all,-classfile -Werror -proc:none -d "$CAM/classes" $(find mod-camera/src/dev/redfab/camera -maxdepth 1 -name '*.java')
-"$JDK/javac" --release 25 -Xlint:all,-classfile -Werror -proc:none -cp "$CAM/classes" -d "$CAM/test-classes" $(find mod-camera/test -name '*.java')
+# The tests may use the observer mod's WebSocket server as a fake backend.
+"$JDK/javac" --release 25 -Xlint:all,-classfile -Werror -proc:none -cp "$CAM/classes:$OUT/classes" -d "$CAM/test-classes" $(find mod-camera/test -name '*.java')
 for test in $(find mod-camera/test -name '*Test.java' -exec basename {} .java \;); do
-    "$JDK/java" -cp "$CAM/test-classes:$CAM/classes" "$test" || { echo "camera mod test $test failed"; exit 1; }
+    "$JDK/java" -cp "$CAM/test-classes:$CAM/classes:$OUT/classes:$CP" "$test" || { echo "camera mod test $test failed"; exit 1; }
 done
 CLIENT_JAR=.tools/mc/client-$MC_VERSION.jar
 if [ -f "$CLIENT_JAR" ] && [ -d mod-camera/src/dev/redfab/camera/mc ]; then
