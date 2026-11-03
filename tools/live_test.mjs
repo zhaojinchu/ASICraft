@@ -66,9 +66,14 @@ class FakeWorld {
         this.scramble = false; // stream states with their properties in the other order
         this.healthOverride = {};
         this.reconnects = 0;
+        this.commands = []; // every other command the backend ran (the camera's gamemode, say)
     }
     onBatch(cb) {
         this.listeners.push(cb);
+    }
+    async command(text) {
+        this.commands.push(text);
+        return `ran ${text}`;
     }
     onStreamReconnect(cb) {
         this.reconnectListeners.push(cb);
@@ -1318,7 +1323,7 @@ test('the compile child sees only the environment it needs', async () => {
 });
 
 test('the command line names a prebuilt core and the proxy, and refuses what it does not know', () => {
-    const options = cliOptions(['--wasm', '/opt/redfab/dist/redfab_wasm.wasm', '--trust-proxy', '--plots', '12', '--run-dir', '/opt/redfab/build/mc/live', '--port', '8766', '--host', '127.0.0.1']);
+    const options = cliOptions(['--wasm', '/opt/redfab/dist/redfab_wasm.wasm', '--trust-proxy', '--plots', '12', '--run-dir', '/opt/redfab/build/mc/live', '--port', '8766', '--host', '127.0.0.1', '--camera-key', 'secret', '--relay-api', 'http://127.0.0.1:9997']);
     assert.deepEqual(options, {
         runDir: '/opt/redfab/build/mc/live',
         port: 8766,
@@ -1326,10 +1331,17 @@ test('the command line names a prebuilt core and the proxy, and refuses what it 
         plots: 12,
         trustProxy: true,
         wasm: '/opt/redfab/dist/redfab_wasm.wasm',
+        cameraKey: 'secret',
+        relayApi: 'http://127.0.0.1:9997',
     });
     const defaults = cliOptions([]);
     assert.equal(defaults.wasm, null, 'without --wasm the core is built here');
     assert.equal(defaults.trustProxy, false);
+    assert.equal(defaults.cameraKey, null, 'without a key there is no camera socket');
+    assert.equal(defaults.relayApi, null);
+    // The key may come from the environment, so the unit file need not carry it on its command line.
+    assert.equal(cliOptions([], { REDFAB_CAMERA_KEY: 'from-env' }).cameraKey, 'from-env');
+    assert.equal(cliOptions(['--camera-key', 'on-the-line'], { REDFAB_CAMERA_KEY: 'from-env' }).cameraKey, 'on-the-line');
     assert.equal(defaults.plots, DEFAULTS.plots);
     assert.ok(defaults.runDir.endsWith('/build/mc/live') && defaults.runDir.startsWith('/'), defaults.runDir);
     assert.ok(cliOptions(['--wasm', 'dist/redfab_wasm.wasm']).wasm.endsWith('/dist/redfab_wasm.wasm'), 'a relative core path is taken from the working directory');
@@ -1379,3 +1391,190 @@ test('the remote smoke fails on a backend that is not live', async () => {
 });
 
 await sleep(0);
+
+// --- the camera (stage 14): the mod's socket, framing, driving, the turn policy, the relay's status
+
+/// The camera mod's end of its socket: connected with the key, saying hello with the player's name.
+async function cameraMod(wsBase, player = 'Steve_7', key = 'secret') {
+    const mod = connect(`${wsBase}/camera?key=${key}`);
+    await mod.opened;
+    mod.send({ hello: 'redfab-camera', player });
+    const hello = await mod.next((m) => m.hello !== undefined);
+    return { mod, hello };
+}
+
+/// A plot placed and live, with its controller's socket.
+async function livePlot(base, wsBase, world, name) {
+    const reply = await submit(base, name);
+    assert.equal(reply.status, 200, reply.body.error);
+    const { client } = await control(wsBase, reply.body);
+    world.emit(world.tick + reply.body.design.settle_ticks + 1, []);
+    await client.next((m) => m.state === 'live');
+    return { plot: reply.body, client };
+}
+
+/// A viewer of the plot without its token: watching only.
+async function guestOf(wsBase, plot) {
+    const guest = connect(`${wsBase}/live?plot=${plot.plot}`);
+    await guest.opened;
+    await guest.next((m) => m.hello !== undefined);
+    return guest;
+}
+
+test('the camera socket takes the mod by its key, puts its player in spectator mode, and frames each placement and lever change', async () => {
+    const { backend, world, base, wsBase } = await live({ cameraKey: 'secret', plots: 2 });
+    try {
+        assert.deepEqual((await api(base, '/api/status')).body.camera, { connected: false, player: null, driver: null, queue: 0, plot: null, streaming: null });
+        await assert.rejects(connect(`${wsBase}/camera?key=nope`).opened, 'the wrong key was let in');
+        await assert.rejects(connect(`${wsBase}/camera`).opened, 'no key was let in');
+        const { mod, hello } = await cameraMod(wsBase);
+        assert.equal(hello.hello, 'redfab-live');
+        await waitFor(() => world.commands.includes('gamemode spectator Steve_7'));
+        assert.equal(world.commands.filter((c) => c.startsWith('gamemode')).length, 1);
+        assert.deepEqual((await api(base, '/api/status')).body.camera, { connected: true, player: 'Steve_7', driver: null, queue: 0, plot: null, streaming: null });
+        // A placement frames its plot: the plot's number, its origin and the design's size, for the mod to fly to.
+        const first = await livePlot(base, wsBase, world, 'not1');
+        const frame = await mod.next((m) => m.frame !== undefined);
+        assert.deepEqual(frame.frame, { plot: first.plot.plot, origin: first.plot.origin, size: first.plot.design.size });
+        assert.equal((await api(base, '/api/status')).body.camera.plot, first.plot.plot);
+        // Another placement moves the camera there; a lever change on the first brings it back.
+        const second = await livePlot(base, wsBase, world, 'nor2');
+        await mod.next((m) => m.frame?.plot === second.plot.plot);
+        first.client.send({ set: 'a', on: true });
+        await first.client.next((m) => m.ok === true);
+        await mod.next((m) => m.frame?.plot === first.plot.plot);
+        assert.equal((await api(base, '/api/status')).body.camera.plot, first.plot.plot);
+        // A second mod is refused while one is connected; the mod going away shows in the status.
+        await assert.rejects(connect(`${wsBase}/camera?key=secret`).opened, 'a second camera was let in');
+        mod.close();
+        await waitFor(async () => (await api(base, '/api/status')).body.camera.connected === false);
+        // A hello that is not a player name is refused, the socket closed, and the game never asked.
+        const bad = connect(`${wsBase}/camera?key=secret`);
+        await bad.opened;
+        bad.send({ hello: 'redfab-camera', player: 'not a name; drop table' });
+        const refused = await bad.next((m) => m.error !== undefined);
+        assert.match(refused.error, /player name/);
+        await waitFor(() => bad.ws.readyState === WebSocket.CLOSED);
+        assert.equal(world.commands.filter((c) => c.startsWith('gamemode')).length, 1, 'the bad name reached the game');
+        // Without a key configured there is no camera at all.
+        const plain = await live({ plots: 1 });
+        try {
+            assert.equal((await api(plain.base, '/api/status')).body.camera, null);
+            await assert.rejects(connect(`${plain.wsBase}/camera?key=secret`).opened, 'a camera socket opened with no key configured');
+        } finally {
+            await plain.backend.close();
+        }
+    } finally {
+        await backend.close();
+    }
+});
+
+test('driving: the plot owner takes the camera at once, a viewer waits in a queue for a timed turn, idle hands give it back, and every input reaches the mod', async () => {
+    const { backend, world, base, wsBase } = await live({ cameraKey: 'secret', plots: 2, camera: { turnSeconds: 2, idleSeconds: 1 } });
+    try {
+        const { mod } = await cameraMod(wsBase);
+        const { plot, client: owner } = await livePlot(base, wsBase, world, 'not1');
+        await mod.next((m) => m.frame !== undefined);
+        const guest = await guestOf(wsBase, plot);
+        // Nobody drives: the guest gets a turn at once, for the turn's seconds.
+        guest.send({ drive: 'take' });
+        const turn = await guest.next((m) => m.drive !== undefined);
+        assert.deepEqual([turn.drive, turn.seconds], ['yours', 2]);
+        let status = (await api(base, '/api/status')).body.camera;
+        assert.deepEqual([status.driver, status.queue], [{ plot: plot.plot, owner: false }, 0]);
+        // The guest's input reaches the mod; the owner, not driving, is refused.
+        guest.send({ drive: { move: [0, 0, 1], look: [0, 0] } });
+        let input = await mod.next((m) => m.drive !== undefined);
+        assert.deepEqual(input.drive, { move: [0, 0, 1], look: [0, 0], plot: plot.plot, owner: false });
+        owner.send({ drive: { move: [1, 0, 0], look: [0, 0] } });
+        const refused = await owner.next((m) => m.ok === false);
+        assert.match(refused.error, /not driving/);
+        // The owner asks: the owner drives at once, without a time limit while the plot is theirs, and the guest is told and goes to the head of the queue.
+        owner.send({ drive: 'take' });
+        const mine = await owner.next((m) => m.drive === 'yours');
+        assert.equal(mine.seconds, null);
+        const bumped = await guest.next((m) => m.drive === 'over');
+        assert.match(bumped.why, /owner/);
+        status = (await api(base, '/api/status')).body.camera;
+        assert.deepEqual([status.driver, status.queue], [{ plot: plot.plot, owner: true }, 1]);
+        owner.send({ drive: { move: [1, 0, 0], look: [0.5, -0.25] } });
+        input = await mod.next((m) => m.drive !== undefined);
+        assert.deepEqual(input.drive, { move: [1, 0, 0], look: [0.5, -0.25], plot: plot.plot, owner: true });
+        // Malformed inputs are refused and never forwarded: not an object, a move that is not three numbers in -1..1, a look that is not two numbers.
+        for (const bad of [{ drive: 5 }, { drive: { move: 'x', look: [0, 0] } }, { drive: { move: [1, 0], look: [0, 0] } }, { drive: { move: [1, 0, 0], look: [0] } }, { drive: { move: [9, 0, 0], look: [0, 0] } }, { drive: { move: [0, 0, 0], look: [0, 'up'] } }]) {
+            owner.send(bad);
+            const no = await owner.next((m) => m.ok === false);
+            assert.match(no.error, /drive/, JSON.stringify(bad));
+        }
+        assert.equal((await mod.next((m) => m.drive !== undefined, 300).catch(() => null)), null, 'a malformed input reached the mod');
+        // The owner releases: the guest's turn begins, and ends on time though the guest keeps sending; then the automatic camera resumes with a frame.
+        owner.send({ drive: 'release' });
+        await owner.next((m) => m.drive === 'over');
+        const again = await guest.next((m) => m.drive === 'yours');
+        assert.equal(again.seconds, 2);
+        const keep = setInterval(() => guest.send({ drive: { move: [0, 0, 1], look: [0, 0] } }), 200);
+        const timed = await guest.next((m) => m.drive === 'over', 5000);
+        clearInterval(keep);
+        assert.match(timed.why, /time/);
+        await mod.next((m) => m.frame?.plot === plot.plot, 5000);
+        // A turn with no input ends on idleness.
+        guest.send({ drive: 'take' });
+        await guest.next((m) => m.drive === 'yours');
+        const idle = await guest.next((m) => m.drive === 'over', 5000);
+        assert.match(idle.why, /idle/);
+        // A second viewer waits behind the first and hears its place; a release passes the turn on.
+        guest.send({ drive: 'take' });
+        await guest.next((m) => m.drive === 'yours');
+        const other = await guestOf(wsBase, plot);
+        other.send({ drive: 'take' });
+        const queued = await other.next((m) => m.drive === 'queued');
+        assert.equal(queued.position, 1);
+        guest.send({ drive: 'release' });
+        await other.next((m) => m.drive === 'yours');
+        // The plot released from under the owner ends the owner's turn.
+        other.send({ drive: 'release' });
+        await other.next((m) => m.drive === 'over');
+        owner.send({ drive: 'take' });
+        await owner.next((m) => m.drive === 'yours');
+        await api(base, `/api/plots/${plot.plot}?token=${plot.token}`, { method: 'DELETE' });
+        await waitFor(async () => (await api(base, '/api/status')).body.camera.driver === null);
+        // When the mod goes, the driver is told, and taking the camera without one is refused.
+        other.send({ drive: 'take' });
+        await other.next((m) => m.drive === 'yours');
+        mod.close();
+        const gone = await other.next((m) => m.drive === 'over', 5000);
+        assert.match(gone.why, /camera/);
+        other.send({ drive: 'take' });
+        const none = await other.next((m) => m.ok === false);
+        assert.match(none.error, /no camera/);
+    } finally {
+        await backend.close();
+    }
+});
+
+test('the camera status says whether the relay has the stream, asked of the relay API on loopback', async () => {
+    let ready = false;
+    let hits = 0;
+    const relay = createHttpServer((req, res) => {
+        hits += 1;
+        if (req.url === '/v3/paths/get/camera' && ready) {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            return res.end(JSON.stringify({ name: 'camera', ready: true, readyTime: '2026-11-02T20:00:00Z' }));
+        }
+        res.writeHead(404, { 'content-type': 'application/json' });
+        return res.end('{"error":"path not found"}');
+    });
+    const port = await new Promise((ok) => relay.listen(0, '127.0.0.1', () => ok(relay.address().port)));
+    const { backend, base } = await live({ cameraKey: 'secret', relayApi: `http://127.0.0.1:${port}`, camera: { pollSeconds: 0.1 } });
+    try {
+        await waitFor(() => hits > 0);
+        assert.equal((await api(base, '/api/status')).body.camera.streaming, false);
+        ready = true;
+        await waitFor(async () => (await api(base, '/api/status')).body.camera.streaming === true);
+        // The relay going away reads as not streaming, never as an error.
+        await new Promise((ok) => relay.close(() => ok()));
+        await waitFor(async () => (await api(base, '/api/status')).body.camera.streaming === false);
+    } finally {
+        await backend.close();
+    }
+});
