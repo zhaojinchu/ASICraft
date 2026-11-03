@@ -545,9 +545,16 @@ try {
         const requests = [];
         await page.setRequestInterception(true);
         let submitAnswer = { status: 503, body: { error: 'the game is down' } };
+        // The camera (stage 14): the status carries it, and the relay's WHEP endpoint is faked.
+        let cameraStatus = { connected: true, player: 'Steve_7', driver: null, queue: 0, plot: 3, streaming: false };
+        const whep = [];
         page.on('request', (req) => {
             const url = new URL(req.url());
-            if (url.pathname === '/api/status') return req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ live: true, limits: { plotSize: [16, 16] } }) });
+            if (url.pathname === '/api/status') return req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify({ live: true, limits: { plotSize: [16, 16] }, camera: cameraStatus }) });
+            if (url.pathname === '/camera/camera/whep') {
+                whep.push({ method: req.method(), type: req.headers()['content-type'], body: req.postData() });
+                return req.respond({ status: 503, contentType: 'text/plain', body: 'no publisher' });
+            }
             if (url.pathname.startsWith('/api/')) {
                 requests.push(`${req.method()} ${url.pathname}${url.search}`);
                 if (url.pathname === '/api/submit') return req.respond({ status: submitAnswer.status, contentType: 'application/json', body: JSON.stringify(submitAnswer.body) });
@@ -597,6 +604,66 @@ try {
         await sleep(300);
         check(requests.includes('DELETE /api/plots/3?token=tok'), `leaving the page did not give the plot back: ${JSON.stringify(requests)}`);
         console.log('live mode against a faked backend: plot size shown and enforced, plot given back on Stop and on leaving');
+
+        // --- the camera panel (stage 14): shown when the backend has a camera, played on click over
+        // WHEP, driven with the keys through the plot's socket, and "on camera" when it is your plot
+        await open(page, errors);
+        check(await page.$eval('#camera', (e) => !e.hidden), 'the camera panel is hidden although the backend has a camera');
+        check(/not up|off/i.test(await page.$eval('#camera-status', (e) => e.textContent)), `with no stream the camera status reads ${JSON.stringify(await page.$eval('#camera-status', (e) => e.textContent))}`);
+        cameraStatus = { ...cameraStatus, streaming: true };
+        await page.evaluate(() => window.redfab.camera.refresh());
+        check(/up|live/i.test(await page.$eval('#camera-status', (e) => e.textContent)), `with a stream the camera status reads ${JSON.stringify(await page.$eval('#camera-status', (e) => e.textContent))}`);
+        // Play asks the relay with an SDP offer; the relay's refusal is shown, and nothing plays.
+        await page.click('#camera-play');
+        await page.waitForFunction(() => /503/.test(document.getElementById('camera-status').textContent), { timeout: 10_000 });
+        check(whep.length === 1 && whep[0].method === 'POST' && /^application\/sdp/.test(whep[0].type) && /^v=0/.test(whep[0].body ?? ''), `the WHEP request was ${JSON.stringify(whep.map((w) => [w.method, w.type, (w.body ?? '').slice(0, 10)]))}`);
+        check(await page.evaluate(() => window.redfab.camera.playing === false), 'the page says it is playing after the relay refused');
+        // Driving, through the page's own hooks (the faked backend has no socket): take, the backend's
+        // answers, the keys into move and look, release.
+        const protocol = await page.evaluate(() => {
+            const c = window.redfab.camera;
+            const out = [];
+            out.push(c.take());
+            c.receive({ drive: 'yours', seconds: 60 });
+            out.push([document.getElementById('drive').textContent.trim(), document.getElementById('camera-turn').textContent.trim(), c.driving]);
+            c.press('w', true);
+            c.press('d', true);
+            c.press('shift', true);
+            c.look(12, -3);
+            out.push(c.input());
+            c.press('w', false);
+            c.press('d', false);
+            c.press('shift', false);
+            out.push(c.input());
+            c.receive({ drive: 'over', why: 'time: the turn is over' });
+            out.push([document.getElementById('drive').textContent.trim(), c.driving, document.getElementById('camera-status').textContent]);
+            c.receive({ drive: 'queued', position: 2 });
+            out.push(document.getElementById('camera-turn').textContent.trim());
+            return out;
+        });
+        check(JSON.stringify(protocol[0]) === JSON.stringify({ drive: 'take' }), `take sends ${JSON.stringify(protocol[0])}`);
+        check(protocol[1][0] === 'Give it back' && /60/.test(protocol[1][1]) && protocol[1][2] === true, `after yours: ${JSON.stringify(protocol[1])}`);
+        check(JSON.stringify(protocol[2]) === JSON.stringify({ drive: { move: [1, -1, 1], look: [12, -3] } }), `w, d, shift and a look give ${JSON.stringify(protocol[2])}`);
+        check(protocol[3] === null, `with nothing pressed the input is ${JSON.stringify(protocol[3])}, not null`);
+        check(protocol[4][0] === 'Take the camera' && protocol[4][1] === false && /over/.test(protocol[4][2]), `after over: ${JSON.stringify(protocol[4])}`);
+        check(/2/.test(protocol[5]), `queued at 2 shows ${JSON.stringify(protocol[5])}`);
+        // On your plot: the badge says so once the camera is there.
+        await loadExample(page, 'not1');
+        await compileAndWait(page);
+        await page.evaluate(() => { window.redfab.limits.plotSize = [512, 512]; });
+        submitAnswer = { status: 200, body: { plot: 3, token: 'tok', design: await page.evaluate(() => window.redfab.built.design), report: 'design not1', origin: [0, 64, 0], placed_tick: 1, state: 'settling' } };
+        await page.click('#live');
+        await page.waitForFunction(() => window.redfab.livePlot !== null, { timeout: 10_000 });
+        await page.evaluate(() => window.redfab.camera.refresh());
+        check(await page.$eval('#camera-on', (e) => !e.hidden && /on camera/i.test(e.textContent)), 'the page does not say the camera is on your plot');
+        cameraStatus = { ...cameraStatus, plot: 1 };
+        await page.evaluate(() => window.redfab.camera.refresh());
+        check(await page.$eval('#camera-on', (e) => e.hidden), 'the badge stays although the camera moved to another plot');
+        // Hidden pages stop playing to save the relay's bandwidth.
+        await page.evaluate(() => { window.redfab.camera.hidden(true); });
+        check(await page.evaluate(() => window.redfab.camera.playing === false), 'a hidden page kept playing');
+        await page.click('#release');
+        console.log('the camera panel: shown with the backend\'s camera, played over WHEP on click, driven through the keys, on camera on your plot');
     }
 
     // The faked backend refuses once and has no WebSocket; the console reports both.
