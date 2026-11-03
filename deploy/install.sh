@@ -57,6 +57,7 @@ fi
 # the release's published checksums)
 if ! command -v node >/dev/null || ! node --version | grep -q "^v$NODE_MAJOR\."; then
     say "installing Node $NODE_MAJOR"
+    apt-get install -y libatomic1 >/dev/null  # Node's Linux build loads it; Ubuntu's cloud image lacks it
     arch=$(uname -m)
     case "$arch" in
         x86_64) node_arch=x64 ;;
