@@ -8,7 +8,8 @@
 //                              (index.html, worker.js), so these are immutable
 // /node_modules/...            the same two packages, unversioned (revalidated)
 // /designs/NAME/top.sv         the example designs
-// /core/redfab_wasm.wasm       the core, built for wasm32 in release mode
+// /core/redfab_wasm.wasm       the core, built for wasm32 in release mode (the live
+//                              backend serves the file its --wasm names instead)
 // /api/status                  {"live": false}: no live backend here (see server/)
 //
 // Every answer carries a Content-Security-Policy that keeps the page to this
@@ -30,8 +31,14 @@ const TYPES = {
 // The only packages the page loads; nothing else under node_modules is served.
 export const PACKAGES = ['@yowasp/yosys', 'three'];
 
+/// The core served at /core/redfab_wasm.wasm unless a caller names another: the
+/// release build in this checkout. A deployment has no Rust and no target/; the
+/// live backend passes the file deploy/ship_core.sh put in dist/ (its --wasm),
+/// the same one its own compiles run.
+export const CORE_DEFAULT = join(root, 'target/wasm32-unknown-unknown/release/redfab_wasm.wasm');
+
 /// The file a request path maps to, or null when there is none to serve.
-export function resolve(url) {
+export function resolve(url, core = CORE_DEFAULT) {
     let path;
     try {
         path = normalize(decodeURIComponent(url.split('?')[0]));
@@ -39,7 +46,7 @@ export function resolve(url) {
         return null; // a malformed escape such as /%
     }
     if (path.includes('..') || path.includes('\0')) return null;
-    if (path === '/core/redfab_wasm.wasm') return join(root, 'target/wasm32-unknown-unknown/release/redfab_wasm.wasm');
+    if (path === '/core/redfab_wasm.wasm') return core;
     const versioned = path.match(/^\/pkg\/((?:@[^/@]+\/)?[^/@]+)@[^/]+\/(.+)$/);
     if (versioned) return PACKAGES.includes(versioned[1]) ? join(root, 'node_modules', versioned[1], versioned[2]) : null;
     if (path.startsWith('/node_modules/')) {
@@ -85,8 +92,9 @@ export function contentSecurityPolicy(html = '') {
 }
 
 /// Answers a static request: the file, 304 when the client has it, 404 otherwise.
-export async function serveStatic(req, res) {
-    const file = resolve(req.url);
+/// `core` is the file served at /core/redfab_wasm.wasm (see CORE_DEFAULT).
+export async function serveStatic(req, res, { core = CORE_DEFAULT } = {}) {
+    const file = resolve(req.url, core);
     let info;
     try {
         info = file ? await stat(file) : null;

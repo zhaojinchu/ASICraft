@@ -2,7 +2,8 @@
 //
 //   node tools/smoke_remote.mjs https://NAME
 //
-// The status must say live; the inverter example is submitted; its plot's
+// The status must say live; the core the page compiles with must be served;
+// the inverter example is submitted; its plot's
 // stream is opened with the token; the lever goes on and the lamp must go off
 // within the settle time, then back; the plot is released. Exit 0 only if every
 // step passed in time. deploy/README.md runs it after an install and the soak
@@ -24,6 +25,16 @@ export async function smoke(base, { log = () => {}, settleMs = 20_000 } = {}) {
         throw new Error(`not live: ${status.status} ${JSON.stringify(status.body).slice(0, 300)}`);
     }
     log(`live: ${status.body.plots.free} of ${status.body.plots.total} plots free`);
+    // The browser compiles with the core too; a deployment serves it from where
+    // --wasm points, which the first deploy got wrong (a 404 whose text the page
+    // handed to WebAssembly.instantiate: "expected magic word").
+    const core = await fetch(`${base}/core/redfab_wasm.wasm`);
+    const bytes = core.ok ? new Uint8Array(await core.arrayBuffer()) : new Uint8Array();
+    const magic = bytes.length >= 4 && bytes[0] === 0 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d;
+    if (!core.ok || core.headers.get('content-type') !== 'application/wasm' || !magic) {
+        throw new Error(`core: ${core.status} ${core.headers.get('content-type')}, ${bytes.length} bytes${magic ? '' : ', not WebAssembly'}`);
+    }
+    log(`the core is served (${bytes.length} bytes)`);
     const reply = await api(base, '/api/submit', { method: 'POST', body: { source: designSource(EXAMPLE), top: 'top', name: EXAMPLE } });
     if (reply.status !== 200) throw new Error(`submit: ${reply.status} ${reply.body.error}`);
     const { plot, token, design } = reply.body;

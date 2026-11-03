@@ -249,6 +249,8 @@ test('the dev server survives a malformed URL and serves nothing outside its all
     }
     assert.equal(resolve('/%'), null);
     assert.equal(resolve('/node_modules/zod/package.json'), null);
+    assert.match(resolve('/core/redfab_wasm.wasm'), /target\/wasm32-unknown-unknown\/release\/redfab_wasm\.wasm$/);
+    assert.equal(resolve('/core/redfab_wasm.wasm', '/opt/redfab/dist/redfab_wasm.wasm'), '/opt/redfab/dist/redfab_wasm.wasm', 'the live backend names the shipped core');
     assert.match(resolve('/pkg/@yowasp/yosys@0.68.1207/gen/bundle.js'), /node_modules\/@yowasp\/yosys\/gen\/bundle\.js$/);
 });
 
