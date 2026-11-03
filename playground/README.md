@@ -19,21 +19,23 @@ scripts, workers, styles, fetches and WebSockets to the page's own origin
 (WebAssembly allowed; the inline import map and stylesheet allowed by hash),
 and the headless check fails on any violation.
 
-What a visitor meets: the circuit view across the top with the counter example
-already built and counting (the server built it once from `designs/counter4`
-with the page's own pipeline, `prepareOpening` in `tools/playground_serve.mjs`,
-and serves its design, report and structure under `/designs/counter4/`; the
-page simulates it at once, switches its enable on, and fetches the 67 MB Yosys
-core only when someone compiles). Under the view, the levers and lamps: a bus
+What a visitor meets: the editor on the left with a terminal under it, the
+circuit on the right, and the counter example already built and counting
+(the server built it once from `designs/counter4` with the page's own
+pipeline, `prepareOpening` in `tools/playground_serve.mjs`, and serves its
+design, report and structure under `/designs/counter4/`; the page
+simulates it at once, switches its enable on, and fetches the 67 MB Yosys core
+only when someone compiles). Above the view, the levers and lamps: a bus
 (`name[i]` pins) sits in one box, most significant bit first, with its value
 beside it; a clocked design's clock is a lever the page drives. A badge on the
-view says what drives it (simulated here, or live in the game at a plot). Then
-one status line, and below it the editor and the result card: the numbers
-(cells, blocks, footprint, timing, whether it fits the server's plot), the
-three files, the report open and the raw log closed. The page is black on
-white in the code font, with a redstone block's red where the circuit's state
-shows and Monocraft (`fonts/`, OFL 1.1) for the headings; it lays out for a
-phone as well.
+view says what drives it (simulated here, or live in the game at a plot).
+Under the editor: the status line, the numbers as chips (cells, blocks,
+footprint, timing, whether it fits the server's plot) with the three files
+beside them, and the terminal with the report open and the raw log closed.
+White, with a redstone block's red as the accent (the title, the main action,
+a lever that is on, an error), the system font for the page and the code font
+for code and signals, Monocraft (`fonts/`, OFL 1.1) for the title; on a phone
+the circuit comes first and the rest stacks under it.
 
 Using it: pick an example or paste your own module. The top module is the one
 named `top`, or the only module in the source; name another one in the `top`
