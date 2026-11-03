@@ -31,9 +31,12 @@ if command -v ufw >/dev/null; then
     ufw allow OpenSSH >/dev/null
     ufw allow 80/tcp >/dev/null
     ufw allow 443/tcp >/dev/null
+    # The camera's media (stage 14): WebRTC ICE on 8189, UDP first and TCP for strict networks.
+    ufw allow 8189/udp >/dev/null
+    ufw allow 8189/tcp >/dev/null
     ufw --force enable >/dev/null
 else
-    say "ufw is not installed; make sure only 22, 80 and 443 are reachable"
+    say "ufw is not installed; make sure only 22, 80, 443 and 8189 (udp and tcp) are reachable"
 fi
 
 # --- the user that runs it
@@ -79,6 +82,31 @@ if ! command -v node >/dev/null || ! node --version | grep -q "^v$NODE_MAJOR\.";
 fi
 say "$(node --version)"
 
+# --- the video relay for the camera (stage 14): MediaMTX, by its pinned checksum
+if [ ! -x /usr/local/bin/mediamtx ] || ! /usr/local/bin/mediamtx --version 2>/dev/null | grep -q "$MEDIAMTX_VERSION"; then
+    say "installing MediaMTX $MEDIAMTX_VERSION"
+    tmp=$(mktemp -d)
+    curl -fsSL "https://github.com/bluenviron/mediamtx/releases/download/$MEDIAMTX_VERSION/mediamtx_${MEDIAMTX_VERSION}_linux_amd64.tar.gz" -o "$tmp/mediamtx.tar.gz"
+    echo "$MEDIAMTX_SHA256  $tmp/mediamtx.tar.gz" | sha256sum -c -
+    tar -xzf "$tmp/mediamtx.tar.gz" -C "$tmp" mediamtx
+    install -m 755 "$tmp/mediamtx" /usr/local/bin/mediamtx
+    rm -rf "$tmp"
+fi
+
+# --- the camera's secrets, made once: the mod's key for the backend, the publisher's
+# password for the relay. Readable by root and the redfab user only.
+install -d -m 750 -o root -g redfab /etc/redfab
+if [ ! -f /etc/redfab/camera.env ]; then
+    say "making the camera key (/etc/redfab/camera.env)"
+    (umask 027 && printf 'REDFAB_CAMERA_KEY=%s\n' "$(openssl rand -hex 24)" > /etc/redfab/camera.env)
+    chown root:redfab /etc/redfab/camera.env
+fi
+if [ ! -f /etc/redfab/relay.env ]; then
+    say "making the relay password (/etc/redfab/relay.env)"
+    (umask 027 && printf 'RELAY_PASSWORD=%s\n' "$(openssl rand -hex 18)" > /etc/redfab/relay.env)
+    chown root:redfab /etc/redfab/relay.env
+fi
+
 # --- the project's own setup, as the redfab user (the EULA is yours to accept)
 if [ ! -f .tools/eula-accepted ]; then
     cat >&2 <<MSG
@@ -113,12 +141,19 @@ say "systemd and Caddy for $DOMAIN"
 install -m 644 deploy/redfab-live.service /etc/systemd/system/redfab-live.service
 install -m 644 deploy/redfab-restart.service /etc/systemd/system/redfab-restart.service
 install -m 644 deploy/redfab-restart.timer /etc/systemd/system/redfab-restart.timer
+install -m 644 deploy/redfab-relay.service /etc/systemd/system/redfab-relay.service
 sed "s/redfab.example/$DOMAIN/" deploy/Caddyfile > /etc/caddy/Caddyfile
+# The relay's config: the site's name for its ICE hosts and CORS, the publisher's password.
+relay_password=$(sed -n 's/^RELAY_PASSWORD=//p' /etc/redfab/relay.env)
+(umask 027 && sed -e "s/redfab.example/$DOMAIN/g" -e "s/RELAY_PASSWORD/$relay_password/" deploy/mediamtx.yml > /etc/redfab/mediamtx.yml)
+chown root:redfab /etc/redfab/mediamtx.yml
 mkdir -p /var/log/redfab && chown redfab:redfab /var/log/redfab
 install -m 644 deploy/status_log.cron /etc/cron.d/redfab-status
 systemctl daemon-reload
-systemctl enable --now redfab-live.service redfab-restart.timer
+systemctl enable --now redfab-relay.service redfab-live.service redfab-restart.timer
 systemctl reload caddy || systemctl restart caddy
 
 say "done. From any machine with this checkout: node tools/smoke_remote.mjs https://$DOMAIN"
 say "logs: journalctl -u redfab-live -f; status: curl -s https://$DOMAIN/api/status"
+say "the camera (deploy/CAMERA.md): the mod's key is in /etc/redfab/camera.env, the relay's password in /etc/redfab/relay.env;"
+say "open 8189 udp and tcp in the cloud's network rules as well as here"

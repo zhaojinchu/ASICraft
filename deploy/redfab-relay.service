@@ -1,0 +1,22 @@
+[Unit]
+Description=redfab video relay: MediaMTX, the camera's stream from the user's PC to the page
+Documentation=file:///opt/redfab/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=redfab
+Group=redfab
+# The config is deploy/mediamtx.yml with the site's name and the publisher's password put in by install.sh.
+ExecStart=/usr/local/bin/mediamtx /etc/redfab/mediamtx.yml
+Restart=always
+RestartSec=5
+# A relay without transcoding needs little; this is a backstop.
+MemoryMax=512M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

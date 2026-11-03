@@ -25,6 +25,13 @@ export async function smoke(base, { log = () => {}, settleMs = 20_000 } = {}) {
         throw new Error(`not live: ${status.status} ${JSON.stringify(status.body).slice(0, 300)}`);
     }
     log(`live: ${status.body.plots.free} of ${status.body.plots.total} plots free`);
+    if (status.body.camera) {
+        // The camera (stage 14): the video relay answers through the proxy; 502 means it is down.
+        const probe = await fetch(`${base}/camera/camera/whep`, { method: 'POST', headers: { 'content-type': 'application/sdp' }, body: 'v=0\r\n' });
+        if (probe.status === 502) throw new Error('the video relay is down: the proxy answered 502 for /camera/camera/whep');
+        const c = status.body.camera;
+        log(`camera: ${c.connected ? `${c.player} connected` : 'not connected'}, stream ${c.streaming ? 'up' : 'down'}, the relay answered ${probe.status}`);
+    }
     // The browser compiles with the core too; a deployment serves it from where
     // --wasm points, which the first deploy got wrong (a 404 whose text the page
     // handed to WebAssembly.instantiate: "expected magic word").
