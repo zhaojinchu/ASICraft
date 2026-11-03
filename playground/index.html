@@ -48,7 +48,14 @@
   #terminal summary { padding: 5px 12px; cursor: pointer; color: #9aa0a8; font: 11px/1.4 system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; }
   #terminal details[open] summary { color: #e6e6e6; }
   #terminal pre { margin: 0; padding: 4px 12px 10px; white-space: pre-wrap; font: inherit; }
-  #right { display: grid; grid-template-rows: auto 1fr; min-height: 0; }
+  #right { display: grid; grid-template-rows: auto auto 1fr; min-height: 0; }
+  #camera { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; background: var(--strip); border-bottom: 1px solid var(--line); }
+  #camera-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  #camera-status { color: var(--dim); }
+  #camera-on { padding: 2px 8px; border: 1px solid var(--red); border-radius: 3px; color: var(--red); font: 12px Monocraft, monospace; }
+  #camera-turn { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+  #camera-video { display: none; width: 100%; max-height: 36vh; background: #000; border: 1px solid var(--line); }
+  #camera.playing #camera-video { display: block; }
   #panel { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; background: var(--strip); border-bottom: 1px solid var(--line); }
   #controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-height: 32px; }
   #tick { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
@@ -124,6 +131,16 @@
       </div>
       <div class="pins" id="inputs"><span class="label">inputs</span></div>
       <div class="pins" id="outputs"><span class="label">outputs</span></div>
+    </div>
+    <div id="camera" hidden>
+      <div id="camera-bar">
+        <span id="camera-status">camera off</span>
+        <span id="camera-on" hidden>on camera</span>
+        <button id="camera-play" title="watch the game itself: the camera account's view, streamed live">Play</button>
+        <button id="drive" disabled title="move the camera's character with W A S D, space and shift; drag the video to look">Take the camera</button>
+        <span id="camera-turn"></span>
+      </div>
+      <video id="camera-video" autoplay playsinline muted></video>
     </div>
     <div id="view">
       <span id="mode" hidden>simulated here</span>

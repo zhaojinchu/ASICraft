@@ -7,6 +7,7 @@
 // blocks instead.
 
 import { View } from './view.js';
+import { createCameraPanel } from './camera.js';
 import { LIMITS, detectTop, nameFor } from './compile.js';
 
 // The designs under designs/, served alongside the page.
@@ -42,6 +43,8 @@ const releaseButton = el('release');
 const examples = el('examples');
 
 const view = new View(el('view'));
+// The camera: the game itself, streamed; shown only when the backend has one.
+const camera = createCameraPanel({ panel: el('camera'), video: el('camera-video'), status: el('camera-status'), play: el('camera-play'), drive: el('drive'), turn: el('camera-turn'), on: el('camera-on') });
 
 // The limits the page enforces or shows; the live backend adds its plot size.
 const limits = { ...LIMITS, plotSize: null };
@@ -656,6 +659,8 @@ function connectLive() {
             setStatus(`Live on the server at plot ${livePlot.plot}${leverPacing(m.levers || livePlot.levers)}.`, 'ok');
             setMode(`live in the game, plot ${livePlot.plot}`, true);
         }
+        // The camera's answers (taking it, a turn, its end) go to the panel.
+        if (m.drive !== undefined || (m.ok === false && /driv|camera/.test(m.error ?? ''))) camera.receive(m);
         // A lever change asked for before its slot goes out at the tick the server names.
         if (m.ok === true && m.queued) setStatus(`Lever ${m.set} queued for tick ${m.tick}, the next slot its timing allows.`, 'ok');
         if (m.state === 'released') {
@@ -669,6 +674,12 @@ function connectLive() {
     liveSocket.onclose = () => {
         if (mode === 'live') setStatus('The connection to the server closed.', 'bad');
     };
+    const socket = liveSocket;
+    camera.attach((message) => {
+        if (socket.readyState !== WebSocket.OPEN) return false;
+        socket.send(JSON.stringify(message));
+        return true;
+    }, livePlot.plot);
 }
 
 /// Leaves live mode; the plot goes back to the server unless it already took
@@ -683,6 +694,7 @@ function leaveLive({ release = true } = {}) {
     livePlot = null;
     mode = 'sim';
     releaseButton.hidden = true;
+    camera.attach(null, null);
     if (plot && release) {
         // keepalive: the request completes even when the page is going away.
         return fetch(`/api/plots/${plot.plot}?token=${plot.token}`, { method: 'DELETE', keepalive: true }).catch(() => {});
@@ -776,6 +788,7 @@ async function downloadDesign() {
 
 // The live button appears, as the main action, only when the page is served by the live backend.
 fetch('/api/status').then((r) => (r.ok ? r.json() : null)).then((s) => {
+    camera.init(s?.camera ?? null);
     if (!s?.live) return;
     liveButton.hidden = false;
     liveButton.classList.add('primary');
@@ -911,4 +924,5 @@ window.redfab = {
     get mode() { return mode; },
     get livePlot() { return livePlot; },
     get liveTick() { return liveTick; },
+    camera,
 };
