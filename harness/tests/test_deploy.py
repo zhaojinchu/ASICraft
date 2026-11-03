@@ -121,3 +121,12 @@ def test_the_setup_script_has_a_server_mode_without_the_development_tools():
     assert setup.count("if [ $SERVER = 0 ]; then") == 3
     # The JDK, the server jar, Fabric and the Node packages are not.
     assert "npm ci" in setup
+    # --client fetches the official client jar, for compiling the camera mod here only (stage 14).
+    assert "--client" in setup.split("set -euo pipefail")[0], "the usage header lists --client"
+    assert "--client) CLIENT=1" in setup
+    assert "if [ $CLIENT = 1 ]; then" in setup and "MC_CLIENT_URL" in setup and "MC_CLIENT_SHA1" in setup
+    versions = (ROOT / "versions.env").read_text()
+    assert re.search(r"^MC_CLIENT_URL=https://piston-data\.mojang\.com/v1/objects/[0-9a-f]{40}/client\.jar$", versions, re.M)
+    assert re.search(r"^MC_CLIENT_SHA1=[0-9a-f]{40}$", versions, re.M)
+    build = (ROOT / "tools" / "build_mod.sh").read_text()
+    assert 'CLIENT_JAR=.tools/mc/client-$MC_VERSION.jar' in build, "the mod build looks for the jar where setup.sh --client puts it"
