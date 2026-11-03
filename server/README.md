@@ -6,6 +6,7 @@ blocks instead of its own simulation. Levers on the page reach probe blocks
 in the world; nothing else from a browser ever reaches the game.
 
     node server/live.mjs [--port 8766] [--host 127.0.0.1] [--plots 8] [--run-dir build/mc/live] [--trust-proxy]
+                         [--wasm PATH] [--camera-key KEY] [--relay-api URL]
 
 That starts a Fabric server with the observer mod (`tools/setup.sh` and
 `tools/build_mod.sh` first), then serves the page at http://127.0.0.1:8766/.
@@ -128,6 +129,39 @@ every 15 s until it clears. Viewers are capped per plot (16) and per address
 (8), and a viewer that stops reading is dropped once 256 KB are waiting for
 it. `/live` needs an explicit plot number and the page's origin.
 
+## The camera
+
+With `--camera-key KEY` (or `REDFAB_CAMERA_KEY` in the environment) the
+backend takes one more socket, `/camera?key=KEY`: the camera mod
+(`mod-camera/`) running in the user's own game client on their PC, joined to
+the server through an SSH tunnel as a spectator, whose view OBS streams to a
+relay on the box and the page plays (stage 14 of `docs/PLAN.md`;
+`server/camera.mjs`). The mod says `{"hello": "redfab-camera", "player":
+NAME}`; the backend runs `gamemode spectator NAME` once and answers
+`{"hello": "redfab-live", "frame": ...}`. From then on it sends the mod where
+to look: `{"frame": {"plot": N, "origin": [x, y, z], "size": [sx, sy, sz]}}`
+on every placement and lever change while nobody drives, and a driver's
+inputs, `{"drive": {"move": [x, y, z], "look": [yaw, pitch], "plot": N,
+"owner": true|false}}`, as they come. One mod at a time (a second is refused
+with 409); the wrong key is 403; without a key there is no socket (404).
+
+Driving is asked for on a plot's `/live` socket: `{"drive": "take"}`,
+`{"drive": "release"}`, or `{"drive": {"move": [x, y, z], "look": [yaw,
+pitch]}}` with the move's numbers from -1 to 1 and the look in degrees. The
+plot's owner (the token holder) drives at once and for as long as the plot is
+theirs, taking the camera from whoever has it (who goes to the head of the
+queue); any other viewer gets a 60-second turn when the camera is free, or a
+place in the queue (`{"drive": "queued", "position": P}`); ten seconds without
+input end a turn; a turn ends with `{"drive": "over", "why": ...}` and the
+next in the queue hears `{"drive": "yours", "seconds": S}` (`null` for the
+owner); when nobody holds it, the automatic camera frames the plot last
+placed or touched again. An input from a viewer not driving is refused with
+`not driving`; a malformed one with what a drive message is. `GET /api/status`
+carries `camera`: `connected`, `player`, `driver` (`{plot, owner}` or null),
+`queue`, `plot` (the one framed) and `streaming`, which `--relay-api URL`
+(the relay's API on loopback) answers by asking whether the `camera` path is
+being published, every five seconds; without a relay API it is null.
+
 ## When the game goes wrong
 
 `GET /api/status` says `live: false` as soon as the stream is older than five
@@ -163,3 +197,5 @@ travels there); a failing request is logged by method and path alone.
   and memory limits, behind a cache keyed by the source's hash.
 - `rcon.mjs`, `ws.mjs`: the RCON client (re-dials) and a small WebSocket
   server (with backpressure), no dependencies.
+- `camera.mjs`: the camera mod's socket, the automatic framing, the drive
+  relay and the turn policy, and the relay's status (see The camera above).

@@ -1538,14 +1538,17 @@ test('driving: the plot owner takes the camera at once, a viewer waits in a queu
         await owner.next((m) => m.drive === 'yours');
         await api(base, `/api/plots/${plot.plot}?token=${plot.token}`, { method: 'DELETE' });
         await waitFor(async () => (await api(base, '/api/status')).body.camera.driver === null);
-        // When the mod goes, the driver is told, and taking the camera without one is refused.
-        other.send({ drive: 'take' });
-        await other.next((m) => m.drive === 'yours');
+        // (A release closes the plot's sockets, the guests' included.) When the mod goes, the
+        // driver is told, and taking the camera without one is refused.
+        const later = await livePlot(base, wsBase, world, 'nor2');
+        const last = await guestOf(wsBase, later.plot);
+        last.send({ drive: 'take' });
+        await last.next((m) => m.drive === 'yours');
         mod.close();
-        const gone = await other.next((m) => m.drive === 'over', 5000);
+        const gone = await last.next((m) => m.drive === 'over', 5000);
         assert.match(gone.why, /camera/);
-        other.send({ drive: 'take' });
-        const none = await other.next((m) => m.ok === false);
+        last.send({ drive: 'take' });
+        const none = await last.next((m) => m.ok === false);
         assert.match(none.error, /no camera/);
     } finally {
         await backend.close();
