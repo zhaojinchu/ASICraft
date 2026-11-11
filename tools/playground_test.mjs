@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
+import zlib from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
@@ -14,7 +16,7 @@ import { runYosys } from '@yowasp/yosys';
 import { loadCore } from '../playground/core.js';
 import { compile, countCells, detectTop, explain, LIMITS, moduleNames, nameFor } from '../playground/compile.js';
 import { buildWasm, root, wasmPath as wasm } from './common.mjs';
-import { OPENING, PACKAGES, cacheControl, contentSecurityPolicy, prepareOpening, resolve, serve } from './playground_serve.mjs';
+import { OPENING, PACKAGES, PRECOMPRESS_MIN_BYTES, cacheControl, contentSecurityPolicy, prepareOpening, resolve, serve } from './playground_serve.mjs';
 
 // REDFAB_NO_BUILD=1 skips the cargo builds and uses the core and the CLI as
 // last built, to iterate on the page while the crates are being worked on.
@@ -238,8 +240,7 @@ test('the dev server survives a malformed URL and serves nothing outside its all
         const page = await fetch(`${base}/`);
         assert.equal(page.status, 200, 'the server is still up after the malformed request');
         const html = await page.text();
-        assert.match(html, /NOT AN OFFICIAL MINECRAFT PRODUCT/);
-        assert.match(html, /kept only as the placed circuit and its recording while the plot is yours/, 'the footer says what happens to a submitted source');
+        assert.match(html, /<footer>NOT AN OFFICIAL MINECRAFT PRODUCT\. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT\.<\/footer>/, 'the footer is the notice Mojang requires, and nothing else');
         assert.equal((await fetch(`${base}/node_modules/puppeteer-core/package.json`)).status, 404);
         assert.equal((await fetch(`${base}/pkg/puppeteer-core@1.0.0/package.json`)).status, 404);
         assert.equal((await fetch(`${base}/pkg/three@0.0.0/package.json`)).status, 200, 'the version in the path is a cache key only');
@@ -307,6 +308,63 @@ test('the dev server lets the browser keep the packages and the core, never the 
         server.close();
     }
     assert.equal(cacheControl('/pkg/x@1/y.js?q=1'), 'public, max-age=31536000, immutable');
+});
+
+/// A GET with an Accept-Encoding, the bytes as they cross the wire (fetch would decode them).
+function rawGet(url, acceptEncoding) {
+    return new Promise((ok, fail) => {
+        http.get(url, { headers: { 'accept-encoding': acceptEncoding } }, (res) => {
+            const chunks = [];
+            res.on('data', (c) => chunks.push(c));
+            res.on('end', () => ok({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+        }).on('error', fail);
+    });
+}
+
+test('the big package files go out precompressed at the strongest settings once made, and raw meanwhile', async () => {
+    // Found measuring the deployed page, 2026-11-11: the proxy's on-the-fly zstd sent the Yosys core as
+    // 14.3 MB and its resources tar uncompressed, 10.6 MB; made once at brotli 11 they are 9.5 and 0.4 MB.
+    const path = '/pkg/@yowasp/yosys@0.68.1207/gen/yosys-resources.0.tar';
+    const raw = readFileSync(join(root, 'node_modules/@yowasp/yosys/gen/yosys-resources.0.tar'));
+    assert.ok(raw.length >= PRECOMPRESS_MIN_BYTES, 'the tar is big enough to be precompressed');
+    const { server, port } = await serve(0);
+    try {
+        const url = `http://127.0.0.1:${port}${path}`;
+        const first = await rawGet(url, 'br');
+        assert.equal(first.headers.vary, 'Accept-Encoding');
+        assert.equal(first.headers['cache-control'], 'public, max-age=31536000, immutable');
+        // The first request starts the variants (unless an earlier run left them); the raw file serves meanwhile.
+        if (!first.headers['content-encoding']) assert.ok(first.body.equals(raw), 'the raw file served while the variants are made');
+        // The variants are made one after another; each is served once it is whole.
+        const until = async (accept, encoding) => {
+            let reply = await rawGet(url, accept);
+            for (let i = 0; i < 240 && reply.headers['content-encoding'] !== encoding; i++) {
+                await new Promise((r) => setTimeout(r, 250));
+                reply = await rawGet(url, accept);
+            }
+            return reply;
+        };
+        const br = await until('gzip, deflate, br, zstd', 'br');
+        assert.equal(br.headers['content-encoding'], 'br', 'brotli, the smallest, when the client takes it');
+        assert.ok(zlib.brotliDecompressSync(br.body).equals(raw), 'the brotli variant decodes to the file');
+        assert.ok(br.body.length < raw.length / 10, `brotli 11 left the tar at ${br.body.length} bytes`);
+        const zst = await until('gzip, zstd', 'zstd');
+        assert.equal(zst.headers['content-encoding'], 'zstd');
+        assert.ok(zlib.zstdDecompressSync(zst.body).equals(raw), 'the zstd variant decodes to the file');
+        const gz = await until('br;q=0, gzip', 'gzip');
+        assert.equal(gz.headers['content-encoding'], 'gzip', 'an encoding the client refuses with q=0 is not sent');
+        assert.ok(zlib.gunzipSync(gz.body).equals(raw), 'the gzip variant decodes to the file');
+        const plain = await rawGet(url, 'identity');
+        assert.equal(plain.headers['content-encoding'], undefined);
+        assert.ok(plain.body.equals(raw), 'a client that takes none gets the file');
+        assert.equal(new Set([br, zst, gz, plain].map((r) => r.headers.etag)).size, 4, 'each encoding has its own ETag');
+        // A small package file and anything outside /pkg go as they are, for the proxy to compress.
+        const small = await rawGet(`http://127.0.0.1:${port}/pkg/three@0.0.0/package.json`, 'br');
+        assert.equal(small.headers['content-encoding'], undefined);
+        assert.equal((await rawGet(`http://127.0.0.1:${port}/app.js`, 'br')).headers['content-encoding'], undefined);
+    } finally {
+        server.close();
+    }
 });
 
 // --- the page a visitor meets: the opening circuit, the font, the compiler loaded late
