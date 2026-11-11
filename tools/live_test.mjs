@@ -21,7 +21,7 @@ import { loadCore } from '../playground/core.js';
 import { EXAMPLES, LIMITS } from '../playground/compile.js';
 import { DEFAULTS, cliOptions, createLive } from '../server/live.mjs';
 import { smoke } from './smoke_remote.mjs';
-import { GAMERULES, LIVE_FLOOR_Y, LIVE_GROUND, MOTD, PROFILE_FILE, javaArgs, javaPath, killLeftover, observe, offlineUuid, requireEula, serverProperties, writeWhitelist } from '../server/minecraft.mjs';
+import { GAMERULES, LIVE_FLOOR_Y, LIVE_GAMERULES, LIVE_GROUND, MOTD, PROFILE_FILE, javaArgs, javaPath, killLeftover, observe, offlineUuid, requireEula, serverProperties, writeWhitelist } from '../server/minecraft.mjs';
 import { Rcon } from '../server/rcon.mjs';
 import { acceptWebSocket } from '../server/ws.mjs';
 import { buildWasm } from './common.mjs';
@@ -1173,6 +1173,11 @@ test('the server configuration is the shared profile plus the backend\'s own dif
     const profile = JSON.parse(readFileSync(PROFILE_FILE, 'utf8'));
     assert.deepEqual(GAMERULES, profile.gamerules, 'the gamerules are the profile\'s, the same the harness sets');
     assert.equal(Object.keys(GAMERULES).length, 14);
+    // The backend's own rule: no movement check, since the camera glides between plots faster than a
+    // player may move and the server refused it 116 times in one session, holding the player (and the
+    // chunks it sends) at the first plot (2026-11-11). Only the camera joins, through the tunnel.
+    assert.deepEqual(LIVE_GAMERULES, { player_movement_check: 'false' });
+    assert.ok(Object.keys(LIVE_GAMERULES).every((rule) => !(rule in GAMERULES)), 'a live-only rule is in the shared profile');
     const written = serverProperties({ gamePort: 25565, rconPort: 25575, password: 'hunter2' });
     // The one profile value the backend changes: the camera's view, 16 chunks where the profile's 4 cut
     // every design short of its far edge (seen on the deployed box's camera, 2026-11-11).
