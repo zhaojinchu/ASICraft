@@ -33,6 +33,12 @@ export const MOTD = 'redfab live playground';
 // The live world's flat layers, as server.properties writes them (colons escaped): air up to
 // y = 59, white concrete at y = 60, the void's biome. LIVE_FLOOR_Y is that floor's height.
 export const LIVE_FLOOR_Y = 60;
+// The camera glides between plots 512 blocks apart faster than the game lets a player move
+// (about 10 blocks a tick), and the server refused every such move ("moved too quickly"),
+// keeping the player where it was and the chunks it sends there, so the camera could show
+// no plot but the first, and each refusal snapped the picture back for a frame. The only
+// player is the camera, through the tunnel and the whitelist, so the check is off here.
+export const LIVE_GAMERULES = { player_movement_check: 'false' };
 export const LIVE_GROUND = '{"layers"\\:[{"block"\\:"minecraft\\:air","height"\\:124},{"block"\\:"minecraft\\:white_concrete","height"\\:1}],"biome"\\:"minecraft\\:the_void"}';
 const FILL_LIMIT = 32_768; // blocks per fill command, the game's default limit
 
@@ -343,12 +349,17 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
         const reply = await rcon.command(`gamerule ${rule} ${value}`);
         if (!reply.includes('is now set to')) throw new Error(`gamerule ${rule}: ${reply}`);
     }
-    // Plot clears are big fills; the harness never fills past the game's default, so this is the backend's alone.
     // Time stands still (advance_time is off), but a new world stands still at sunrise: noon,
     // for the camera's even light. The harness never looks, so this is the backend's alone.
     const noon = await rcon.command('time set noon');
     // 26.3 answers "Set minecraft:overworld to time marker minecraft:noon"; anything else is logged.
     if (!/set the time|time marker minecraft:noon/i.test(noon)) log(`time set noon: ${noon.trim()}`);
+    // The backend's own rules (LIVE_GAMERULES), which the harness has no players to need.
+    for (const [rule, value] of Object.entries(LIVE_GAMERULES)) {
+        const reply = await rcon.command(`gamerule ${rule} ${value}`);
+        if (!reply.includes('is now set to')) log(`gamerule ${rule}: ${reply.trim()}`);
+    }
+    // Plot clears are big fills; the harness never fills past the game's default, so this is the backend's alone.
     const limitReply = await rcon.command(`gamerule max_block_modifications ${PROFILE.max_block_modifications}`);
     const fillLimit = limitReply.includes('is now set to') ? PROFILE.max_block_modifications : FILL_LIMIT;
     if (fillLimit === FILL_LIMIT) log(`fills stay under ${FILL_LIMIT} blocks (${limitReply.trim()})`);
