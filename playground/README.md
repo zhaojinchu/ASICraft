@@ -79,7 +79,14 @@ Files:
   machine stretches time but never shortens a period: at rest through the
   first period, then active from each period's start for `high` ticks, the
   convention the native cycle protocol uses, and Pause and Run inside a pulse
-  keep the level. Click a lever in the view or its button in the panel to
+  keep the level. Manual clock hands the clock lever to the visitor: each
+  click flips it, and a flip that comes too soon for the design's timing (the
+  pulse's `high` ticks, the period since the last active edge, the inputs'
+  setup since their last change) waits, dashed, and lands the tick it is
+  safe; inputs then move once the hold time after an active edge is out.
+  Auto clock gives the clock back, after the pulse has had its ticks and a
+  full period at rest. In the browser only: on the server, the server drives
+  the clock. Click a lever in the view or its button in the panel to
   flip it; what repowers at once is recoloured at once. On a clocked design
   a click waits for the cycle's input window (`input_change_at` after the
   edge, the report's rule and what the server does in live mode): the button
