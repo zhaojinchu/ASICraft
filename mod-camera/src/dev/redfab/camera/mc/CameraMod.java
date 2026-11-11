@@ -2,12 +2,14 @@
 // spectator where the backend says. Started with
 // -Dredfab.camera.url=wss://NAME/camera?key=KEY it connects to the backend
 // (dev.redfab.camera.Backend) with the launcher's player name, and from then
-// on, every client tick (MinecraftMixin): a driver's input moves and turns the
-// character in its own frame; with no input for a couple of seconds the
-// automatic camera glides to the framing pose above the plot the backend
-// last named and orbits it slowly. The position is set outright each tick,
-// so the keyboard at the PC does nothing, and the character never leaves the
-// plots' area. Without the property the mod loads and does nothing.
+// on, every client tick (MinecraftMixin): while a turn is on, a driver's input
+// moves and turns the character in its own frame and the camera holds between
+// inputs; otherwise the automatic camera glides to the framing pose above the
+// plot the backend last named and orbits it slowly. The position is set
+// outright each tick, so the keyboard at the PC does nothing, and the
+// character never leaves the plots' area. Out of the world (the server
+// restarted under it) it joins again on its own. Without the property the mod
+// loads and does nothing.
 package dev.redfab.camera.mc;
 
 import java.net.URI;
@@ -19,6 +21,10 @@ import dev.redfab.camera.CameraMath;
 import dev.redfab.camera.CameraMath.Pose;
 import net.fabricmc.api.ClientModInitializer;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.ConnectScreen;
+import net.minecraft.client.gui.screens.TitleScreen;
+import net.minecraft.client.multiplayer.ServerData;
+import net.minecraft.client.multiplayer.resolver.ServerAddress;
 import net.minecraft.client.player.LocalPlayer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -38,6 +44,12 @@ public final class CameraMod implements ClientModInitializer {
     /// that says nothing of turns. One that does (`turn`) keeps the camera still for the whole turn:
     /// a driver who stops to look must not see it glide off two seconds later.
     static final int HANDS_OFF_TICKS = 40;
+    /// The server the game joins through the tunnel, and how long it stays out of the world (and
+    /// waits between tries) before it joins again: a restart of the backend, weekly or after a
+    /// deploy, left the game on "Connection Lost" and the stream showing it until the PC's 04:00
+    /// restart.
+    static final String SERVER = System.getProperty("redfab.camera.server", "localhost:25565");
+    static final int REJOIN_TICKS = 200;
 
     record Frame(int plot, int[] origin, int[] size) {}
 
@@ -61,6 +73,8 @@ public final class CameraMod implements ClientModInitializer {
     private static long lastDriveTick = Long.MIN_VALUE;
     private static boolean turnKnown; // the backend speaks of turns
     private static boolean manual; // a turn is on: the camera stays where the driver leaves it
+    private static long outSince = -1; // the tick the game left the world, or -1 while in it
+    private static long lastJoin = Long.MIN_VALUE / 2;
 
     @Override
     public void onInitializeClient() {
@@ -101,6 +115,20 @@ public final class CameraMod implements ClientModInitializer {
             LOGGER.info("connecting to the backend as {}", player);
             backend.start();
         }
+        // Out of the world while the backend answers (so the game is up behind it), and not already
+        // connecting or loading: join again, every REJOIN_TICKS until it is in.
+        if (mc.level == null) {
+            if (outSince < 0) outSince = tick;
+            boolean busy = mc.gui.screen() instanceof ConnectScreen || mc.gui.overlay() != null;
+            if (connected && !busy && tick - outSince >= REJOIN_TICKS && tick - lastJoin >= REJOIN_TICKS) {
+                lastJoin = tick;
+                LOGGER.info("out of the world: joining {} again", SERVER);
+                ConnectScreen.startConnecting(new TitleScreen(), mc, ServerAddress.parseString(SERVER), new ServerData("redfab", SERVER, ServerData.Type.OTHER), false, null);
+            }
+        } else {
+            outSince = -1;
+        }
+
         LocalPlayer player = mc.player;
         if (player == null || mc.level == null || !player.isSpectator()) {
             pose = null; // the next pose starts from wherever the character is

@@ -27,6 +27,11 @@ tick:
   seconds after the last input.)
 - The position is set outright every tick, so the keyboard at the PC does
   nothing, and it is kept over the plots' area.
+- Out of the world for ten seconds while the backend answers (the server
+  restarted, weekly or after a deploy), the game joins `localhost:25565`
+  again (`-Dredfab.camera.server` names another), and tries every ten
+  seconds until it is in, so the stream never sits on "Connection Lost"
+  until the PC's 04:00 restart.
 
 The HUD is not drawn while the mod is the camera (the property is set): no
 crosshair, chat or hotbar over the circuits, as F1 would do without touching
