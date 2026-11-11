@@ -8,7 +8,8 @@ stream the game itself and let visitors drive the camera.
 Started with `-Dredfab.camera.url=wss://NAME/camera?key=KEY` in the launcher
 profile's JVM arguments, it connects outbound to the backend's `/camera`
 socket with the launcher's player name (`server/README.md`, "The camera");
-the backend puts the player in spectator mode and whitelists it. Without the
+the backend whitelists the player, and the server makes it a spectator as it
+joins. Without the
 property the mod loads and does nothing. Then, at the end of every client
 tick:
 

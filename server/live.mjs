@@ -301,10 +301,10 @@ export async function createLive(options) {
     server.on('upgrade', (req, socket, head) => {
         const url = new URL(req.url, 'http://localhost');
         if (url.pathname === '/camera') {
-            // The camera mod, from the user's PC, with the shared key; one at a time.
+            // The camera mod, from the user's PC, with the shared key; a newer one replaces the
+            // one connected (server/camera.mjs says why).
             if (!camera) return refuse(socket, 404, 'Not Found');
             if (url.searchParams.get('key') !== opts.cameraKey) return refuse(socket, 403, 'Forbidden');
-            if (camera.connected) return refuse(socket, 409, 'Conflict');
             const connection = acceptWebSocket(req, socket, head, { maxBuffered: opts.viewers.maxBufferedBytes });
             if (connection) camera.attach(connection);
             return undefined;

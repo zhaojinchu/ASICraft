@@ -110,7 +110,7 @@ export function createCamera({ plots, world, log = () => {}, relayApi = null, ..
         },
 
         /// Takes the mod's socket: a hello with the player's name first, which
-        /// puts that player in spectator mode; then the frames and inputs flow to it.
+        /// whitelists that player; then the frames and inputs flow to it.
         attach(connection) {
             let player = null;
             connection.onMessage = async (text) => {
@@ -126,17 +126,26 @@ export function createCamera({ plots, world, log = () => {}, relayApi = null, ..
                         return connection.close(1008, 'no hello');
                     }
                     player = message.player;
+                    // A newer camera replaces the one connected, whose socket is closed here and
+                    // whose close then ends nothing (onClose below). A game killed without closing
+                    // its socket, as the PC's nightly restart kills it, leaves that socket open on
+                    // the box until TCP gives up, ten minutes on the deployed one; refusing the
+                    // newer camera kept the page's camera off for all of that. The key admits it.
+                    const previous = mod;
                     mod = { connection, player };
                     log(`camera: ${player} connected`);
-                    // A spectator touches nothing; whitelisted here, so that no operator has to
-                    // read the run's RCON password for it (the whitelist is on in the profile).
-                    if (typeof world.command === 'function') {
-                        for (const command of [`gamemode spectator ${player}`, `whitelist add ${player}`]) {
-                            try {
-                                await world.command(command);
-                            } catch (err) {
-                                log(`camera: ${command}: ${err.message}`);
-                            }
+                    if (previous) {
+                        log(`camera: the older connection of ${previous.player} replaced`);
+                        previous.connection.close(1000, 'replaced by a newer camera');
+                    }
+                    // Whitelisted here, so that no operator has to read the run's RCON password
+                    // for it (26.3's whitelist is on by default). The server makes it a
+                    // spectator as it joins (force-gamemode, server/minecraft.mjs).
+                    if (typeof world.allow === 'function') {
+                        try {
+                            await world.allow(player);
+                        } catch (err) {
+                            log(`camera: whitelisting ${player}: ${err.message}`);
                         }
                     }
                     send(connection, { hello: 'redfab-live', frame: framed && framed.design && !driver ? frameOf(framed) : null });

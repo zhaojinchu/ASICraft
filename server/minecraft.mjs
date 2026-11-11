@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer as createNetServer, createConnection } from 'node:net';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Rcon } from './rcon.mjs';
@@ -33,8 +33,14 @@ export const MOTD = 'redfab live playground';
 const FILL_LIMIT = 32_768; // blocks per fill command, the game's default limit
 
 /// What the backend writes to server.properties: the profile's defaults, this
-/// run's ports and password, its own motd, and online-mode off (the live
-/// server's player policy is a stage 13 decision; the harness never has players).
+/// run's ports and password, its own motd, online-mode off (the game port stays
+/// on loopback, and the camera's tunnel is the one way in), and every player a
+/// spectator. The camera is the only player; the server puts it in spectator mode
+/// as it joins, which a command cannot, since the camera's mod says hello from the
+/// title screen, before its player is in the world. The harness never has players.
+/// The camera sees 16 chunks (256 blocks) where the profile's 4 cut every design
+/// short of its far edge; the void world makes the extra chunks cheap, and the
+/// simulation distance stays the profile's, since the plots are forceloaded.
 export function serverProperties({ gamePort, rconPort, password }) {
     return {
         ...PROFILE.properties,
@@ -42,8 +48,34 @@ export function serverProperties({ gamePort, rconPort, password }) {
         'rcon.port': String(rconPort),
         'rcon.password': password,
         'online-mode': 'false',
+        'gamemode': 'spectator',
+        'force-gamemode': 'true',
+        'view-distance': '16',
         'motd': MOTD,
     };
+}
+
+/// The UUID an offline-mode server gives a player: version 3, from the MD5 of
+/// "OfflinePlayer:" and the name. `whitelist add NAME` asks Mojang for the
+/// account's own UUID instead, which an offline server never sees, so the
+/// player it lists is turned away.
+export function offlineUuid(name) {
+    const bytes = createHash('md5').update(`OfflinePlayer:${name}`, 'utf8').digest();
+    bytes[6] = (bytes[6] & 0x0f) | 0x30;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = bytes.toString('hex');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/// Puts `name` on the run's whitelist by its offline UUID, keeping the entries
+/// already there; the server reads it again on `whitelist reload`.
+export function writeWhitelist(runDir, name) {
+    const file = join(runDir, 'whitelist.json');
+    const entries = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : [];
+    const uuid = offlineUuid(name);
+    if (!entries.some((e) => e.uuid === uuid)) entries.push({ uuid, name });
+    writeFileSync(file, `${JSON.stringify(entries, null, 2)}\n`);
+    return entries;
 }
 
 /// The server's command line after the Java binary: the profile's JVM arguments, then this run's markers.
@@ -324,6 +356,12 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
             reconnectListeners.push(cb);
         },
         command: (text) => rcon.command(text),
+        /// Lets the camera's player join: its offline UUID on the whitelist, read again.
+        async allow(name) {
+            writeWhitelist(runDir, name);
+            const reply = await rcon.command('whitelist reload');
+            if (!/reloaded/i.test(reply)) throw new Error(`whitelist reload: ${reply.trim()}`);
+        },
         async forceload([[x0, , z0], [x1, , z1]]) {
             const chunksX = Math.floor(x1 / 16) - Math.floor(x0 / 16) + 1;
             const rowsPerStrip = Math.max(1, Math.floor(256 / chunksX));
