@@ -159,7 +159,10 @@ try {
         check(await page.$eval('#examples', (e) => e.value) === OPENING, 'the dropdown does not show the opening example');
         const status = await page.$eval('#status', (e) => [e.className, e.textContent]);
         // The status line says what is on show in plain words; the numbers are the result card's (asked for 2026-11-11).
-        check(status[0] === 'ok' && status[1] === `${OPENING}, running in your browser.`, `the opening status reads ${JSON.stringify(status)}`);
+        // The status is the terminal's first line, as a build tool prints it (2026-11-11: the green sentence read as generated).
+        check(status[0] === 'ok' && status[1] === `simulating ${OPENING} in the browser`, `the opening status reads ${JSON.stringify(status)}`);
+        check(await page.$eval('#status', (e) => e.parentElement.id) === 'terminal' && await page.$('#summary') === null, 'the status is not the terminal\'s first line, or the chips are back');
+        check(/^\s*export\s+world\.nbt\s+report\.txt\s+design\.json\s*$/.test(await page.$eval('#result', (e) => e.textContent)), 'the files are not labelled as exports');
         check(await page.$('#capacity') === null, 'the capacity line is back under the editor');
         // With no camera the tabs are hidden, and the circuit still fills the stage (it once collapsed to nothing).
         check(await page.$eval('#tabs', (e) => e.hidden) && await page.$eval('#view', (e) => e.getBoundingClientRect().height) > 300, 'without a camera the circuit view does not fill the stage');
@@ -201,10 +204,14 @@ try {
         if (!bytes) failures.push('the opening circuit offered no world.nbt');
         else check(bytes.equals(readFileSync(join(root, 'build/designs', OPENING, 'world.nbt'))), "the opening circuit's world.nbt differs from the native build's");
         await client.detach();
-        // The report on the page is the plain one: no placement internals, no positions, no asides.
+        // The report on the page is a timing report's: area, T_clk, t_co, slack, LEC; no placement internals,
+        // no positions, no asides (the full one is the report.txt export).
         const report = await page.$eval('#report-text', (e) => e.textContent);
-        check(report.startsWith(`${OPENING}\n`) && /^ {2}cells: \d+$/m.test(report) && /^ {2}footprint: \d+ x \d+, \d+ high$/m.test(report) && /^ {2}clock: clk, \d+ ticks a cycle, [\d.]+ s$/m.test(report) && /^ {2}outputs: count\[3:0\]$/m.test(report), `the page's report reads ${JSON.stringify(report)}`);
-        check(!/[()]|forceload|lever at|lamp at|placement|tiles:|hold slack/.test(report), `the page's report carries the full report's detail: ${JSON.stringify(report)}`);
+        const line = (key, value) => new RegExp(`^ {2}${key.padEnd(12).replace(/[[\]]/g, '\\$&')} ${value}$`, 'm').test(report);
+        check(report.startsWith(`${OPENING}, sequential, clk ↑\n`) && line('cells', '\\d+') && line('flip-flops', '4') && line('area', '\\d+ x \\d+ x \\d+')
+            && line('T_clk', '\\d+ ticks, [\\d.]+ s') && line('t_co', '\\d+ ticks') && line('slack', 'setup -?\\d+, hold -?\\d+ ticks')
+            && line('outputs', 'count\\[3:0\\]') && line('inputs', 'clk en rst'), `the page's report reads ${JSON.stringify(report)}`);
+        check(!/[()]|forceload|lever at|lamp at|placement|tiles:/.test(report), `the page's report carries the full report's detail: ${JSON.stringify(report)}`);
         // Showing intent to compile (a click into the editor) fetches the compiler ahead of the compile.
         await page.focus('#source');
         const warmStarted = Date.now();
@@ -221,7 +228,7 @@ try {
             failures.push(`${name}: compile failed: ${status.text}`);
             continue;
         }
-        check(status.text === `Built ${name}.`, `${name}: the built status reads ${JSON.stringify(status.text)}`);
+        check(new RegExp(`^built ${name} in [\\d.]+ s$`).test(status.text), `${name}: the built status reads ${JSON.stringify(status.text)}`);
         await page.evaluate(() => window.redfab.stop());
         const design = await page.evaluate(() => window.redfab.design);
         const inputs = design.inputs.map((p) => p.name);
@@ -281,15 +288,14 @@ try {
         check(rows.a?.order === 'a[3],a[2],a[1],a[0]' && rows.sum?.order === 'sum[3],sum[2],sum[1],sum[0]', `the buses are not most-significant-first: ${JSON.stringify(rows)}`);
         check(await page.$('#outputs > .lamp[data-output="cout"]') !== null && await page.$('#inputs > .lever[data-input="cin"]') !== null, 'a single-bit pin was put in a bus');
         const card = await page.evaluate(() => ({
-            summary: [...document.querySelectorAll('#summary li')].map((li) => li.textContent).join('; '),
             report: document.getElementById('report-text').textContent,
             reportOpen: document.getElementById('report-details').open,
             logOpen: document.getElementById('log-details').open,
         }));
-        check(/\b49 cells\b/.test(card.summary) && /\d+ blocks/.test(card.summary) && /\d+ x \d+/.test(card.summary), `the summary reads ${JSON.stringify(card.summary)}`);
-        check(card.report.includes('cells: 49') && card.reportOpen && !card.logOpen, `the report is ${card.reportOpen ? 'open' : 'closed'} (${card.report.includes('cells: 49') ? 'with' : 'without'} its text), the log ${card.logOpen ? 'open' : 'closed'}`);
-        check(/^ {2}outputs settle in \d+( to \d+)? ticks, [\d.]+ s at most$/m.test(card.report) && /^ {2}inputs: a\[3:0\], b\[3:0\], cin$/m.test(card.report) && /proven equal to the source/.test(card.report), `adder4's report reads ${JSON.stringify(card.report)}`);
-        console.log('adder4: the buses read 3 + 4 = 7, most significant bit first; the result card shows the numbers and the report');
+        check(/^ {2}cells {8}49$/m.test(card.report) && card.reportOpen && !card.logOpen, `the report is ${card.reportOpen ? 'open' : 'closed'} (${/cells {8}49/.test(card.report) ? 'with' : 'without'} its text), the log ${card.logOpen ? 'open' : 'closed'}`);
+        check(card.report.startsWith('adder4, combinational\n') && /^ {2}t_pd {9}(min \d+, max )?\d+ ticks, [\d.]+ s$/m.test(card.report) && /^ {2}t_in,min {5}\d+ ticks$/m.test(card.report)
+            && /^ {2}inputs {7}a\[3:0\] b\[3:0\] cin$/m.test(card.report) && /^ {2}LEC {10}proven$/m.test(card.report), `adder4's report reads ${JSON.stringify(card.report)}`);
+        console.log('adder4: the buses read 3 + 4 = 7, most significant bit first; the report gives t_pd, t_in,min and the LEC');
     }
 
     // --- a phone: nothing wider than the screen, the circuit and the levers usable by touch
@@ -361,8 +367,8 @@ try {
         await page.evaluate((t) => window.redfab.setSource(t), INV);
         check(await page.$eval('#examples', (e) => e.value) === 'custom', 'editing the source did not select the custom entry');
         const status = await compileAndWait(page);
-        const chips = await page.$$eval('#summary li', (items) => items.map((li) => li.textContent));
-        check(status.kind === 'ok' && status.text === 'Built inv.' && chips.includes('1 cells'), `inv: ${status.text}, chips ${JSON.stringify(chips)}`);
+        const invReport = await page.$eval('#report-text', (e) => e.textContent);
+        check(status.kind === 'ok' && /^built inv in [\d.]+ s$/.test(status.text) && /^ {2}cells {8}1$/m.test(invReport), `inv: ${status.text}, report ${JSON.stringify(invReport)}`);
         check(await page.evaluate(() => window.redfab.built?.top) === 'inv', 'the top module was not detected as inv');
         await page.evaluate((t) => window.redfab.setSource(t), ESCAPED);
         const escaped = await compileAndWait(page);
@@ -394,8 +400,8 @@ try {
         await loadExample(page, 'adder4');
         await page.evaluate(() => { window.redfab.limits.compileSeconds = 1; });
         const status = await compileAndWait(page);
-        check(status.kind === 'bad' && status.text === 'Compiling took longer than 1 s; stopped. Try a smaller design.', `time limit: ${JSON.stringify(status.text)}`);
-        check(status.seen.some((t) => /^Compiling adder4: (synthesizing|proving|placing and routing), \d+ s$/.test(t)), `no phase and elapsed time shown while compiling: ${JSON.stringify(status.seen)}`);
+        check(status.kind === 'bad' && status.text === 'stopped: compiling took longer than 1 s, try a smaller design', `time limit: ${JSON.stringify(status.text)}`);
+        check(status.seen.some((t) => /^compiling adder4: (synthesizing|proving|placing and routing), \d+ s$/.test(t)), `no phase and elapsed time shown while compiling: ${JSON.stringify(status.seen)}`);
         check(await page.$eval('#compile', (e) => !e.disabled), 'Compile stayed disabled after the time limit');
         await page.evaluate(() => { window.redfab.limits.compileSeconds = 90; });
         await loadExample(page, 'not1');
@@ -438,7 +444,7 @@ try {
         await open(page, errors);
         check(await page.$eval('#source', (e) => e.value) === draft, 'the draft did not survive a reload');
         check(await page.$eval('#examples', (e) => e.value) === 'custom', 'the dropdown does not show custom after a reload with a draft');
-        check(await page.evaluate(() => window.redfab.opening === 'shown') && /Your draft is in the editor/.test(await page.$eval('#status', (e) => e.textContent)), 'with a draft, the page did not open its circuit and say the draft is in the editor');
+        check(await page.evaluate(() => window.redfab.opening === 'shown') && /your draft is in the editor/.test(await page.$eval('#status', (e) => e.textContent)), 'with a draft, the page did not open its circuit and say the draft is in the editor');
         // The footer is the notice Mojang's guidelines require, and nothing else (asked for 2026-11-11).
         check(await page.$eval('footer', (e) => e.textContent.trim()) === 'NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.', 'the footer is not the Minecraft notice alone');
     }
@@ -451,7 +457,7 @@ try {
         if (status.kind !== 'ok') {
             failures.push(`counter4: compile failed: ${status.text}`);
         } else {
-            check(status.text === 'Built counter4.' && /clock clk, \d+ ticks a cycle/.test(await page.$eval('#summary', (e) => e.textContent)), `counter4: the built status reads ${JSON.stringify(status.text)}`);
+            check(/^built counter4 in [\d.]+ s$/.test(status.text) && /^ {2}T_clk {8}\d+ ticks/m.test(await page.$eval('#report-text', (e) => e.textContent)), `counter4: the built status reads ${JSON.stringify(status.text)}`);
             await page.evaluate(() => window.redfab.stop());
             const design = await page.evaluate(() => window.redfab.design);
             const seq = design.timing.sequential;
@@ -592,7 +598,7 @@ try {
         await page.click('#live');
         await sleep(300);
         const refused = await page.$eval('#status', (e) => [e.className, e.textContent]);
-        check(refused[0] === 'bad' && /^This design is \d+ by \d+ blocks; the server's plots are 16 by 16\. Not sent\.$/.test(refused[1]), `too large for the plot: ${JSON.stringify(refused)}`);
+        check(refused[0] === 'bad' && /^not sent: \d+ x \d+ blocks, the server's plots are 16 x 16$/.test(refused[1]), `too large for the plot: ${JSON.stringify(refused)}`);
         check(!requests.some((r) => r.startsWith('POST /api/submit')), 'a design too large for the plot was still submitted');
         check(await page.evaluate(() => window.redfab.design !== null && window.redfab.mode === 'sim'), 'a refused submission disturbed the local simulation');
         // The server refuses: the view and the panel are left empty.
@@ -667,7 +673,7 @@ try {
             const out = [];
             out.push(c.take());
             c.receive({ drive: 'yours', seconds: 60 });
-            out.push([pressed(), document.getElementById('camera-turn').textContent.trim(), c.driving]);
+            out.push([pressed(), document.getElementById('camera-turn').textContent.trim(), c.driving, document.getElementById('camera-status').textContent]);
             c.press('w', true);
             c.press('d', true);
             c.press('shift', true);
@@ -687,7 +693,9 @@ try {
         check(JSON.stringify(protocol[1][0]) === '["false","true"]' && /60/.test(protocol[1][1]) && protocol[1][2] === true, `after yours: ${JSON.stringify(protocol[1])}`);
         check(JSON.stringify(protocol[2]) === JSON.stringify({ drive: { move: [1, -1, 1], look: [12, -3] } }), `w, d, shift and a look give ${JSON.stringify(protocol[2])}`);
         check(protocol[3] === null, `with nothing pressed the input is ${JSON.stringify(protocol[3])}, not null`);
-        check(JSON.stringify(protocol[4][0]) === '["true","false"]' && protocol[4][1] === false && /auto view/i.test(protocol[4][2]), `after over: ${JSON.stringify(protocol[4])}`);
+        // After the turn: Auto view pressed again says it; the status drops the driving hint and adds nothing.
+        check(JSON.stringify(protocol[4][0]) === '["true","false"]' && protocol[4][1] === false && !/WASD|over|auto/i.test(protocol[4][2]), `after over: ${JSON.stringify(protocol[4])}`);
+        check(protocol[1][3] === 'WASD to move, space and shift for up and down, drag video to look', `while driving the hint reads ${JSON.stringify(protocol[1][3])}`);
         check(/2/.test(protocol[5]), `queued at 2 shows ${JSON.stringify(protocol[5])}`);
         // Run in the game: the camera takes the stage in place of the circuit, and knows the plot is yours.
         await loadExample(page, 'not1');
