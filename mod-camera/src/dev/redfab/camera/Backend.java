@@ -27,6 +27,10 @@ public final class Backend implements AutoCloseable {
         /// A driver's input: a move (right, up, forward, each -1..1), a look (yaw and pitch to add, degrees).
         void drive(double[] move, double[] look, int plot, boolean owner);
 
+        /// A turn began (true: someone drives, so the camera holds where they leave it) or ended
+        /// (false: the automatic camera takes over again).
+        void turn(boolean on);
+
         /// The backend said hello (true), or the socket went (false).
         void connected(boolean up);
     }
@@ -130,10 +134,15 @@ public final class Backend implements AutoCloseable {
             connected = true;
             listener.connected(true);
             if (m.get("frame") instanceof Map<?, ?> f) frame(f);
+            if (m.get("turn") instanceof Boolean on) listener.turn(on);
             return;
         }
         if (m.get("frame") instanceof Map<?, ?> f) {
             frame(f);
+            return;
+        }
+        if (m.get("turn") instanceof Boolean on) {
+            listener.turn(on);
             return;
         }
         if (m.get("drive") instanceof Map<?, ?> d) {

@@ -16,11 +16,15 @@ tick:
 - A driver's input (`{"drive": {"move", "look", ...}}`, ten a second while
   someone drives) turns the character by the look and moves it by the move
   in its own frame, 12 blocks a second.
-- With no input for two seconds, the automatic camera glides to the framing
-  pose above the plot the backend last named (`{"frame": ...}` on every
-  placement and lever change while nobody drives): above and south of the
-  plot's centre, facing north, looking down at 65 degrees, as near as the
-  whole plot fits the view; then it orbits the plot slowly.
+- While a turn is on (`{"turn": true}` from the backend, until `{"turn":
+  false}`), the camera stays where the driver leaves it, however long they
+  stop to look. When nobody drives, the automatic camera glides to the
+  framing pose above the plot the backend last named (`{"frame": ...}`):
+  above and south of the plot's centre, facing north, looking down at 65
+  degrees, as near as the whole plot fits the view; then it orbits the plot
+  slowly. The same plot framed again keeps its orbit where it is. (A backend
+  that says nothing of turns gets the old rule: the automatic camera two
+  seconds after the last input.)
 - The position is set outright every tick, so the keyboard at the PC does
   nothing, and it is kept over the plots' area.
 

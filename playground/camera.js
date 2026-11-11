@@ -42,14 +42,15 @@ export function createCameraPanel({ panel, video, status, auto, manual, turn }) 
     /// The plot the camera is on, and whether it is the one this page holds.
     const watching = () => (feature?.plot === null || feature?.plot === undefined ? null : { plot: feature.plot, yours: feature.plot === myPlot });
 
+    /// Only what the viewer needs: how to drive while driving, and what is wrong when something
+    /// is; nothing while the stream simply plays (the picture says it).
     function statusText() {
         if (!feature?.connected) return 'Camera offline';
-        if (feature.streaming === false) return 'Camera offline: the stream is not up';
-        if (driving) return 'You are driving: W A S D to move, space and shift for up and down, drag the video to look, Esc to stop';
+        if (feature.streaming === false) return 'Camera offline';
+        if (driving) return 'WASD to move, space and shift for up and down, drag video to look';
         if (note) return note;
         if (!playing) return 'Connecting…';
-        const on = watching();
-        return `Live from the game${on ? `, plot ${on.plot}${on.yours ? ' (yours)' : ''}` : ''}`;
+        return '';
     }
 
     const render = () => {
@@ -59,9 +60,9 @@ export function createCameraPanel({ panel, video, status, auto, manual, turn }) 
         auto.setAttribute('aria-pressed', String(!driving));
         manual.setAttribute('aria-pressed', String(driving));
         manual.disabled = !feature.connected || !canSend;
-        manual.title = canSend ? 'Drive the camera yourself: W A S D, space and shift, drag to look' : 'Run a design in the game to drive the camera';
+        manual.title = canSend ? 'Drive the camera yourself' : 'Run a design in the game to drive the camera';
         if (driving) return;
-        if (queued !== null) turn.textContent = `waiting for a turn, ${queued} in line`;
+        if (queued !== null) turn.textContent = `${queued} in line`;
         else turn.textContent = feature.driver ? 'someone else is driving' : '';
     };
 
@@ -148,7 +149,7 @@ export function createCameraPanel({ panel, video, status, auto, manual, turn }) 
     /// Stops, says why, and tries again shortly while the tab still wants the stream.
     function restart(why) {
         stop();
-        note = `Camera: ${why}; retrying`;
+        note = `Reconnecting: ${why}`;
         render();
         retry = setTimeout(() => { retry = null; settle(); }, RETRY_MS);
     }
@@ -185,10 +186,10 @@ export function createCameraPanel({ panel, video, status, auto, manual, turn }) 
             if (countdown) clearInterval(countdown);
             if (typeof m.seconds === 'number') {
                 let left = m.seconds;
-                turn.textContent = `${left} s left`;
-                countdown = setInterval(() => { left -= 1; turn.textContent = `${Math.max(left, 0)} s left`; }, 1000);
+                turn.textContent = `${left} s`;
+                countdown = setInterval(() => { left -= 1; turn.textContent = `${Math.max(left, 0)} s`; }, 1000);
             } else {
-                turn.textContent = 'yours while the plot is yours';
+                turn.textContent = '';
             }
             if (!ticker) ticker = setInterval(input, 1000 / INPUT_HZ);
         } else if (m.drive === 'queued') {
@@ -203,9 +204,9 @@ export function createCameraPanel({ panel, video, status, auto, manual, turn }) 
             if (ticker) clearInterval(ticker);
             ticker = null;
             turn.textContent = '';
-            note = `Back to auto view: ${m.why}`;
+            note = null; // the buttons say it: Auto view is pressed again
         } else if (m.ok === false && /drive|driving|camera/.test(m.error ?? '')) {
-            note = `Camera: ${m.error}`;
+            note = m.error;
         }
         render();
     }

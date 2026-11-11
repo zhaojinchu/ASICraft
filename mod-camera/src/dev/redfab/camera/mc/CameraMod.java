@@ -12,6 +12,7 @@ package dev.redfab.camera.mc;
 
 import java.net.URI;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 
 import dev.redfab.camera.Backend;
 import dev.redfab.camera.CameraMath;
@@ -33,7 +34,9 @@ public final class CameraMod implements ClientModInitializer {
     static final double APPROACH = 0.08;
     /// The idle orbit, degrees per tick (a turn in about 40 s).
     static final double ORBIT = 0.15;
-    /// Ticks without a driver's input before the automatic camera takes over again.
+    /// Ticks without a driver's input before the automatic camera takes over again, for a backend
+    /// that says nothing of turns. One that does (`turn`) keeps the camera still for the whole turn:
+    /// a driver who stops to look must not see it glide off two seconds later.
     static final int HANDS_OFF_TICKS = 40;
 
     record Frame(int plot, int[] origin, int[] size) {}
@@ -43,6 +46,7 @@ public final class CameraMod implements ClientModInitializer {
     private static Backend backend;
     private static volatile boolean connected;
     private static volatile Frame pendingFrame;
+    private static volatile Boolean pendingTurn;
     private static final ArrayDeque<Drive> drives = new ArrayDeque<>();
 
     // The client thread's own.
@@ -55,7 +59,8 @@ public final class CameraMod implements ClientModInitializer {
     private static double floorY;
     private static long tick;
     private static long lastDriveTick = Long.MIN_VALUE;
-    private static boolean lastOwner;
+    private static boolean turnKnown; // the backend speaks of turns
+    private static boolean manual; // a turn is on: the camera stays where the driver leaves it
 
     @Override
     public void onInitializeClient() {
@@ -82,8 +87,14 @@ public final class CameraMod implements ClientModInitializer {
                 }
 
                 @Override
+                public void turn(boolean on) {
+                    pendingTurn = on;
+                }
+
+                @Override
                 public void connected(boolean up) {
                     connected = up;
+                    if (!up) pendingTurn = Boolean.FALSE; // no backend, no driver: back to the automatic camera
                     LOGGER.info(up ? "connected to the backend" : "the backend went; connecting again");
                 }
             }, LOGGER::info);
@@ -101,27 +112,36 @@ public final class CameraMod implements ClientModInitializer {
         if (fresh != null) {
             pendingFrame = null;
             double aspect = mc.getWindow().getGuiScaledHeight() == 0 ? 16.0 / 9.0 : mc.getWindow().getGuiScaledWidth() / (double) mc.getWindow().getGuiScaledHeight();
+            // The same plot framed again (a lever on it moved) keeps the orbit where it is.
+            boolean same = framed != null && framed.plot() == fresh.plot() && Arrays.equals(framed.origin(), fresh.origin()) && Arrays.equals(framed.size(), fresh.size());
             framed = fresh;
             framing = CameraMath.frame(fresh.origin(), fresh.size(), aspect);
             centre = new double[] { fresh.origin()[0] + fresh.size()[0] / 2.0, fresh.origin()[1] + fresh.size()[1] / 2.0, fresh.origin()[2] + fresh.size()[2] / 2.0 };
-            angle = 0;
+            if (!same) angle = 0;
             floorY = fresh.origin()[1];
             double[] box = { fresh.origin()[0], fresh.origin()[1], fresh.origin()[2], fresh.origin()[0] + fresh.size()[0], fresh.origin()[1] + fresh.size()[1], fresh.origin()[2] + fresh.size()[2] };
             area = area == null ? box : new double[] { Math.min(area[0], box[0]), Math.min(area[1], box[1]), Math.min(area[2], box[2]), Math.max(area[3], box[3]), Math.max(area[4], box[4]), Math.max(area[5], box[5]) };
             LOGGER.info("framing plot {} at {}", fresh.plot(), framing);
         }
 
+        Boolean turn = pendingTurn;
+        if (turn != null) {
+            pendingTurn = null;
+            turnKnown = true;
+            manual = turn;
+        }
+
         Drive drive = null;
         synchronized (drives) {
             while (!drives.isEmpty()) drive = drives.poll(); // the latest input wins; they come ten a second
         }
+        boolean held = turnKnown ? manual : tick - lastDriveTick <= HANDS_OFF_TICKS;
         if (drive != null) {
             pose = CameraMath.look(pose, drive.look()[0], drive.look()[1]);
             double[] v = CameraMath.velocity(pose.yaw(), drive.move(), SPEED);
             pose = new Pose(pose.x() + v[0], pose.y() + v[1], pose.z() + v[2], pose.yaw(), pose.pitch());
             lastDriveTick = tick;
-            lastOwner = drive.owner();
-        } else if (framing != null && tick - lastDriveTick > HANDS_OFF_TICKS) {
+        } else if (framing != null && !held) {
             angle += ORBIT;
             pose = CameraMath.approach(pose, CameraMath.orbit(framing, centre, angle), APPROACH);
         }

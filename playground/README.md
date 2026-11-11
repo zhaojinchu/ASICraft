@@ -34,14 +34,18 @@ example, the pointer on Compile). Above the view, the levers and lamps: a bus
 beside it; a clocked design's clock is a lever the page drives. A badge on the
 view says what drives it (simulated here, or live in the game at a plot).
 With a camera behind the page, a Circuit and a Camera tab share the stage:
-Run in the game opens the camera, Compile the circuit. Under the editor: a
-one-line status, the numbers as chips (cells, blocks, footprint, timing, and
-a warning when it is too large for the server's plot) with the three files
-beside them, and the terminal with the report open and the raw log closed.
-The report on the page is a plain summary written from the design (cells,
-blocks, footprint, repeaters, the timing in ticks and seconds, the pins);
-the core's full report, with the placement, the lever and lamp positions and
-the `/forceload` line for a world of your own, is the report.txt download.
+Run in the game opens the camera, Compile the circuit. Under the editor: the
+three files as exports, then the terminal, whose first line is the status as
+a build tool prints it ("built not1 in 3.2 s", "live on plot 0"; red for an
+error, amber for a warning), with the report open and the raw log closed.
+The report on the page is a timing report written from the design: cells,
+flip-flops, repeaters, blocks, area, then `T_clk`, `t_co` (when the outputs
+are valid after the edge), `t_in` (the input window) and the setup and hold
+slack for a clocked design, or `t_pd` (the propagation delay, min and max)
+and `t_in,min` (the least spacing between input changes) for a combinational
+one, in game ticks of 50 ms; the pins; and `LEC`, the equivalence proof. The
+core's full report, with the placement, the lever and lamp positions and the
+`/forceload` line for a world of your own, is the report.txt export.
 White, with a redstone block's red as the accent (the title, the main action,
 a lever that is on, an error), the system font for the page and the code font
 for code and signals, Monocraft (`fonts/`, OFL 1.1) for the title; on a phone
@@ -53,8 +57,8 @@ field. Compile with the button or Ctrl+Enter (Cmd+Enter on a Mac). Edited
 source turns the dropdown to `custom` and is kept in the browser's local
 storage across reloads (the page still opens with the counter, and says the
 draft is in the editor); switching back to an example asks first. The
-status line shows the phase and the elapsed seconds while compiling, then
-"Built NAME." or why not; about 100 cells compile inside the 90 s limit
+status shows the phase and the elapsed seconds while compiling, then "built
+NAME in N s" or why not; about 100 cells compile inside the 90 s limit
 (`LIMITS.measuredCells` in `compile.js`, measured on 2026-10-07 and held to
 by a test that compiles an 8-bit adder through the WebAssembly pipeline; 150
 take 2 to 3 minutes natively, which the limit cuts off). A design too large
@@ -92,8 +96,9 @@ Files:
   its own first). Two buttons: Auto view, where the backend frames the plots,
   and Manual control, offered while a plot is yours, where the keys (W A S D,
   space, shift, a drag on the video to look) drive the character through the
-  plot's live socket, as `server/README.md` describes. The status names the
-  plot on camera, "(yours)" when it is the one you hold.
+  plot's live socket, as `server/README.md` describes; the camera holds where
+  you leave it until you press Auto view. The bar says only how to drive
+  while driving, and what is wrong when something is.
 - `compile.js`: the pipeline, the same as `redfab build`: synthesis, the
   equivalence proof, then placement, routing and the checks in the core. Also
   the limits: source size, cells, blocks, and the compile time the page

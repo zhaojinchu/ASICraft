@@ -23,7 +23,7 @@ differences go on top, explicitly: its motd, `online-mode=false`,
 `gamemode=spectator` with `force-gamemode=true` (the camera's player is the
 only one, and the server makes it a spectator as it joins), `view-distance`
 16 in place of the profile's 4 (the camera sees 256 blocks; the simulation
-distance stays 4, since the plots are forceloaded), a floor of black concrete
+distance stays 4, since the plots are forceloaded), a floor of white concrete
 at y = 60 in place of the void (the plots sit at y = 64, so it touches none),
 noon set once at start (time stands still from the profile, but a new world
 stands still at sunrise), and the
@@ -155,7 +155,11 @@ game's port is a free one at every start unless `--game-port N` fixes it
 (still on loopback), which a deployment with a camera does, so the PC's
 tunnel can name it. From then on it sends the mod where
 to look: `{"frame": {"plot": N, "origin": [x, y, z], "size": [sx, sy, sz]}}`
-on every placement and lever change while nobody drives, and a driver's
+on every placement, and on a lever change on another plot than the one on
+camera, while nobody drives (framing the same plot again restarted the
+orbit at every lever); `{"turn": true}` when a turn begins and `{"turn":
+false}` when the last one ends, so the mod holds the camera where the driver
+leaves it for the whole turn (the hello carries `turn` too); and a driver's
 inputs, `{"drive": {"move": [x, y, z], "look": [yaw, pitch], "plot": N,
 "owner": true|false}}`, as they come. One mod at a time: a newer one's hello
 replaces the one connected, whose socket the backend closes (a game killed
@@ -169,7 +173,8 @@ plot's owner (the token holder) drives at once and for as long as the plot is
 theirs, taking the camera from whoever has it (who goes to the head of the
 queue); any other viewer gets a 60-second turn when the camera is free, or a
 place in the queue (`{"drive": "queued", "position": P}`); ten seconds without
-input end a turn; a turn ends with `{"drive": "over", "why": ...}` and the
+input end a visitor's turn (the owner keeps theirs until they give it back);
+a turn ends with `{"drive": "over", "why": ...}` and the
 next in the queue hears `{"drive": "yours", "seconds": S}` (`null` for the
 owner); when nobody holds it, the automatic camera frames the plot last
 placed or touched again. An input from a viewer not driving is refused with

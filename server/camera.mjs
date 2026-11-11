@@ -60,10 +60,14 @@ export function createCamera({ plots, world, log = () => {}, relayApi = null, ..
         send(mod.connection, { frame: frameOf(framed) });
     };
 
+    // The mod is told when a turn begins and ends, so it holds the camera where the driver
+    // leaves it for the whole turn: it used to glide back to the automatic camera two seconds
+    // after the last key, under a driver who had only stopped to look.
     const startTurn = (viewer, plot, owner) => {
         const now = Date.now();
         driver = { viewer, plot: plot.index, held: plot, owner, until: owner ? null : now + opts.turnSeconds * 1000, last: now };
         send(viewer, { drive: 'yours', seconds: owner ? null : opts.turnSeconds });
+        if (mod) send(mod.connection, { turn: true });
     };
 
     /// Ends the turn in hand, passes the camera on, or lets the automatic camera resume.
@@ -77,6 +81,7 @@ export function createCamera({ plots, world, log = () => {}, relayApi = null, ..
             startTurn(next.viewer, next.plot, false);
             return;
         }
+        if (mod) send(mod.connection, { turn: false });
         frame();
     };
 
@@ -86,7 +91,8 @@ export function createCamera({ plots, world, log = () => {}, relayApi = null, ..
         if (!driver) return;
         const now = Date.now();
         if (driver.until !== null && now >= driver.until) endTurn('time: the turn is over');
-        else if (now - driver.last >= opts.idleSeconds * 1000) endTurn('idle: no input for a while');
+        // A visitor's idle turn goes to whoever waits; the plot's owner keeps theirs until they give it back.
+        else if (!driver.owner && now - driver.last >= opts.idleSeconds * 1000) endTurn('idle: no input for a while');
         else if (driver.owner && !driver.held.viewers.has(driver.viewer)) endTurn('the plot was released');
     }, opts.tickMs);
 
@@ -148,7 +154,7 @@ export function createCamera({ plots, world, log = () => {}, relayApi = null, ..
                             log(`camera: whitelisting ${player}: ${err.message}`);
                         }
                     }
-                    send(connection, { hello: 'redfab-live', frame: framed && framed.design && !driver ? frameOf(framed) : null });
+                    send(connection, { hello: 'redfab-live', frame: framed && framed.design && !driver ? frameOf(framed) : null, turn: driver !== null });
                     return undefined;
                 }
                 return send(connection, { error: 'the camera sends nothing after its hello' });
@@ -168,8 +174,10 @@ export function createCamera({ plots, world, log = () => {}, relayApi = null, ..
             frame();
         },
 
-        /// A lever moved on a plot: the automatic camera goes there.
+        /// A lever moved on a plot: the automatic camera goes there, unless it is there already
+        /// (framing it again restarted the orbit at every lever).
         touched(plot) {
+            if (framed === plot) return;
             framed = plot;
             frame();
         },

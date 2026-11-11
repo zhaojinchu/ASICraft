@@ -31,9 +31,9 @@ export const PROFILE = JSON.parse(readFileSync(PROFILE_FILE, 'utf8'));
 export const GAMERULES = PROFILE.gamerules;
 export const MOTD = 'redfab live playground';
 // The live world's flat layers, as server.properties writes them (colons escaped): air up to
-// y = 59, black concrete at y = 60, the void's biome. LIVE_FLOOR_Y is that floor's height.
+// y = 59, white concrete at y = 60, the void's biome. LIVE_FLOOR_Y is that floor's height.
 export const LIVE_FLOOR_Y = 60;
-export const LIVE_GROUND = '{"layers"\\:[{"block"\\:"minecraft\\:air","height"\\:124},{"block"\\:"minecraft\\:black_concrete","height"\\:1}],"biome"\\:"minecraft\\:the_void"}';
+export const LIVE_GROUND = '{"layers"\\:[{"block"\\:"minecraft\\:air","height"\\:124},{"block"\\:"minecraft\\:white_concrete","height"\\:1}],"biome"\\:"minecraft\\:the_void"}';
 const FILL_LIMIT = 32_768; // blocks per fill command, the game's default limit
 
 /// What the backend writes to server.properties: the profile's defaults, this
@@ -45,7 +45,7 @@ const FILL_LIMIT = 32_768; // blocks per fill command, the game's default limit
 /// The camera sees 16 chunks (256 blocks) where the profile's 4 cut every design
 /// short of its far edge; the flat world makes the extra chunks cheap, and the
 /// simulation distance stays the profile's, since the plots are forceloaded.
-/// Under the plots, which are placed at y = 64, is a floor of black concrete at
+/// Under the plots, which are placed at y = 64, is a floor of white concrete at
 /// y = 60 (124 layers of air, then the floor), plain for the camera and four
 /// blocks clear of every circuit, which a solid block beside dust would change.
 export function serverProperties({ gamePort, rconPort, password }) {
