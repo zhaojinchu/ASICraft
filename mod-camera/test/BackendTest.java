@@ -43,6 +43,7 @@ public final class BackendTest {
 
         List<Object[]> frames = new CopyOnWriteArrayList<>();
         List<Object[]> drives = new CopyOnWriteArrayList<>();
+        List<Boolean> turns = new CopyOnWriteArrayList<>();
         List<Boolean> ups = new CopyOnWriteArrayList<>();
         List<String> logs = new CopyOnWriteArrayList<>();
         Backend.Listener listener = new Backend.Listener() {
@@ -54,6 +55,11 @@ public final class BackendTest {
             @Override
             public void drive(double[] move, double[] look, int plot, boolean owner) {
                 drives.add(new Object[] { move, look, plot, owner });
+            }
+
+            @Override
+            public void turn(boolean on) {
+                turns.add(on);
             }
 
             @Override
@@ -85,6 +91,15 @@ public final class BackendTest {
         check(logs.stream().anyMatch((l) -> l.contains("not json")), "the noise was not logged: " + logs);
         check(backend.isConnected(), "the noise disconnected the mod");
 
+        // A turn begins and ends: the camera holds while someone drives, even when they stop to look
+        // (found on the deployed camera, 2026-11-11: it glided off two seconds after the last key).
+        long unknownBefore = logs.stream().filter((l) -> l.contains("unknown message")).count(); // the noise above is one
+        server.broadcast("{\"turn\":true}");
+        check(waitFor(() -> turns.size() == 1, 5000) && turns.get(0), "the turn's start did not arrive: " + turns);
+        server.broadcast("{\"turn\":false}");
+        check(waitFor(() -> turns.size() == 2, 5000) && !turns.get(1), "the turn's end did not arrive: " + turns);
+        check(logs.stream().filter((l) -> l.contains("unknown message")).count() == unknownBefore, "a turn message was taken for an unknown one: " + logs);
+
         // Leaving: the server sees the client go within a second.
         backend.close();
         check(waitFor(() -> server.clientCount() == 0, 2000), "the client did not leave: " + server.clientCount());
@@ -94,7 +109,7 @@ public final class BackendTest {
             System.out.println(failures + " backend client checks failed");
             System.exit(1);
         }
-        System.out.println("backend client: hello with the player, frames and drives taken, noise ignored, leaves cleanly");
+        System.out.println("backend client: hello with the player, frames, drives and turns taken, noise ignored, leaves cleanly");
         System.exit(0); // the observer server's accept thread is not a daemon
     }
 }

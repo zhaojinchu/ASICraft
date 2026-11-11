@@ -1176,7 +1176,8 @@ test('the server configuration is the shared profile plus the backend\'s own dif
     const written = serverProperties({ gamePort: 25565, rconPort: 25575, password: 'hunter2' });
     // The one profile value the backend changes: the camera's view, 16 chunks where the profile's 4 cut
     // every design short of its far edge (seen on the deployed box's camera, 2026-11-11).
-    // And the ground under the camera: a black floor where the profile has the void (asked for 2026-11-11).
+    // And the ground under the camera: a light floor where the profile has the void, the white concrete nearest
+    // the page's own view (#dcdcdc), so the two tabs look alike; black was tried first and read badly (2026-11-11).
     const changed = { 'view-distance': '16', 'generator-settings': LIVE_GROUND };
     for (const [k, v] of Object.entries(profile.properties)) assert.equal(written[k], changed[k] ?? v, k);
     assert.equal(profile.properties['simulation-distance'], written['simulation-distance'], 'the plots are forceloaded; only the view grows');
@@ -1184,7 +1185,7 @@ test('the server configuration is the shared profile plus the backend\'s own dif
     // conducts, so nothing of the floor may touch a placed design's lowest layer.
     const ground = JSON.parse(LIVE_GROUND.replaceAll('\\:', ':'));
     assert.equal(ground.biome, 'minecraft:the_void');
-    assert.deepEqual(ground.layers.map((l) => l.block), ['minecraft:air', 'minecraft:black_concrete'], 'air, then one layer of floor');
+    assert.deepEqual(ground.layers.map((l) => l.block), ['minecraft:air', 'minecraft:white_concrete'], 'air, then one layer of floor');
     assert.equal(-64 + ground.layers[0].height, LIVE_FLOOR_Y, 'the floor is not at LIVE_FLOOR_Y');
     assert.ok(LIVE_FLOOR_Y <= DEFAULTS.plotY - 2, `the floor at ${LIVE_FLOOR_Y} touches the plots at ${DEFAULTS.plotY}`);
     assert.deepEqual([written['server-port'], written['rcon.port'], written['rcon.password']], ['25565', '25575', 'hunter2']);
@@ -1507,6 +1508,10 @@ test('the camera socket takes the mod by its key, whitelists its player, and fra
         first.client.send({ set: 'a', on: true });
         await first.client.next((m) => m.ok === true);
         await mod.next((m) => m.frame?.plot === first.plot.plot);
+        // A lever on the plot already on camera frames nothing: framing it again restarted the orbit at every lever.
+        first.client.send({ set: 'a', on: false });
+        await first.client.next((m) => m.ok === true);
+        assert.equal(await mod.next((m) => m.frame !== undefined, 400).catch(() => null), null, 'a lever on the plot on camera framed it again');
         assert.equal((await api(base, '/api/status')).body.camera.plot, first.plot.plot);
         // A newer mod replaces the one connected, whose socket the backend closes: a game killed without
         // closing its socket (the PC's nightly restart force-kills it) left that socket open on the box for
@@ -1551,6 +1556,9 @@ test('driving: the plot owner takes the camera at once, a viewer waits in a queu
         guest.send({ drive: 'take' });
         const turn = await guest.next((m) => m.drive !== undefined);
         assert.deepEqual([turn.drive, turn.seconds], ['yours', 2]);
+        // The mod is told a turn began, so it holds the camera where the driver leaves it (it used
+        // to glide back to the automatic camera two seconds after the last key; 2026-11-11).
+        assert.equal((await mod.next((m) => m.turn !== undefined)).turn, true, 'the mod was not told the turn began');
         let status = (await api(base, '/api/status')).body.camera;
         assert.deepEqual([status.driver, status.queue], [{ plot: plot.plot, owner: false }, 0]);
         // The guest's input reaches the mod; the owner, not driving, is refused.
@@ -1578,6 +1586,9 @@ test('driving: the plot owner takes the camera at once, a viewer waits in a queu
             assert.match(no.error, /drive/, JSON.stringify(bad));
         }
         assert.equal((await mod.next((m) => m.drive !== undefined, 300).catch(() => null)), null, 'a malformed input reached the mod');
+        // The owner keeps the camera through idle time (a second here, longer than idleSeconds): it is
+        // theirs until they give it back, as Manual control on the page means.
+        assert.equal(await owner.next((m) => m.drive === 'over', 1600).catch(() => null), null, "the owner's turn ended on idleness");
         // The owner releases: the guest's turn begins, and ends on time though the guest keeps sending; then the automatic camera resumes with a frame.
         owner.send({ drive: 'release' });
         await owner.next((m) => m.drive === 'over');
@@ -1587,6 +1598,7 @@ test('driving: the plot owner takes the camera at once, a viewer waits in a queu
         const timed = await guest.next((m) => m.drive === 'over', 5000);
         clearInterval(keep);
         assert.match(timed.why, /time/);
+        assert.equal((await mod.next((m) => m.turn === false, 5000)).turn, false, 'the mod was not told the turn ended');
         await mod.next((m) => m.frame?.plot === plot.plot, 5000);
         // A turn with no input ends on idleness.
         guest.send({ drive: 'take' });
