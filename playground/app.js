@@ -8,10 +8,7 @@
 
 import { View } from './view.js';
 import { createCameraPanel } from './camera.js';
-import { LIMITS, detectTop, nameFor } from './compile.js';
-
-// The designs under designs/, served alongside the page.
-const EXAMPLES = ['not1', 'nor2', 'nor3', 'fa1', 'adder4', 'consts', 'counter4', 'fsm', 'shift2'];
+import { EXAMPLES, LIMITS, detectTop, nameFor } from './compile.js';
 // The dropdown entry for the user's own source, kept in this browser.
 const CUSTOM = 'custom';
 const DRAFT_KEY = 'redfab.draft';
@@ -28,7 +25,6 @@ const log = el('log');
 const logDetails = el('log-details');
 const reportText = el('report-text');
 const summary = el('summary');
-const capacity = el('capacity');
 const modeBadge = el('mode');
 const inputsPanel = el('inputs');
 const outputsPanel = el('outputs');
@@ -43,8 +39,24 @@ const releaseButton = el('release');
 const examples = el('examples');
 
 const view = new View(el('view'));
-// The camera: the game itself, streamed; shown only when the backend has one.
-const camera = createCameraPanel({ panel: el('camera'), video: el('camera-video'), status: el('camera-status'), play: el('camera-play'), drive: el('drive'), turn: el('camera-turn'), on: el('camera-on') });
+// The camera: the game itself, streamed; its tab is shown only when the backend has one.
+const camera = createCameraPanel({ panel: el('camera'), video: el('camera-video'), status: el('camera-status'), auto: el('camera-auto'), manual: el('camera-manual'), turn: el('camera-turn') });
+const tabs = el('tabs');
+const tabButtons = { circuit: el('tab-circuit'), camera: el('tab-camera') };
+const stagePanels = { circuit: el('view'), camera: el('camera') };
+let tab = 'circuit';
+
+/// Shows the circuit or the camera on the stage; the other stops drawing or streaming.
+function selectTab(name) {
+    if (name === 'camera' && !camera.available) name = 'circuit';
+    tab = name;
+    for (const [key, button] of Object.entries(tabButtons)) button.setAttribute('aria-selected', String(key === name));
+    for (const [key, panel] of Object.entries(stagePanels)) panel.hidden = key !== name;
+    view.setVisible(name === 'circuit');
+    camera.show(name === 'camera');
+}
+tabButtons.circuit.addEventListener('click', () => selectTab('circuit'));
+tabButtons.camera.addEventListener('click', () => selectTab('camera'));
 
 // The limits the page enforces or shows; the live backend adds its plot size.
 const limits = { ...LIMITS, plotSize: null };
@@ -96,6 +108,7 @@ function setMode(text, live = false) {
 /// Starts (or restarts) the worker; whatever was waiting fails with `reason`.
 function startWorker(reason = 'the worker was restarted') {
     if (worker) worker.terminate();
+    warmed = false; // a new worker has no compiler loaded
     worker = new Worker('./worker.js', { type: 'module' });
     worker.onmessage = ({ data }) => {
         const waiting = pending.get(data.id);
@@ -179,41 +192,81 @@ function cellsOf(report) {
     return Number(report?.match(/cells: (\d+)/)?.[1] ?? 0);
 }
 
-/// The one-line summary of a build, after `lead` ("Built NAME", or "NAME, as built").
-function describeBuilt({ design: d, cells }, lead) {
-    const capacityNote = cells > limits.measuredCells
-        ? `more than the ${limits.measuredCells} the router had managed when last measured`
-        : `the router manages about ${limits.measuredCells} today`;
-    const parts = [`${cells} cells (${capacityNote})`, `${Object.keys(d.blocks).length} blocks in ${d.size[0]} x ${d.size[2]}`];
-    let kind = 'ok';
-    if (limits.plotSize) {
-        if (fitsPlot(d)) parts.push(`fits the server's ${limits.plotSize[0]} x ${limits.plotSize[1]} plot`);
-        else {
-            parts.push(`too large for the server's ${limits.plotSize[0]} x ${limits.plotSize[1]} plot`);
-            kind = 'warn';
-        }
+/// The status line after a build: `lead` ("Built NAME") and a warning when the
+/// server's plot cannot take it; the numbers are on the result card.
+function describeBuilt({ design: d }, lead) {
+    if (limits.plotSize && !fitsPlot(d)) {
+        return { text: `${lead}, but it is too large for the server's ${limits.plotSize[0]} x ${limits.plotSize[1]} plot.`, kind: 'warn' };
     }
-    const seq = d.timing?.sequential;
-    parts.push(seq ? `clock ${seq.clock} at ${seq.period} ticks a cycle` : `outputs settle within ${d.settle_ticks} ticks`);
-    return { text: `${lead}: ${parts.join('; ')}.`, kind };
+    return { text: `${lead}.`, kind: 'ok' };
 }
 
 function fitsPlot(d) {
     return !limits.plotSize || (d.size[0] <= limits.plotSize[0] && d.size[2] <= limits.plotSize[1]);
 }
 
+const seconds = (ticks) => `${(ticks / 20).toFixed(1)} s`;
+
+/// Pin names with each bus folded to name[msb:lsb], in the design's order.
+function pinNames(pins) {
+    const out = [];
+    const buses = new Map();
+    for (const pin of pins) {
+        const b = busOf(pin.name);
+        if (!b) {
+            out.push(pin.name);
+            continue;
+        }
+        if (!buses.has(b.bus)) {
+            buses.set(b.bus, []);
+            out.push(b.bus);
+        }
+        buses.get(b.bus).push(b.bit);
+    }
+    return out.map((name) => {
+        const bits = buses.get(name);
+        return bits ? `${name}[${Math.max(...bits)}:${Math.min(...bits)}]` : name;
+    }).join(', ');
+}
+
+/// The report the page shows: what the design is and how it behaves, in plain
+/// words. The core's full report, with the placement, the lever and lamp
+/// positions and the /forceload line for a world of your own, is report.txt.
+function plainReport(d, cells, report) {
+    const lines = [d.name];
+    if (cells) lines.push(`  cells: ${cells}`);
+    lines.push(`  blocks: ${Object.keys(d.blocks).length}`);
+    lines.push(`  footprint: ${d.size[0]} x ${d.size[2]}, ${d.size[1]} high`);
+    if (typeof d.repeaters === 'number') lines.push(`  repeaters: ${d.repeaters}`);
+    const seq = d.timing?.sequential;
+    if (seq) {
+        lines.push(`  clock: ${seq.clock}, ${seq.period} ticks a cycle, ${seconds(seq.period)}`);
+        lines.push(`  outputs ready ${seq.sample_at} ticks after each ${seq.active === 'falling' ? 'falling' : 'rising'} edge`);
+    } else {
+        const fastest = Math.min(...Object.values(d.timing?.outputs ?? {}).map((o) => o.min).filter((n) => typeof n === 'number'));
+        const range = Number.isFinite(fastest) && fastest < d.settle_ticks ? `${fastest} to ${d.settle_ticks}` : `${d.settle_ticks}`;
+        lines.push(`  outputs settle in ${range} ticks, ${seconds(d.settle_ticks)} at most`);
+        if (d.timing?.input_spacing) lines.push(`  inputs may change every ${d.timing.input_spacing} ticks`);
+    }
+    lines.push(`  inputs: ${pinNames(d.inputs)}`);
+    lines.push(`  outputs: ${pinNames(d.outputs)}`);
+    if (/proven equal to the source/.test(report ?? '')) lines.push('  proven equal to the source');
+    return lines.join('\n');
+}
+
 /// The result card: the numbers, and the report.
 function renderResult({ design: d, cells, report }) {
-    const items = [`${cells} cells`, `${Object.keys(d.blocks).length} blocks`, `${d.size[0]} x ${d.size[2]} footprint`];
+    const items = [[`${cells} cells`], [`${Object.keys(d.blocks).length} blocks`], [`${d.size[0]} x ${d.size[2]} footprint`]];
     const seq = d.timing?.sequential;
-    items.push(seq ? `clock ${seq.clock}, ${seq.period} ticks a cycle` : `outputs settle within ${d.settle_ticks} ticks`);
-    if (limits.plotSize) items.push(`${fitsPlot(d) ? 'fits' : 'too large for'} the server's ${limits.plotSize[0]} x ${limits.plotSize[1]} plot`);
-    summary.replaceChildren(...items.map((text) => {
+    items.push([seq ? `clock ${seq.clock}, ${seq.period} ticks a cycle` : `settles in ${d.settle_ticks} ticks`]);
+    if (limits.plotSize && !fitsPlot(d)) items.push([`too large for the server's ${limits.plotSize[0]} x ${limits.plotSize[1]} plot`, 'warn']);
+    summary.replaceChildren(...items.map(([text, kind]) => {
         const li = document.createElement('li');
         li.textContent = text;
+        if (kind) li.className = kind;
         return li;
     }));
-    reportText.textContent = typeof report === 'string' ? report : '';
+    reportText.textContent = plainReport(d, cells, report);
 }
 
 function clearResult() {
@@ -227,6 +280,7 @@ async function compile() {
     generation += 1;
     stopRunning();
     leaveLive();
+    selectTab('circuit');
     design = null;
     built = null;
     view.clear();
@@ -381,7 +435,10 @@ function showDesign() {
         } else {
             button.textContent = pin.name; // text, never markup: escaped identifiers reach here
         }
-        button.disabled = Boolean(seq && pin.name === seq.clock); // the clock is driven, not clicked
+        if (seq && pin.name === seq.clock) {
+            button.disabled = true; // the clock is driven, not clicked
+            button.title = `${pin.name}: driven by the ${mode === 'live' ? 'server' : 'page'}, ${seq.period} ticks a cycle`;
+        }
         button.addEventListener('click', () => toggle(i));
         return button;
     });
@@ -397,13 +454,10 @@ function showDesign() {
         else lamp.append(pin.name);
         return lamp;
     });
-    // A clocked design gets its clock from the page (or the server), at the reported period.
-    if (seq) {
-        inputsPanel.appendChild(label(`clock ${seq.clock}: period ${seq.period} ticks, driven by the ${mode === 'live' ? 'server' : 'page'}; outputs are valid ${seq.sample_at} ticks after the edge`));
-    }
     renderValues();
     setMode(mode === 'live' ? `plot ${livePlot.plot}, settling` : 'simulated here', mode === 'live');
     runButton.disabled = mode === 'live';
+    runButton.hidden = mode === 'live'; // the server runs it; there is nothing to pause
     // In live mode the structure comes from the matching local build, or from the server.
     enableDownloads(true);
     if (mode === 'sim') startRunning();
@@ -559,8 +613,8 @@ async function openWith(name, { draft }) {
         design = reply.design;
         const cells = cellsOf(report);
         built = { source: null, top: null, name, design, cells, report, designText: text, files: `/designs/${name}` };
-        const { text: summaryText, kind } = describeBuilt(built, `${name}, as built`);
-        setStatus(`${summaryText}${draft ? ' Your draft is in the editor; Compile builds it.' : ''}`, kind);
+        const { text: summaryText, kind } = describeBuilt(built, `${name}, running in your browser`);
+        setStatus(`${summaryText}${draft ? ' Your draft is in the editor.' : ''}`, kind);
         renderResult(built);
         showDesign();
         // The counter counts only when enabled: on, so the circuit moves on its own.
@@ -568,7 +622,8 @@ async function openWith(name, { draft }) {
         if (en >= 0) await toggle(en);
         opening = 'shown';
     } catch (err) {
-        if (g === generation) setStatus(`Ready: pick an example or paste a module, then Compile. (${err.message})`);
+        if (g === generation) setStatus('Pick an example or paste a module, then Compile.');
+        log.textContent += `the opening circuit did not load: ${err.message}\n`;
     } finally {
         if (opening === 'loading') opening = 'none';
     }
@@ -604,7 +659,7 @@ async function goLive() {
     clearPanels();
     view.clear();
     setMode('building on the server', true);
-    setStatus('Sent to the server; building…');
+    setStatus('Building on the server…');
     try {
         const reply = await fetch('/api/submit', {
             method: 'POST',
@@ -616,10 +671,12 @@ async function goLive() {
         design = body.design;
         livePlot = { plot: body.plot, token: body.token, origin: body.origin, source: source.value, top, name, levers: body.levers, report: body.report };
         renderResult({ design: body.design, cells: cellsOf(body.report), report: body.report });
-        setStatus(`On the server at plot ${body.plot}, settling…`);
+        setStatus('Placing it in the game…');
         showDesign();
         releaseButton.hidden = false;
         connectLive();
+        // In the game, the game is the picture: the camera's tab, when the backend has a camera.
+        selectTab('camera');
     } catch (err) {
         mode = 'sim';
         setMode(null);
@@ -632,16 +689,6 @@ async function goLive() {
     }
 }
 
-/// How the server paces lever changes, from the `levers` it sends with the
-/// submit reply and the live message: one change per input every so many
-/// ticks, or a window after the clock edge.
-function leverPacing(levers) {
-    if (!levers) return '';
-    if (typeof levers.spacing === 'number') return `; levers move at most every ${levers.spacing} ticks each`;
-    if (Array.isArray(levers.window)) return `; levers move ${levers.window[0]} to ${levers.window[1]} ticks after each ${levers.clock} edge`;
-    return '';
-}
-
 function connectLive() {
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
     liveSocket = new WebSocket(`${scheme}://${location.host}/live?plot=${livePlot.plot}&token=${livePlot.token}`);
@@ -650,19 +697,19 @@ function connectLive() {
         if (!design) return;
         if (typeof m.tick === 'number') {
             liveTick = m.tick;
-            tickLabel.textContent = `server tick ${liveTick}`;
+            tickLabel.textContent = `tick ${liveTick}`;
         }
         if (m.changes) view.update(m.changes);
         if (m.lamps) setLamps(m.lamps);
         if (m.inputs) setLevers(m.inputs);
         if (m.state === 'live') {
-            setStatus(`Live on the server at plot ${livePlot.plot}${leverPacing(m.levers || livePlot.levers)}.`, 'ok');
+            setStatus('Live on server.', 'ok');
             setMode(`live in the game, plot ${livePlot.plot}`, true);
         }
         // The camera's answers (taking it, a turn, its end) go to the panel.
         if (m.drive !== undefined || (m.ok === false && /driv|camera/.test(m.error ?? ''))) camera.receive(m);
         // A lever change asked for before its slot goes out at the tick the server names.
-        if (m.ok === true && m.queued) setStatus(`Lever ${m.set} queued for tick ${m.tick}, the next slot its timing allows.`, 'ok');
+        if (m.ok === true && m.queued) setStatus(`Lever ${m.set} moves at tick ${m.tick}.`, 'ok');
         if (m.state === 'released') {
             const why = `The server released plot ${livePlot.plot}: ${m.why}.`;
             leaveLive({ release: false });
@@ -694,6 +741,7 @@ function leaveLive({ release = true } = {}) {
     livePlot = null;
     mode = 'sim';
     releaseButton.hidden = true;
+    runButton.hidden = false;
     camera.attach(null, null);
     if (plot && release) {
         // keepalive: the request completes even when the page is going away.
@@ -720,7 +768,7 @@ async function release() {
     const gone = leaveLive();
     clearAfterLive();
     await gone;
-    setStatus(`Released plot ${plot}. Compile to simulate here again.`);
+    setStatus(`Plot ${plot} released.`);
 }
 
 // --- the files
@@ -789,6 +837,7 @@ async function downloadDesign() {
 // The live button appears, as the main action, only when the page is served by the live backend.
 fetch('/api/status').then((r) => (r.ok ? r.json() : null)).then((s) => {
     camera.init(s?.camera ?? null);
+    tabs.hidden = !camera.available;
     if (!s?.live) return;
     liveButton.hidden = false;
     liveButton.classList.add('primary');
@@ -865,8 +914,20 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-// What size works, under the editor.
-capacity.textContent = `About ${limits.measuredCells} cells (an 8-bit adder) compile inside the ${limits.compileSeconds} s limit.`;
+// The compiler (about 10 MB) is fetched ahead of a compile once the visitor
+// shows they may compile: a click into the editor, another example, the
+// pointer on Compile. Not at page open, so a visitor who only watches pays for
+// none of it.
+let warmed = false;
+function warmCompiler() {
+    if (warmed || !worker) return;
+    warmed = true;
+    ask({ op: 'warm' }).catch(() => { warmed = false; });
+}
+source.addEventListener('focus', warmCompiler);
+examples.addEventListener('change', warmCompiler);
+compileButton.addEventListener('pointerenter', warmCompiler);
+compileButton.addEventListener('focus', warmCompiler);
 
 const draft = readDraft();
 if (draft) {
@@ -925,4 +986,8 @@ window.redfab = {
     get livePlot() { return livePlot; },
     get liveTick() { return liveTick; },
     camera,
+    selectTab,
+    get tab() { return tab; },
+    // Frames the view has drawn: a still, hidden or unchanged view draws none.
+    get frames() { return view.frames; },
 };

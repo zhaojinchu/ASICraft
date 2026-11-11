@@ -3,6 +3,10 @@
 // placement, routing and the checks in the WebAssembly core. Runs in the page's
 // worker and, for the checks, under Node; both pass in `runYosys` and the core.
 
+// The examples the page offers, under designs/; the live backend compiles them
+// into its cache when it starts (server/live.mjs, prewarm).
+export const EXAMPLES = ['not1', 'nor2', 'nor3', 'fa1', 'adder4', 'consts', 'counter4', 'fsm', 'shift2'];
+
 export const LIMITS = {
     sourceBytes: 64 * 1024,
     // The hard limit: a larger netlist is refused right after synthesis, before

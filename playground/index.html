@@ -7,9 +7,10 @@
 <link rel="icon" href="data:,">
 <style>
   /* White, with a redstone block's red as the one accent: the editor on the
-     left with the terminal under it, the circuit on the right. The UI text is
-     the system font, code and signals the code font, the title Monocraft
-     (fonts/, OFL 1.1). */
+     left with the terminal under it; on the right the levers and lamps, then
+     one stage that shows the circuit or, with a game behind the page, the
+     camera, chosen by tab. The UI text is the system font, code and signals
+     the code font, the title Monocraft (fonts/, OFL 1.1). */
   @font-face { font-family: Monocraft; src: url(./fonts/Monocraft.ttf) format("truetype"); font-display: swap; }
   :root {
     --red: #d81e1e; --red-dark: #b51818; --lit: #ffd34d; --ground: #dcdcdc;
@@ -17,13 +18,14 @@
     --mono: ui-monospace, Menlo, Consolas, "DejaVu Sans Mono", monospace;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { height: 100%; margin: 0; background: #fff; color: var(--ink); }
   body { display: grid; grid-template-rows: auto 1fr auto; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   h1 { font: 26px/1 Monocraft, monospace; color: var(--red); margin: 0; }
   header { display: flex; align-items: baseline; gap: 18px; padding: 10px 16px; border-bottom: 2px solid var(--red); }
   header p { margin: 0; color: var(--dim); font-size: 13px; max-width: 110ch; }
   main { display: grid; grid-template-columns: minmax(340px, 2fr) 3fr; min-height: 0; }
-  #left { display: grid; grid-template-rows: auto 1fr auto auto auto minmax(140px, 1fr); min-height: 0; border-right: 1px solid var(--line); }
+  #left { display: grid; grid-template-rows: auto 1fr auto auto minmax(140px, 1fr); min-height: 0; border-right: 1px solid var(--line); }
   #toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 8px 12px; background: var(--strip); border-bottom: 1px solid var(--line); }
   button { font: inherit; padding: 5px 12px; border: 1px solid #bbb; border-radius: 3px; background: #fff; color: var(--ink); cursor: pointer; }
   button:hover { border-color: #777; }
@@ -35,12 +37,12 @@
   #toolbar label { display: inline-flex; align-items: center; gap: 4px; color: var(--dim); font-size: 13px; }
   #source { width: 100%; height: 100%; min-height: 160px; resize: none; border: 0; padding: 10px 12px; background: #fff; color: var(--ink);
             font: 13px/1.45 var(--mono); tab-size: 4; outline: none; }
-  #capacity { margin: 0; padding: 4px 12px; font-size: 12px; color: var(--dim); border-top: 1px solid var(--line); }
   #status { padding: 6px 12px; border-top: 1px solid var(--line); min-height: 30px; }
   #status.ok { color: #2e7d32; } #status.bad { color: var(--red); font-weight: 600; } #status.warn { color: #b26a00; }
   #result { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding: 6px 12px; border-top: 1px solid var(--line); }
   #summary { list-style: none; margin: 0; padding: 0; display: contents; }
   #summary li { padding: 2px 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--strip); font-size: 12px; font-family: var(--mono); }
+  #summary li.warn { border-color: #e0b070; color: #b26a00; }
   #files { display: flex; gap: 6px; margin-left: auto; }
   #files button { padding: 2px 8px; font-size: 12px; font-family: var(--mono); }
   #terminal { background: var(--term); color: var(--term-ink); min-height: 0; overflow: auto; font: 12px/1.4 var(--mono); }
@@ -48,14 +50,7 @@
   #terminal summary { padding: 5px 12px; cursor: pointer; color: #9aa0a8; font: 11px/1.4 system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; }
   #terminal details[open] summary { color: #e6e6e6; }
   #terminal pre { margin: 0; padding: 4px 12px 10px; white-space: pre-wrap; font: inherit; }
-  #right { display: grid; grid-template-rows: auto auto 1fr; min-height: 0; }
-  #camera { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; background: var(--strip); border-bottom: 1px solid var(--line); }
-  #camera-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  #camera-status { color: var(--dim); }
-  #camera-on { padding: 2px 8px; border: 1px solid var(--red); border-radius: 3px; color: var(--red); font: 12px Monocraft, monospace; }
-  #camera-turn { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
-  #camera-video { display: none; width: 100%; max-height: 36vh; background: #000; border: 1px solid var(--line); }
-  #camera.playing #camera-video { display: block; }
+  #right { display: flex; flex-direction: column; min-height: 0; }
   #panel { display: flex; flex-direction: column; gap: 4px; padding: 8px 12px; background: var(--strip); border-bottom: 1px solid var(--line); }
   #controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-height: 32px; }
   #tick { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
@@ -76,45 +71,58 @@
   .lamp { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; font: 13px var(--mono); }
   .lamp .bulb { width: 16px; height: 16px; border: 1px solid #aaa; border-radius: 2px; background: #fff; }
   .lamp[data-lit="1"] .bulb { background: var(--lit); border-color: #c9a227; box-shadow: 0 0 6px rgba(255, 211, 77, .9); }
-  #view { position: relative; min-height: 0; background: var(--ground); }
+  #tabs { display: flex; gap: 0; padding: 0 12px; border-bottom: 1px solid var(--line); background: #fff; }
+  #tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 7px 14px 5px; background: none; color: var(--dim); }
+  #tabs button[aria-selected="true"] { color: var(--ink); font-weight: 600; border-bottom-color: var(--red); }
+  #stage { position: relative; flex: 1; min-height: 0; }
+  #view { position: absolute; inset: 0; background: var(--ground); }
   #view canvas { display: block; width: 100%; height: 100%; }
   #view .help { position: absolute; left: 10px; bottom: 6px; font-size: 12px; color: #444; pointer-events: none; }
   #mode { position: absolute; left: 10px; top: 8px; padding: 3px 8px; border: 1px solid #bbb; border-radius: 3px; background: #fff; font: 13px Monocraft, monospace; }
   #mode.live { border-color: var(--red); color: var(--red); }
-  footer { padding: 5px 16px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; display: flex; gap: 16px; flex-wrap: wrap; justify-content: space-between; }
+  #camera { position: absolute; inset: 0; display: flex; flex-direction: column; background: #000; }
+  #camera-video { flex: 1; min-height: 0; width: 100%; object-fit: contain; background: #000; }
+  #camera-bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 12px; background: var(--strip); border-top: 1px solid var(--line); }
+  .modes { display: inline-flex; }
+  .modes button { border-radius: 0; }
+  .modes button:first-child { border-radius: 3px 0 0 3px; }
+  .modes button:last-child { border-radius: 0 3px 3px 0; border-left: 0; }
+  .modes button[aria-pressed="true"] { background: var(--red); border-color: var(--red); color: #fff; }
+  #camera-status { color: var(--dim); }
+  #camera-turn { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+  footer { padding: 5px 16px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
   @media (max-width: 800px) {
     html, body { height: auto; }
     body { min-height: 100%; }
     header { flex-direction: column; gap: 4px; }
     main { grid-template-columns: 1fr; }
     #right { order: -1; }
-    #view { height: 44vh; min-height: 240px; }
-    #left { border-right: 0; border-top: 1px solid var(--line); grid-template-rows: auto minmax(200px, 40vh) auto auto auto minmax(160px, auto); }
+    #stage { height: 50vh; min-height: 260px; }
+    #left { border-right: 0; border-top: 1px solid var(--line); grid-template-rows: auto minmax(200px, 40vh) auto auto minmax(160px, auto); }
   }
 </style>
 </head>
 <body>
 <header>
   <h1>redfab</h1>
-  <p>SystemVerilog in, a redstone circuit out: synthesised, proven equal to the source, placed and routed into redstone, and checked against the game itself. This page runs the same compiler in your browser; with a game behind it, <b>Run in the game</b> places your design on a live server and streams its blocks back. <a href="https://github.com/zhaojinchu/ASICraft">Source on GitHub</a>.</p>
+  <p>Write a SystemVerilog module and redfab turns it into a redstone circuit that runs in Minecraft. It synthesises the design, proves the result equal to the source, places and routes it, and checks it against the game. <a href="https://github.com/zhaojinchu/ASICraft">Source on GitHub</a>.</p>
 </header>
 <main>
   <section id="left">
     <div id="toolbar">
       <select id="examples" aria-label="examples"></select>
-      <label>top <input id="top" type="text" placeholder="auto" spellcheck="false" aria-label="top module" title="the top module's name; empty: the module named top, or the only one"></label>
-      <button id="compile" class="primary" title="build and simulate it here (Ctrl+Enter or Cmd+Enter)">Compile</button>
-      <button id="live" hidden title="build on the server and run it in the game">Run in the game</button>
+      <label>top <input id="top" type="text" placeholder="auto" spellcheck="false" aria-label="top module" title="The top module; empty picks the one named top, or the only one"></label>
+      <button id="compile" class="primary" title="Build and simulate it in your browser (Ctrl+Enter)">Compile</button>
+      <button id="live" hidden title="Build it on the server and run it in the game">Run in the game</button>
     </div>
     <textarea id="source" spellcheck="false" aria-label="SystemVerilog source"></textarea>
-    <p id="capacity"></p>
     <div id="status">Loading the opening circuit…</div>
     <div id="result">
       <ul id="summary"></ul>
       <div id="files">
-        <button id="download" disabled title="the structure file: /place template loads it; Litematica should load it too, but that is untested">world.nbt</button>
-        <button id="report" disabled title="the build report: cells, blocks, footprint, lever and lamp positions, timing">report.txt</button>
-        <button id="design-json" disabled title="the design file: the layout, timing and pins the simulator and the view use">design.json</button>
+        <button id="download" disabled title="The structure file, for /place template">world.nbt</button>
+        <button id="report" disabled title="The full build report, with lever and lamp positions">report.txt</button>
+        <button id="design-json" disabled title="The layout, timing and pins">design.json</button>
       </div>
     </div>
     <div id="terminal">
@@ -126,33 +134,36 @@
     <div id="panel">
       <div id="controls">
         <button id="run" disabled>Pause</button>
-        <button id="release" hidden title="give the plot back">Stop</button>
+        <button id="release" hidden title="Give the plot back">Stop</button>
         <span id="tick"></span>
       </div>
       <div class="pins" id="inputs"><span class="label">inputs</span></div>
       <div class="pins" id="outputs"><span class="label">outputs</span></div>
     </div>
-    <div id="camera" hidden>
-      <div id="camera-bar">
-        <span id="camera-status">camera off</span>
-        <span id="camera-on" hidden>on camera</span>
-        <button id="camera-play" title="watch the game itself: the camera account's view, streamed live">Play</button>
-        <button id="drive" disabled title="move the camera's character with W A S D, space and shift; drag the video to look">Take the camera</button>
-        <span id="camera-turn"></span>
-      </div>
-      <video id="camera-video" autoplay playsinline muted></video>
+    <div id="tabs" role="tablist" hidden>
+      <button id="tab-circuit" role="tab" aria-selected="true" aria-controls="view">Circuit</button>
+      <button id="tab-camera" role="tab" aria-selected="false" aria-controls="camera">Camera</button>
     </div>
-    <div id="view">
-      <span id="mode" hidden>simulated here</span>
-      <div class="help">drag to orbit, scroll to zoom, click a lever to flip it</div>
+    <div id="stage">
+      <div id="view" role="tabpanel">
+        <span id="mode" hidden>simulated here</span>
+        <div class="help">drag to orbit, scroll to zoom, click a lever to flip it</div>
+      </div>
+      <div id="camera" role="tabpanel" hidden>
+        <video id="camera-video" autoplay playsinline muted></video>
+        <div id="camera-bar">
+          <span class="modes" role="group" aria-label="camera mode">
+            <button id="camera-auto" aria-pressed="true" title="The camera follows the circuits on its own">Auto view</button>
+            <button id="camera-manual" aria-pressed="false" disabled>Manual control</button>
+          </span>
+          <span id="camera-status">Camera offline</span>
+          <span id="camera-turn"></span>
+        </div>
+      </div>
     </div>
   </section>
 </main>
-<footer>
-  <span>Compile with Ctrl+Enter or Cmd+Enter. Your edited source is kept in this browser.</span>
-  <span>Run in the game sends your source there; it is kept only as the placed circuit and its recording while the plot is yours. Nothing else is recorded.</span>
-  <span>NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</span>
-</footer>
+<footer>NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</footer>
 <script type="importmap">
 { "imports": { "three": "/pkg/three@0.186.1/build/three.module.js", "three/addons/": "/pkg/three@0.186.1/examples/jsm/" } }
 </script>

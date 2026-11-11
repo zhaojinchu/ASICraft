@@ -1,7 +1,10 @@
 // The 3D view of a built design: every block an instance of a unit cube, scaled
 // by kind, coloured by kind and state. The simulator's changes recolour
 // instances in place; nothing is ever added or removed after a build, since a
-// redstone circuit only changes block states.
+// redstone circuit only changes block states. A frame is drawn only when
+// something changed (a recolour, the camera moving, a resize), and none while
+// the view is hidden: drawing every frame kept a laptop's GPU busy for a still
+// picture, and behind the camera tab for no picture at all.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -70,9 +73,12 @@ export class View {
         this.pressed = null;
         this.renderer.domElement.addEventListener('pointerdown', (e) => { this.pressed = [e.clientX, e.clientY]; });
         this.renderer.domElement.addEventListener('pointerup', (e) => this.pick(e));
+        this.visible = true;
+        this.frame = null;
+        this.frames = 0; // drawn so far (for the checks: a still view draws none)
+        this.controls.addEventListener('change', () => this.requestRender());
         new ResizeObserver(() => this.resize()).observe(container);
         this.resize();
-        this.animate();
     }
 
     resize() {
@@ -81,12 +87,30 @@ export class View {
         this.renderer.setSize(w, h, false);
         this.camera.aspect = w / h;
         this.camera.updateProjectionMatrix();
+        this.requestRender();
     }
 
-    animate() {
-        requestAnimationFrame(() => this.animate());
-        this.controls.update();
+    /// Asks for one frame; the damping of a drag asks for more until it settles.
+    requestRender() {
+        if (this.frame === null && this.visible) this.frame = requestAnimationFrame(() => this.draw());
+    }
+
+    draw() {
+        this.frame = null;
+        const moving = this.controls.update();
         this.renderer.render(this.scene, this.camera);
+        this.frames += 1;
+        if (moving) this.requestRender();
+    }
+
+    /// Shown or hidden (behind the camera tab): hidden, nothing is drawn.
+    setVisible(on) {
+        this.visible = on;
+        if (on) this.resize();
+        else if (this.frame !== null) {
+            cancelAnimationFrame(this.frame);
+            this.frame = null;
+        }
     }
 
     /// Removes the design on show, leaving an empty scene.
@@ -97,6 +121,7 @@ export class View {
         }
         this.meshes = {};
         this.instances.clear();
+        this.requestRender();
     }
 
     /// Shows a design: its blocks, with the camera framing them.
@@ -135,6 +160,7 @@ export class View {
         this.camera.far = span * 10 + 100;
         this.camera.updateProjectionMatrix();
         this.controls.update();
+        this.requestRender();
     }
 
     /// Recolours the blocks that changed state.
@@ -147,6 +173,7 @@ export class View {
             touched.add(at.kind);
         }
         for (const kind of touched) this.meshes[kind].instanceColor.needsUpdate = true;
+        if (touched.size) this.requestRender();
     }
 
     /// The colour a block is drawn in, as a hex string (for the checks).

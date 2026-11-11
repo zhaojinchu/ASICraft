@@ -5,14 +5,28 @@
 import { loadCore } from './core.js';
 import { compile } from './compile.js';
 
-// The Yosys core is 67 MB: it is fetched on the first compile, not when the
-// page opens, so the opening circuit shows at once. The package path carries
-// its version so the server can let the browser keep it for good (see
-// tools/playground_serve.mjs).
-let yosys = null;
+// The Yosys core is 67 MB (about 10 MB on the wire, precompressed): it is not
+// fetched when the page opens, so the opening circuit shows at once, but when
+// the visitor shows they may compile (the page asks for `warm`), or at the
+// first compile. `run(null)` fetches and compiles its modules without running
+// it. The package path carries its version so the server can let the browser
+// keep it for good (see tools/playground_serve.mjs).
+let yosysLoad = null;
+let yosysReady = false;
+function loadYosys() {
+    if (!yosysLoad) {
+        yosysLoad = (async () => {
+            const { runYosys } = await import('/pkg/@yowasp/yosys@0.68.1207/gen/bundle.js');
+            await runYosys(null, {}, { fetchProgress: () => {} });
+            yosysReady = true;
+            return runYosys;
+        })();
+        yosysLoad.catch(() => { yosysLoad = null; }); // a failed fetch is tried again next time
+    }
+    return yosysLoad;
+}
 async function runYosys(...args) {
-    if (!yosys) yosys = (await import('/pkg/@yowasp/yosys@0.68.1207/gen/bundle.js')).runYosys;
-    return yosys(...args);
+    return (await loadYosys())(...args);
 }
 
 let core = null; // the one load in flight or done: two requests arriving together share it
@@ -44,6 +58,10 @@ self.onmessage = async ({ data }) => {
         const c = await ready();
         switch (op) {
             case 'compile': {
+                if (!yosysReady) {
+                    self.postMessage({ id, phase: 'fetching the compiler' });
+                    await loadYosys();
+                }
                 const built = await compile({
                     source: data.source,
                     top: data.top,
@@ -72,6 +90,11 @@ self.onmessage = async ({ data }) => {
                 break;
             case 'ping':
                 reply({});
+                break;
+            case 'warm':
+                // The compiler fetched and compiled ahead of a compile; nothing is run.
+                await loadYosys();
+                reply({ ready: yosysReady });
                 break;
             case 'set':
                 // What changed at once: the probe and the dust and lamps that repowered with it.
