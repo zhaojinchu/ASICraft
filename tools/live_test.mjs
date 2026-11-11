@@ -21,7 +21,7 @@ import { loadCore } from '../playground/core.js';
 import { LIMITS } from '../playground/compile.js';
 import { DEFAULTS, cliOptions, createLive } from '../server/live.mjs';
 import { smoke } from './smoke_remote.mjs';
-import { GAMERULES, MOTD, PROFILE_FILE, javaArgs, javaPath, killLeftover, observe, offlineUuid, requireEula, serverProperties, writeWhitelist } from '../server/minecraft.mjs';
+import { GAMERULES, LIVE_FLOOR_Y, LIVE_GROUND, MOTD, PROFILE_FILE, javaArgs, javaPath, killLeftover, observe, offlineUuid, requireEula, serverProperties, writeWhitelist } from '../server/minecraft.mjs';
 import { Rcon } from '../server/rcon.mjs';
 import { acceptWebSocket } from '../server/ws.mjs';
 import { buildWasm } from './common.mjs';
@@ -1151,9 +1151,17 @@ test('the server configuration is the shared profile plus the backend\'s own dif
     const written = serverProperties({ gamePort: 25565, rconPort: 25575, password: 'hunter2' });
     // The one profile value the backend changes: the camera's view, 16 chunks where the profile's 4 cut
     // every design short of its far edge (seen on the deployed box's camera, 2026-11-11).
-    const changed = { 'view-distance': '16' };
+    // And the ground under the camera: a black floor where the profile has the void (asked for 2026-11-11).
+    const changed = { 'view-distance': '16', 'generator-settings': LIVE_GROUND };
     for (const [k, v] of Object.entries(profile.properties)) assert.equal(written[k], changed[k] ?? v, k);
     assert.equal(profile.properties['simulation-distance'], written['simulation-distance'], 'the plots are forceloaded; only the view grows');
+    // The floor is where its constant says, under every plot and clear of it: a solid block beside dust
+    // conducts, so nothing of the floor may touch a placed design's lowest layer.
+    const ground = JSON.parse(LIVE_GROUND.replaceAll('\\:', ':'));
+    assert.equal(ground.biome, 'minecraft:the_void');
+    assert.deepEqual(ground.layers.map((l) => l.block), ['minecraft:air', 'minecraft:black_concrete'], 'air, then one layer of floor');
+    assert.equal(-64 + ground.layers[0].height, LIVE_FLOOR_Y, 'the floor is not at LIVE_FLOOR_Y');
+    assert.ok(LIVE_FLOOR_Y <= DEFAULTS.plotY - 2, `the floor at ${LIVE_FLOOR_Y} touches the plots at ${DEFAULTS.plotY}`);
     assert.deepEqual([written['server-port'], written['rcon.port'], written['rcon.password']], ['25565', '25575', 'hunter2']);
     const own = Object.keys(written).filter((k) => !(k in profile.properties)).sort();
     assert.deepEqual(own, ['force-gamemode', 'gamemode', 'motd', 'online-mode', 'rcon.password', 'rcon.port', 'server-port'], 'this run\'s values and the backend\'s own differences, nothing else');
