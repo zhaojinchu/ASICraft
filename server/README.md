@@ -26,7 +26,10 @@ only one, and the server makes it a spectator as it joins), `view-distance`
 distance stays 4, since the plots are forceloaded), a floor of white concrete
 at y = 60 in place of the void (the plots sit at y = 64, so it touches none),
 noon set once at start (time stands still from the profile, but a new world
-stands still at sunrise), and the
+stands still at sunrise), the `player_movement_check` gamerule off (the
+camera glides between plots faster than a player may move, and the server
+refused it and kept the player, and the chunks it sends, at the first plot;
+only the camera joins), and the
 `max_block_modifications` gamerule raised for its plot clears (the harness
 never fills past the game's default). `tools/live_test.mjs` and
 `harness/tests/test_server_profile.py` hold both sides to the file.
