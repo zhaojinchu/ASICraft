@@ -559,6 +559,67 @@ try {
             const wrong = expected.map((_, k) => k).filter((k) => JSON.stringify(got[k]) !== JSON.stringify(expected[k]));
             if (wrong.length) failures.push(`counter4: ${wrong.length} of ${expected.length} cycles show the wrong count, e.g. cycle ${wrong[0]} (${wrong[0] < driven.length ? 'driven by hand' : 'free-running'}): page ${JSON.stringify(got[wrong[0]])}, native ${JSON.stringify(expected[wrong[0]])}`);
             else console.log(`counter4: ${driven.length} cycles driven by hand and ${free} free-running under the page's clock show the native simulator's counts`);
+
+            // The manual clock (asked for 2026-11-11): Manual clock hands the clk lever over; a rising
+            // edge counts once; a flip too soon for the design's timing waits, dashed, and lands the tick
+            // it is safe (the release after `high` ticks, the next rise a period after the last);
+            // Auto clock gives the clock back to the page.
+            {
+                const clk = index[seq.clock];
+                const count = () => page.evaluate(() => { const l = window.redfab.lamps(); return parseInt([3, 2, 1, 0].map((b) => l[`count[${b}]`]).join(''), 2); });
+                check(seq.active === 'rising', 'counter4 is expected to count on the rising edge');
+                check(await page.$eval('#clock-mode', (e) => !e.hidden) && await page.$eval('[data-input="clk"]', (e) => e.disabled), 'the clock controls are hidden, or the clock lever is clickable under the automatic clock');
+                await page.click('#clock-manual');
+                check(await page.evaluate(() => window.redfab.clockMode) === 'manual' && !(await page.$eval('[data-input="clk"]', (e) => e.disabled)), 'Manual clock did not hand the clock lever over');
+                await page.evaluate((n) => window.redfab.step(n), 2 * seq.period); // quiet first, whatever the automatic clock left
+                const before = await count();
+                const flips = await page.evaluate(async (seq, clk) => {
+                    const r = window.redfab;
+                    const lever = () => r.inputs()[clk];
+                    const marked = () => document.querySelector('[data-input="clk"]').dataset.pending;
+                    const out = {};
+                    await r.toggle(clk);
+                    const rose = r.tick;
+                    out.rose = [lever(), r.pendingClock];
+                    await r.toggle(clk);
+                    out.heldFall = [lever(), r.pendingClock, marked()];
+                    await r.step(seq.high);
+                    out.fell = [lever(), r.pendingClock, marked(), r.tick - rose];
+                    await r.toggle(clk);
+                    out.heldRise = [lever(), r.pendingClock, marked()];
+                    let landed = null;
+                    for (let k = 0; k <= seq.period && landed === null; k++) {
+                        await r.step(1);
+                        if (lever() === 1) landed = r.tick;
+                    }
+                    out.secondRiseAfter = landed === null ? null : landed - rose;
+                    out.label = document.getElementById('tick').textContent;
+                    await r.step(seq.sample_at);
+                    return out;
+                }, seq, clk);
+                check(JSON.stringify(flips.rose) === '[1,null]', `manual clock: the first flip did not rise at once: ${JSON.stringify(flips.rose)}`);
+                check(JSON.stringify(flips.heldFall) === '[1,false,"1"]', `manual clock: a release before the pulse's ${seq.high} ticks was not held, dashed: ${JSON.stringify(flips.heldFall)}`);
+                check(JSON.stringify(flips.fell) === `[0,null,"0",${seq.high}]`, `manual clock: the held release did not land after ${seq.high} ticks: ${JSON.stringify(flips.fell)}`);
+                check(JSON.stringify(flips.heldRise) === '[0,true,"1"]', `manual clock: a rise before the period was out was not held: ${JSON.stringify(flips.heldRise)}`);
+                check(flips.secondRiseAfter === seq.period, `manual clock: the held rise landed ${flips.secondRiseAfter} ticks after the first, not ${seq.period}`);
+                check(/manual clock/.test(flips.label), `manual clock: the tick label reads ${JSON.stringify(flips.label)}`);
+                const after = await count();
+                check(after === (before + 2) % 16, `manual clock: two rising edges took the count from ${before} to ${after}`);
+                // Auto clock: the lever goes back to the page, and the free-running page counts again.
+                await page.click('#clock-auto');
+                await page.waitForFunction(() => window.redfab.clockMode === 'auto' && document.querySelector('[data-input="clk"]').disabled, { timeout: 5000 }).catch(() => {});
+                check(await page.evaluate(() => window.redfab.clockMode) === 'auto' && await page.$eval('[data-input="clk"]', (e) => e.disabled), 'Auto clock did not take the clock lever back');
+                await page.click('#run');
+                const resumed = Date.now();
+                let moved = after;
+                while (moved === after && Date.now() - resumed < 20_000) {
+                    await sleep(250);
+                    moved = await count();
+                }
+                await page.evaluate(() => window.redfab.stop());
+                check(moved === (after + 1) % 16, `manual clock: after Auto clock the count went from ${after} to ${moved}, not one up`);
+                console.log(`counter4, manual clock: a rise counts (${before} to ${after} over two), a release waits ${seq.high} ticks and a rise ${seq.period}, dashed meanwhile; Auto clock counts again`);
+            }
             await page.screenshot({ path: join(out, 'counter4.png') });
         }
     }
