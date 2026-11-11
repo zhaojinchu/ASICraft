@@ -22,4 +22,10 @@ Start-Process -FilePath $Prism -ArgumentList '--launch', $Instance, '--server', 
 # The game loads and joins; then OBS's Game Capture has a window to hook.
 Start-Sleep -Seconds 90
 
+# OBS keeps a sentinel per run and drops it on a clean exit. The kill above leaves one, and OBS 32
+# then stops on its "Crash Detected" dialog at the next start, flag or no flag, streaming nothing.
+# This OBS is only ever stopped that way, so its sentinels are cleared first.
+Get-ChildItem -LiteralPath (Join-Path $env:APPDATA 'obs-studio\.sentinel') -Force -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
 Start-Process -FilePath $Obs -WorkingDirectory (Split-Path $Obs) -ArgumentList '--startstreaming', '--minimize-to-tray', '--disable-shutdown-check'

@@ -126,7 +126,10 @@ In PowerShell, as your user. Steps 1 and 2 need nothing from the box.
 
 - The page says "camera off: the stream is not up": OBS is not publishing.
   Check OBS's status bar; the relay's log on the box is
-  `journalctl -u redfab-relay -f`.
+  `journalctl -u redfab-relay -f`. An OBS window titled "OBS Studio Crash
+  Detected" means it was killed and found its run's sentinel; `start.ps1`
+  clears `%APPDATA%\obs-studio\.sentinel` before it starts OBS, so running
+  it once fixes that.
 - The page says "camera off: the camera is not connected": the mod is not
   connected to the backend. Check that the game runs from the `redfab`
   instance with the `-Dredfab.camera.url` argument (the instance's log in
