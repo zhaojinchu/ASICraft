@@ -130,6 +130,10 @@
     <div id="panel">
       <div id="controls">
         <button id="run" disabled>Pause</button>
+        <span class="modes" id="clock-mode" role="group" aria-label="clock" hidden>
+          <button id="clock-auto" aria-pressed="true" title="The page drives the clock at the design's period">Auto clock</button>
+          <button id="clock-manual" aria-pressed="false" title="Flip the clock lever yourself">Manual clock</button>
+        </span>
         <button id="release" hidden title="Give the plot back">Stop</button>
         <span id="tick"></span>
       </div>

@@ -35,6 +35,9 @@ const reportButton = el('report');
 const designButton = el('design-json');
 const liveButton = el('live');
 const releaseButton = el('release');
+const clockModes = el('clock-mode');
+const clockAutoButton = el('clock-auto');
+const clockManualButton = el('clock-manual');
 const examples = el('examples');
 
 const view = new View(el('view'));
@@ -68,6 +71,17 @@ let inputState = [];
 // Clicks on a clocked design's levers wait for the cycle's input window
 // (index -> wanted level), as the server holds them in live mode.
 let pendingInputs = new Map();
+// The clock of a clocked design in the browser's simulation: 'auto' (the page
+// drives it at the reported period) or 'manual' (the visitor flips the clk
+// lever). The automatic clock's periods count from clockOrigin; the manual
+// clock keeps its last edges and the last input change, since a flip must
+// wait for the design's own timing: the pulse's `high` ticks, the period, and
+// the inputs' setup before an active edge. A flip that comes too soon waits,
+// dashed, and lands the tick it is safe.
+let clockMode = 'auto';
+let clockOrigin = 0;
+let edges = { active: -Infinity, inactive: -Infinity, input: -Infinity };
+let pendingClock = null; // the level a flip that came too soon will give the clock
 let running = false;
 let tick = 0;
 let timer = null;
@@ -337,6 +351,7 @@ function clearPanels() {
     outputsPanel.replaceChildren(label('outputs'));
     tickLabel.textContent = '';
     buses = { inputs: new Map(), outputs: new Map() };
+    clockModes.hidden = true;
 }
 
 /// `name[3]` is bit 3 of the bus `name`; a plain name is a single pin.
@@ -431,10 +446,6 @@ function showDesign() {
         } else {
             button.textContent = pin.name; // text, never markup: escaped identifiers reach here
         }
-        if (seq && pin.name === seq.clock) {
-            button.disabled = true; // the clock is driven, not clicked
-            button.title = `${pin.name}: driven by the ${mode === 'live' ? 'server' : 'page'}, ${seq.period} ticks a cycle`;
-        }
         button.addEventListener('click', () => toggle(i));
         return button;
     });
@@ -450,6 +461,12 @@ function showDesign() {
         else lamp.append(pin.name);
         return lamp;
     });
+    // Every design starts on the automatic clock.
+    clockMode = 'auto';
+    clockOrigin = 0;
+    edges = { active: -Infinity, inactive: -Infinity, input: -Infinity };
+    pendingClock = null;
+    renderClock();
     renderValues();
     setMode(mode === 'live' ? `plot ${livePlot.plot}, settling` : 'simulated here', mode === 'live');
     runButton.disabled = mode === 'live';
@@ -466,7 +483,11 @@ function enableDownloads(on) {
 async function toggle(i) {
     if (!design) return;
     const seq = design.timing?.sequential;
-    if (seq && design.inputs[i].name === seq.clock) return; // the page or the server drives the clock
+    if (seq && design.inputs[i].name === seq.clock) {
+        // The visitor's own clock, in the browser's simulation only; the server drives its own.
+        if (mode === 'sim' && clockMode === 'manual') await clockClick();
+        return;
+    }
     if (mode === 'live') {
         // The server flips the probe block; the lever shows the new state once the stream reports it.
         if (liveSocket?.readyState === WebSocket.OPEN) liveSocket.send(JSON.stringify({ set: design.inputs[i].name, on: inputState[i] !== 1 }));
@@ -476,10 +497,11 @@ async function toggle(i) {
     // input_change_at after the edge (the report's rule, and what the server
     // does in live mode): a click at any other tick is held until then, and a
     // second click before that takes the request back.
+    // With the manual clock the window is the hold time after the last active edge instead.
     const wanted = !(pendingInputs.has(i) ? pendingInputs.get(i) : inputState[i] === 1);
-    if (!seq || tick % seq.period === seq.input_change_at) {
+    if (!seq || inputWindowOpen(seq)) {
         pendingInputs.delete(i);
-        await setInput(i, wanted);
+        await changeInput(i, wanted);
         return;
     }
     if (wanted === (inputState[i] === 1)) pendingInputs.delete(i);
@@ -487,25 +509,138 @@ async function toggle(i) {
     showPending();
 }
 
-/// Marks the levers whose click is waiting for the input window.
+/// Whether a clocked design's inputs may move at this tick: at the cycle's input
+/// window with the automatic clock, or past the hold time after the last active
+/// edge with the manual one.
+function inputWindowOpen(seq) {
+    if (clockMode === 'manual') return tick - edges.active >= seq.input_change_from;
+    return tick >= clockOrigin && (tick - clockOrigin) % seq.period === seq.input_change_at;
+}
+
+/// An input change, remembered for the manual clock's setup rule.
+async function changeInput(i, on) {
+    edges.input = tick;
+    await setInput(i, on);
+}
+
+/// Marks the levers whose click is waiting: an input for its window, the clock for its timing.
 function showPending() {
     const seq = design?.timing?.sequential;
     for (const [i, pin] of design.inputs.entries()) {
         const button = inputsPanel.querySelector(`[data-input="${CSS.escape(pin.name)}"]`);
+        if (seq && pin.name === seq.clock) {
+            button.dataset.pending = pendingClock !== null ? '1' : '0';
+            continue;
+        }
         const held = pendingInputs.has(i);
         button.dataset.pending = held ? '1' : '0';
-        button.title = held ? `${pin.name} changes at cycle tick ${seq.input_change_at}, the next input window` : (button.textContent ? '' : pin.name);
+        const when = clockMode === 'manual' ? 'after the clock edge\'s hold time' : `at cycle tick ${seq?.input_change_at}, the next input window`;
+        button.title = held ? `${pin.name} changes ${when}` : (button.textContent ? '' : pin.name);
     }
 }
 
-/// Applies the held clicks when the tick is the cycle's input window.
+/// Applies the held clicks when the window opens.
 async function applyPendingInputs() {
     const seq = design?.timing?.sequential;
-    if (!seq || !pendingInputs.size || tick % seq.period !== seq.input_change_at) return;
+    if (!seq || !pendingInputs.size || !inputWindowOpen(seq)) return;
     const due = [...pendingInputs];
     pendingInputs.clear();
-    for (const [i, on] of due) await setInput(i, on);
+    for (const [i, on] of due) await changeInput(i, on);
     showPending();
+}
+
+// --- the manual clock (the browser's simulation only)
+
+const clockIndex = () => design.inputs.findIndex((p) => p.name === design.timing.sequential.clock);
+const isActiveLevel = (level, seq) => level === (seq.active === 'rising');
+
+/// Whether the clock may take `level` now: an active edge a full period after the
+/// last, the rest of the period after the last release, and the inputs' setup
+/// after their last change (the report's period less its input window); a release
+/// `high` ticks after the active edge.
+function edgeAllowed(level) {
+    const seq = design.timing.sequential;
+    if (isActiveLevel(level, seq)) {
+        return tick - edges.active >= seq.period && tick - edges.inactive >= seq.period - seq.high && tick - edges.input >= seq.period - seq.input_change_by;
+    }
+    return tick - edges.active >= seq.high;
+}
+
+async function flipClock(level) {
+    const seq = design.timing.sequential;
+    if (isActiveLevel(level, seq)) edges.active = tick;
+    else edges.inactive = tick;
+    await setClock(level);
+}
+
+/// A click on the clock lever: flips it now if the timing allows, else at the first tick it does;
+/// a second click before then takes the flip back.
+async function clockClick() {
+    const current = inputState[clockIndex()] === 1;
+    const wanted = !(pendingClock !== null ? pendingClock : current);
+    if (wanted === current) pendingClock = null;
+    else if (edgeAllowed(wanted)) {
+        pendingClock = null;
+        await flipClock(wanted);
+    } else pendingClock = wanted;
+    showPending();
+}
+
+async function applyPendingClock() {
+    if (pendingClock === null || !edgeAllowed(pendingClock)) return;
+    const level = pendingClock;
+    pendingClock = null;
+    await flipClock(level);
+    showPending();
+}
+
+/// Auto or manual. To manual, the automatic clock's last edges carry over so the first flip keeps
+/// its timing; back to auto, the clock rests a full period from its release (held until the pulse
+/// has had its `high` ticks), as at the start, before the first automatic edge.
+async function setClockMode(next) {
+    const seq = design?.timing?.sequential;
+    if (!seq || mode !== 'sim' || next === clockMode) return;
+    const clock = clockIndex();
+    if (next === 'manual') {
+        const t = tick - clockOrigin;
+        if (t >= seq.period) {
+            const phase = t % seq.period;
+            edges.active = tick - phase;
+            edges.inactive = phase >= seq.high ? edges.active + seq.high : edges.active - (seq.period - seq.high);
+            edges.input = phase >= seq.input_change_at ? edges.active + seq.input_change_at : -Infinity;
+        } else {
+            edges = { active: -Infinity, inactive: Math.max(clockOrigin, 0), input: -Infinity };
+        }
+        clockMode = 'manual';
+        renderClock();
+        showPending();
+        return;
+    }
+    pendingClock = null;
+    const activeNow = isActiveLevel(inputState[clock] === 1, seq);
+    const runningOut = activeNow && tick - edges.active < seq.high;
+    // The pulse runs out, then the rest begins; or the rest begins now.
+    clockOrigin = runningOut ? edges.active + seq.high : tick;
+    clockMode = 'auto';
+    renderClock(); // the buttons answer the click at once; the release below takes a round trip
+    showPending();
+    if (activeNow && !runningOut) await flipClock(seq.active !== 'rising'); // the resting level
+}
+
+/// The clock's controls: shown for a clocked design in the browser, the lever clickable in manual.
+function renderClock() {
+    const seq = design?.timing?.sequential;
+    clockModes.hidden = !(seq && mode === 'sim');
+    clockAutoButton.setAttribute('aria-pressed', String(clockMode === 'auto'));
+    clockManualButton.setAttribute('aria-pressed', String(clockMode === 'manual'));
+    if (!seq) return;
+    const button = inputsPanel.querySelector(`[data-input="${CSS.escape(seq.clock)}"]`);
+    if (!button) return;
+    const manual = mode === 'sim' && clockMode === 'manual';
+    button.disabled = !manual;
+    button.title = manual
+        ? `${seq.clock}: click to flip it; a flip too soon for the circuit waits, dashed`
+        : `${seq.clock}: driven by the ${mode === 'live' ? 'server' : 'page'}, ${seq.period} ticks a cycle`;
 }
 
 /// Flips an input in the simulator and recolours what changed at once.
@@ -523,15 +658,23 @@ async function setClock(on) {
     await setInput(design.inputs.findIndex((p) => p.name === seq.clock), on);
 }
 
-/// The clock, counted in simulated ticks: its active edge at the start of
-/// each period, the other edge `high` ticks later, whatever the wall clock does.
+/// The clock, counted in simulated ticks from clockOrigin: at rest through the
+/// first period, then its active edge at the start of each period and the other
+/// edge `high` ticks later, whatever the wall clock does. Before the origin (a
+/// pulse of the manual clock running out) it is left alone; at the origin it rests.
 async function clockEdges(at) {
     const seq = design.timing?.sequential;
     if (!seq) return;
     const activeHigh = seq.active === 'rising';
-    const phase = at % seq.period;
-    if (phase === 0) await setClock(activeHigh);
-    else if (phase === seq.high) await setClock(!activeHigh);
+    const t = at - clockOrigin;
+    if (t < 0) return;
+    if (t === 0) {
+        if (clockOrigin > 0 && isActiveLevel(inputState[clockIndex()] === 1, seq)) await flipClock(!activeHigh);
+        return;
+    }
+    const phase = t % seq.period;
+    if (phase === 0) await flipClock(activeHigh);
+    else if (phase === seq.high) await flipClock(!activeHigh);
 }
 
 /// Steps the simulator; a step asked for while one is in flight is skipped
@@ -551,8 +694,11 @@ async function step(ticks) {
         view.update(reply.changes);
         setLamps(reply.lamps);
         const seq = design.timing?.sequential;
-        tickLabel.textContent = seq ? `tick ${tick}, cycle tick ${tick % seq.period} of ${seq.period}` : `tick ${tick}`;
-        if (auto) await clockEdges(tick);
+        if (!seq) tickLabel.textContent = `tick ${tick}`;
+        else if (clockMode === 'manual') tickLabel.textContent = `tick ${tick}, manual clock`;
+        else tickLabel.textContent = `tick ${tick}, cycle tick ${(((tick - clockOrigin) % seq.period) + seq.period) % seq.period} of ${seq.period}`;
+        if (auto && clockMode === 'auto') await clockEdges(tick);
+        if (clockMode === 'manual') await applyPendingClock();
         await applyPendingInputs();
     })();
     try {
@@ -567,7 +713,9 @@ async function step(ticks) {
 /// native cycle protocol has it), then active from each period's start for
 /// `high` ticks.
 function clockLevelAt(at, seq) {
-    const active = at >= seq.period && at % seq.period < seq.high;
+    const t = at - clockOrigin;
+    if (t < 0) return seq.active === 'rising'; // a manual pulse still running out: active
+    const active = t >= seq.period && t % seq.period < seq.high;
     return active === (seq.active === 'rising');
 }
 
@@ -575,9 +723,9 @@ function startRunning() {
     running = true;
     runButton.textContent = 'Pause';
     // The clock takes the level its phase implies, so Pause and Run inside a
-    // pulse do not cut the pulse short.
+    // pulse do not cut the pulse short. The manual clock is the visitor's.
     const seq = design?.timing?.sequential;
-    if (seq) {
+    if (seq && clockMode === 'auto') {
         const level = clockLevelAt(tick, seq);
         const clock = design.inputs.findIndex((p) => p.name === seq.clock);
         if (inputState[clock] !== (level ? 1 : 0)) setClock(level);
@@ -846,6 +994,8 @@ releaseButton.addEventListener('click', release);
 window.addEventListener('pagehide', () => leaveLive());
 
 runButton.addEventListener('click', () => (running ? stopRunning() : startRunning()));
+clockAutoButton.addEventListener('click', () => setClockMode('auto'));
+clockManualButton.addEventListener('click', () => setClockMode('manual'));
 compileButton.addEventListener('click', compile);
 downloadButton.addEventListener('click', download);
 reportButton.addEventListener('click', downloadReport);
@@ -984,6 +1134,9 @@ window.redfab = {
     camera,
     selectTab,
     get tab() { return tab; },
+    setClockMode,
+    get clockMode() { return clockMode; },
+    get pendingClock() { return pendingClock; },
     // Frames the view has drawn: a still, hidden or unchanged view draws none.
     get frames() { return view.frames; },
 };
