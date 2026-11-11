@@ -155,6 +155,12 @@ def test_the_pc_side_runs_from_a_clone_as_two_scheduled_tasks():
     assert "redfab.camera.url" in start, "the game is found by the mod's property, so nothing else is killed"
     assert "'--launch', $Instance, '--server', 'localhost:25565'" in start, "Prism launches the instance joining through the tunnel"
     assert "'--startstreaming'" in start and "'--disable-shutdown-check'" in start, "OBS streams at once and skips the safe-mode question after a kill"
+    # Found on the PC, 2026-11-11: OBS 32 keeps a sentinel per run under obs-studio\.sentinel and drops
+    # it on a clean exit; after the restart's kill, the next OBS stopped on its "Crash Detected" dialog,
+    # flag or no flag, and streamed nothing. The start clears them before OBS runs again.
+    clear = start.find("obs-studio\\.sentinel")
+    assert clear != -1 and "Remove-Item" in start[clear - 200:clear + 200], "the start clears OBS's crash sentinels"
+    assert clear < start.find("Start-Process -FilePath $Obs"), "the sentinels are cleared before OBS starts"
     assert "-WorkingDirectory (Split-Path $Obs)" in start, "OBS wants its own folder as the working directory"
     install = scripts["install.ps1"]
     assert "Register-ScheduledTask" in install and "-AtLogOn" in install and "-Daily -At" in install
