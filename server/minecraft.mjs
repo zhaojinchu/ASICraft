@@ -30,6 +30,10 @@ export const PROFILE_FILE = join(root, 'harness/data/server_profile.json');
 export const PROFILE = JSON.parse(readFileSync(PROFILE_FILE, 'utf8'));
 export const GAMERULES = PROFILE.gamerules;
 export const MOTD = 'redfab live playground';
+// The live world's flat layers, as server.properties writes them (colons escaped): air up to
+// y = 59, black concrete at y = 60, the void's biome. LIVE_FLOOR_Y is that floor's height.
+export const LIVE_FLOOR_Y = 60;
+export const LIVE_GROUND = '{"layers"\\:[{"block"\\:"minecraft\\:air","height"\\:124},{"block"\\:"minecraft\\:black_concrete","height"\\:1}],"biome"\\:"minecraft\\:the_void"}';
 const FILL_LIMIT = 32_768; // blocks per fill command, the game's default limit
 
 /// What the backend writes to server.properties: the profile's defaults, this
@@ -39,8 +43,11 @@ const FILL_LIMIT = 32_768; // blocks per fill command, the game's default limit
 /// as it joins, which a command cannot, since the camera's mod says hello from the
 /// title screen, before its player is in the world. The harness never has players.
 /// The camera sees 16 chunks (256 blocks) where the profile's 4 cut every design
-/// short of its far edge; the void world makes the extra chunks cheap, and the
+/// short of its far edge; the flat world makes the extra chunks cheap, and the
 /// simulation distance stays the profile's, since the plots are forceloaded.
+/// Under the plots, which are placed at y = 64, is a floor of black concrete at
+/// y = 60 (124 layers of air, then the floor), plain for the camera and four
+/// blocks clear of every circuit, which a solid block beside dust would change.
 export function serverProperties({ gamePort, rconPort, password }) {
     return {
         ...PROFILE.properties,
@@ -51,6 +58,7 @@ export function serverProperties({ gamePort, rconPort, password }) {
         'gamemode': 'spectator',
         'force-gamemode': 'true',
         'view-distance': '16',
+        'generator-settings': LIVE_GROUND,
         'motd': MOTD,
     };
 }
@@ -336,6 +344,10 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
         if (!reply.includes('is now set to')) throw new Error(`gamerule ${rule}: ${reply}`);
     }
     // Plot clears are big fills; the harness never fills past the game's default, so this is the backend's alone.
+    // Time stands still (advance_time is off), but a new world stands still at sunrise: noon,
+    // for the camera's even light. The harness never looks, so this is the backend's alone.
+    const noon = await rcon.command('time set noon');
+    if (!/set the time/i.test(noon)) log(`time set noon: ${noon.trim()}`);
     const limitReply = await rcon.command(`gamerule max_block_modifications ${PROFILE.max_block_modifications}`);
     const fillLimit = limitReply.includes('is now set to') ? PROFILE.max_block_modifications : FILL_LIMIT;
     if (fillLimit === FILL_LIMIT) log(`fills stay under ${FILL_LIMIT} blocks (${limitReply.trim()})`);

@@ -23,7 +23,10 @@ differences go on top, explicitly: its motd, `online-mode=false`,
 `gamemode=spectator` with `force-gamemode=true` (the camera's player is the
 only one, and the server makes it a spectator as it joins), `view-distance`
 16 in place of the profile's 4 (the camera sees 256 blocks; the simulation
-distance stays 4, since the plots are forceloaded), and the
+distance stays 4, since the plots are forceloaded), a floor of black concrete
+at y = 60 in place of the void (the plots sit at y = 64, so it touches none),
+noon set once at start (time stands still from the profile, but a new world
+stands still at sunrise), and the
 `max_block_modifications` gamerule raised for its plot clears (the harness
 never fills past the game's default). `tools/live_test.mjs` and
 `harness/tests/test_server_profile.py` hold both sides to the file.
