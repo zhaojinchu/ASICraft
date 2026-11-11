@@ -74,7 +74,7 @@ async function controller(base, wsBase, name, extra = {}) {
 
 const runDir = join(root, 'build/mc/live-check');
 // The checks come from one machine, so the per-address limits are lifted here.
-const live = await startLive({ runDir, port: 0, plots: PLOTS, perIp: { plots: PLOTS, compiles: 2, submissionsPerHour: 100 }, log: (m) => console.log(`  [live] ${m}`) });
+const live = await startLive({ runDir, port: 0, plots: PLOTS, prewarm: [], perIp: { plots: PLOTS, compiles: 2, submissionsPerHour: 100 }, log: (m) => console.log(`  [live] ${m}`) });
 const base = `http://127.0.0.1:${live.port}`;
 const wsBase = `ws://127.0.0.1:${live.port}`;
 let browser = null;

@@ -23,10 +23,12 @@
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { dirname, extname, join, posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { Worker } from 'node:worker_threads';
+import zlib from 'node:zlib';
 import { buildWasm, root } from './common.mjs';
 const TYPES = {
     '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
@@ -34,6 +36,11 @@ const TYPES = {
     '.css': 'text/css', '.map': 'application/json', '.d.ts': 'text/plain', '.txt': 'text/plain; charset=utf-8',
     '.ttf': 'font/ttf', '.nbt': 'application/octet-stream',
 };
+
+const brotli = promisify(zlib.brotliCompress);
+const zstd = zlib.zstdCompress ? promisify(zlib.zstdCompress) : null; // Node 26 has it; an older one sends br or gzip
+const gzip = promisify(zlib.gzip);
+const Z = zlib.constants;
 
 // The only packages the page loads; nothing else under node_modules is served.
 export const PACKAGES = ['@yowasp/yosys', 'three'];
@@ -88,7 +95,7 @@ export async function prepareOpening({ wasm, name = OPENING, log = () => {} }) {
 export function resolve(url, core = CORE_DEFAULT) {
     let path;
     try {
-        path = normalize(decodeURIComponent(url.split('?')[0]));
+        path = posix.normalize(decodeURIComponent(url.split('?')[0]));
     } catch {
         return null; // a malformed escape such as /%
     }
@@ -142,8 +149,70 @@ export function contentSecurityPolicy(html = '') {
     ].join('; ');
 }
 
+// --- versioned package files, precompressed once at the strongest settings
+//
+// The proxy compresses on the fly at its fast default, which left the Yosys core
+// at 14.3 MB, and does not compress its resources tar at all (10.6 MB, a type
+// outside its list): about 25 MB before a first compile, from a box far from
+// most visitors. Compressed once and kept, they are 9.5 and 0.4 MB with brotli
+// (10.1 and 0.5 with zstd). A /pkg path carries its version, so a file there
+// never changes; its variants live under build/pkg-compressed/, keyed by the
+// file's size and time as well, and are made in the background on the first
+// request (the raw file is served meanwhile), one file at a time.
+
+export const PRECOMPRESS_MIN_BYTES = 1_000_000;
+// The client's preference decides among these; the order is ours: smallest first.
+const ENCODINGS = [['br', 'br'], ['zstd', 'zst'], ['gzip', 'gz']].filter(([name]) => name !== 'zstd' || zstd);
+const compressedRoot = join(root, 'build/pkg-compressed');
+const making = new Map(); // variant base path -> the promise making its variants
+let queue = Promise.resolve();
+
+function variantBase(url, info) {
+    const path = posix.normalize(decodeURIComponent(url.split('?')[0])).replace(/^[/\\]+/, '');
+    return join(compressedRoot, `${path}.${info.size.toString(16)}-${Math.floor(info.mtimeMs).toString(16)}`);
+}
+
+/// Makes the three variants of `file` under `base`, once; resolves when they are on disk.
+export function precompress(file, base) {
+    if (!making.has(base)) {
+        const job = queue.then(async () => {
+            if (ENCODINGS.every(([, ext]) => existsSync(`${base}.${ext}`))) return;
+            const raw = await readFile(file);
+            mkdirSync(dirname(base), { recursive: true });
+            const levels = {
+                br: (b) => brotli(b, { params: { [Z.BROTLI_PARAM_QUALITY]: 11, [Z.BROTLI_PARAM_SIZE_HINT]: b.length } }),
+                zst: (b) => zstd(b, { params: { [Z.ZSTD_c_compressionLevel]: 19 } }),
+                gz: (b) => gzip(b, { level: 9 }),
+            };
+            for (const [, ext] of ENCODINGS) {
+                const out = `${base}.${ext}`;
+                if (existsSync(out)) continue;
+                const packed = await levels[ext](raw);
+                await writeFile(`${out}.tmp`, packed);
+                await rename(`${out}.tmp`, out); // never half a file under the served name
+            }
+        });
+        queue = job.catch(() => {});
+        making.set(base, job);
+    }
+    return making.get(base);
+}
+
+/// The encoding to send: the first of ours the client accepts (q > 0) whose variant is ready.
+function pickEncoding(acceptEncoding, base) {
+    const accepted = new Set();
+    for (const part of String(acceptEncoding ?? '').split(',')) {
+        const [token, ...params] = part.trim().toLowerCase().split(';');
+        const q = params.map((p) => p.trim()).find((p) => p.startsWith('q='));
+        if (token && !(q && Number(q.slice(2)) === 0)) accepted.add(token);
+    }
+    return ENCODINGS.find(([name, ext]) => accepted.has(name) && existsSync(`${base}.${ext}`)) ?? null;
+}
+
 /// Answers a static request: the file, 304 when the client has it, 404 otherwise.
-/// `core` is the file served at /core/redfab_wasm.wasm (see CORE_DEFAULT).
+/// `core` is the file served at /core/redfab_wasm.wasm (see CORE_DEFAULT). A
+/// versioned package file of PRECOMPRESS_MIN_BYTES or more goes out precompressed
+/// when the client accepts one of its variants and the variant is ready.
 export async function serveStatic(req, res, { core = CORE_DEFAULT } = {}) {
     const file = resolve(req.url, core);
     let info;
@@ -156,19 +225,32 @@ export async function serveStatic(req, res, { core = CORE_DEFAULT } = {}) {
         res.writeHead(404, { 'content-type': 'text/plain', 'cache-control': 'no-store', 'content-security-policy': contentSecurityPolicy() });
         return res.end('not found');
     }
-    const etag = `"${info.size.toString(16)}-${Math.floor(info.mtimeMs).toString(16)}"`;
-    const body = await readFile(file);
+    let etag = `"${info.size.toString(16)}-${Math.floor(info.mtimeMs).toString(16)}"`;
     const headers = {
         'content-type': TYPES[extname(file)] ?? 'application/octet-stream',
         'cache-control': cacheControl(req.url),
-        etag,
-        'content-security-policy': contentSecurityPolicy(extname(file) === '.html' ? body.toString('utf8') : ''),
         'x-content-type-options': 'nosniff',
     };
+    let path = file;
+    if (req.url.startsWith('/pkg/') && info.size >= PRECOMPRESS_MIN_BYTES) {
+        const base = variantBase(req.url, info);
+        precompress(file, base).catch(() => {}); // a failure leaves the raw file served
+        const chosen = pickEncoding(req.headers['accept-encoding'], base);
+        headers.vary = 'Accept-Encoding';
+        if (chosen) {
+            const [name, ext] = chosen;
+            path = `${base}.${ext}`;
+            headers['content-encoding'] = name;
+            etag = `${etag.slice(0, -1)}-${ext}"`;
+        }
+    }
+    headers.etag = etag;
     if (req.headers['if-none-match'] === etag) {
-        res.writeHead(304, headers);
+        res.writeHead(304, { ...headers, 'content-security-policy': contentSecurityPolicy() });
         return res.end();
     }
+    const body = await readFile(path);
+    headers['content-security-policy'] = contentSecurityPolicy(extname(file) === '.html' ? body.toString('utf8') : '');
     res.writeHead(200, headers);
     return res.end(body);
 }

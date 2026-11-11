@@ -11,11 +11,11 @@
 // prebuilt core (deploy/ship_core.sh), so the machine needs no Rust toolchain;
 // without it the core is built here first.
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { LIMITS } from '../playground/compile.js';
+import { EXAMPLES, LIMITS } from '../playground/compile.js';
 import { contentSecurityPolicy, prepareOpening, serveStatic } from '../tools/playground_serve.mjs';
 import { createCamera } from './camera.mjs';
 import { PlotError, Plots } from './plots.mjs';
@@ -43,6 +43,10 @@ export const DEFAULTS = {
     relayApi: null, // the video relay's API on loopback (MediaMTX with api: true), for the status
     camera: {}, // turnSeconds, idleSeconds, pollSeconds: CAMERA_DEFAULTS in server/camera.mjs
     tickEverySeconds: 5,
+    // Example names to compile into the cache at start, one at a time in the background
+    // (true: all of EXAMPLES). Off here, so a test's backend compiles nothing it was not
+    // asked to; startLive, the deployment's path, turns it on.
+    prewarm: [],
     wasm: join(root, 'target/wasm32-unknown-unknown/release/redfab_wasm.wasm'),
     source: { kind: 'live' },
 };
@@ -87,6 +91,20 @@ export async function createLive(options) {
     };
     const { world, log = () => {} } = opts;
     const sandbox = createSandbox({ wasm: opts.wasm, ...opts.compile, testHooks: opts.testHooks === true, log });
+    // The shipped examples, compiled into the cache as the page would send them (top `top`,
+    // the example's name), so a visitor who runs one unedited, the usual first run, waits for
+    // no compile: counter4 took 17 s on the deployed box. Errors are logged, never fatal.
+    const prewarmNames = opts.prewarm === true ? EXAMPLES : (opts.prewarm || []);
+    const prewarmed = (async () => {
+        for (const name of prewarmNames) {
+            try {
+                await sandbox.compile({ source: readFileSync(join(root, 'designs', name, 'top.sv'), 'utf8'), top: 'top', name });
+            } catch (err) {
+                log(`prewarm ${name}: ${err.message}`);
+            }
+        }
+        if (prewarmNames.length) log(`compiled ${prewarmNames.length} examples into the cache`);
+    })();
     const plots = new Plots({
         world,
         count: opts.plots,
@@ -381,6 +399,8 @@ export async function createLive(options) {
         plots,
         sandbox,
         status,
+        /// Resolves once the examples asked for in `prewarm` are in the compile cache.
+        prewarmed,
         /// The addresses the submission limit remembers (for the checks).
         get addresses() {
             return [...new Set([...submissions.keys(), ...compiling.keys()])].sort();
@@ -403,7 +423,7 @@ export async function startLive({ runDir, log = () => {}, ...options }) {
     const minecraft = await launchMinecraft({ runDir, log, gamePort: options.gamePort ?? null });
     let live;
     try {
-        live = await createLive({ ...options, world: minecraft.world, source: minecraft.source, log });
+        live = await createLive({ prewarm: true, ...options, world: minecraft.world, source: minecraft.source, log });
     } catch (err) {
         await minecraft.close();
         throw err;
