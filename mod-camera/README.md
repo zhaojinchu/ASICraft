@@ -24,7 +24,9 @@ tick:
 - The position is set outright every tick, so the keyboard at the PC does
   nothing, and it is kept over the plots' area.
 
-A line in the corner of the HUD names the plot and who drives.
+The HUD is not drawn while the mod is the camera (the property is set): no
+crosshair, chat or hotbar over the circuits, as F1 would do without touching
+the game's own state. The page says which plot is on camera and who drives.
 
 ## Inside
 

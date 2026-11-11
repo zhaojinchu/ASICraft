@@ -133,12 +133,9 @@ public final class CameraMod implements ClientModInitializer {
         player.setDeltaMovement(0, 0, 0);
     }
 
-    /// One line for an overlay: the plot framed and who drives.
-    public static String overlay() {
-        if (URL == null) return null;
-        if (!connected) return "redfab camera: connecting to the backend";
-        String where = framed == null ? "no plot yet" : "plot " + framed.plot();
-        boolean driven = tick - lastDriveTick <= HANDS_OFF_TICKS;
-        return "redfab camera: " + where + (driven ? (lastOwner ? ", driven by its owner" : ", driven by a visitor") : ", automatic");
+    /// Whether the HUD is hidden: always while this is the camera (the property is set), so the
+    /// stream is the game's picture alone; the page says which plot is on camera and who drives.
+    public static boolean hidesHud() {
+        return URL != null;
     }
 }
