@@ -21,7 +21,7 @@ import { loadCore } from '../playground/core.js';
 import { LIMITS } from '../playground/compile.js';
 import { DEFAULTS, cliOptions, createLive } from '../server/live.mjs';
 import { smoke } from './smoke_remote.mjs';
-import { GAMERULES, MOTD, PROFILE_FILE, javaArgs, javaPath, killLeftover, observe, requireEula, serverProperties } from '../server/minecraft.mjs';
+import { GAMERULES, MOTD, PROFILE_FILE, javaArgs, javaPath, killLeftover, observe, offlineUuid, requireEula, serverProperties, writeWhitelist } from '../server/minecraft.mjs';
 import { Rcon } from '../server/rcon.mjs';
 import { acceptWebSocket } from '../server/ws.mjs';
 import { buildWasm } from './common.mjs';
@@ -66,7 +66,11 @@ class FakeWorld {
         this.scramble = false; // stream states with their properties in the other order
         this.healthOverride = {};
         this.reconnects = 0;
-        this.commands = []; // every other command the backend ran (the camera's gamemode, say)
+        this.commands = []; // every other command the backend ran
+        this.allowed = []; // the players the camera put on the whitelist
+    }
+    async allow(name) {
+        this.allowed.push(name);
     }
     onBatch(cb) {
         this.listeners.push(cb);
@@ -1145,15 +1149,34 @@ test('the server configuration is the shared profile plus the backend\'s own dif
     assert.deepEqual(GAMERULES, profile.gamerules, 'the gamerules are the profile\'s, the same the harness sets');
     assert.equal(Object.keys(GAMERULES).length, 14);
     const written = serverProperties({ gamePort: 25565, rconPort: 25575, password: 'hunter2' });
-    for (const [k, v] of Object.entries(profile.properties)) assert.equal(written[k], v, k);
+    // The one profile value the backend changes: the camera's view, 16 chunks where the profile's 4 cut
+    // every design short of its far edge (seen on the deployed box's camera, 2026-11-11).
+    const changed = { 'view-distance': '16' };
+    for (const [k, v] of Object.entries(profile.properties)) assert.equal(written[k], changed[k] ?? v, k);
+    assert.equal(profile.properties['simulation-distance'], written['simulation-distance'], 'the plots are forceloaded; only the view grows');
     assert.deepEqual([written['server-port'], written['rcon.port'], written['rcon.password']], ['25565', '25575', 'hunter2']);
     const own = Object.keys(written).filter((k) => !(k in profile.properties)).sort();
-    assert.deepEqual(own, ['motd', 'online-mode', 'rcon.password', 'rcon.port', 'server-port'], 'this run\'s values and the backend\'s two differences, nothing else');
+    assert.deepEqual(own, ['force-gamemode', 'gamemode', 'motd', 'online-mode', 'rcon.password', 'rcon.port', 'server-port'], 'this run\'s values and the backend\'s own differences, nothing else');
     assert.equal(written['online-mode'], 'false');
+    assert.deepEqual([written.gamemode, written['force-gamemode']], ['spectator', 'true'], 'every player joins as a spectator');
     assert.equal(written.motd, MOTD);
     const args = javaArgs({ runDir: '/run', observerPort: 7 });
     assert.deepEqual(args.slice(0, profile.jvm_args.length), profile.jvm_args, 'the JVM arguments are the profile\'s');
     assert.ok(args.includes('-Dredfab.run=/run') && args.includes('-Dredfab.observer.port=7') && args.at(-1) === '--nogui');
+});
+
+test('the camera\'s player is whitelisted by the UUID an offline server gives it', () => {
+    // Notch's is the widely published offline UUID; therealchubacca's is the name of the player file the
+    // deployed box's server wrote when that account joined it on 2026-11-11 (world/players/data/).
+    assert.equal(offlineUuid('Notch'), 'b50ad385-829d-3141-a216-7e7d7539ba7f');
+    assert.equal(offlineUuid('therealchubacca'), 'fadc2344-683e-346c-a6d2-c8231576214a');
+    const dir = mkdtempSync(join(tmpdir(), 'redfab-whitelist-'));
+    assert.deepEqual(writeWhitelist(dir, 'Steve_7'), [{ uuid: offlineUuid('Steve_7'), name: 'Steve_7' }], 'a run with no whitelist file gets one');
+    writeFileSync(join(dir, 'whitelist.json'), JSON.stringify([{ uuid: '2b99313a-a580-4881-aca1-99885753a8eb', name: 'Steve_7' }]));
+    writeWhitelist(dir, 'Steve_7');
+    writeWhitelist(dir, 'Steve_7');
+    const written = JSON.parse(readFileSync(join(dir, 'whitelist.json'), 'utf8'));
+    assert.deepEqual(written.map((e) => e.uuid), ['2b99313a-a580-4881-aca1-99885753a8eb', offlineUuid('Steve_7')], 'the entries there are kept, and the offline one is added once');
 });
 
 test('every shipped design fits the default plot', () => {
@@ -1424,7 +1447,7 @@ async function guestOf(wsBase, plot) {
     return guest;
 }
 
-test('the camera socket takes the mod by its key, puts its player in spectator mode, and frames each placement and lever change', async () => {
+test('the camera socket takes the mod by its key, whitelists its player, and frames each placement and lever change', async () => {
     const { backend, world, base, wsBase } = await live({ cameraKey: 'secret', plots: 2 });
     try {
         assert.deepEqual((await api(base, '/api/status')).body.camera, { connected: false, player: null, driver: null, queue: 0, plot: null, streaming: null });
@@ -1432,10 +1455,13 @@ test('the camera socket takes the mod by its key, puts its player in spectator m
         await assert.rejects(connect(`${wsBase}/camera`).opened, 'no key was let in');
         const { mod, hello } = await cameraMod(wsBase);
         assert.equal(hello.hello, 'redfab-live');
-        await waitFor(() => world.commands.includes('gamemode spectator Steve_7'));
-        assert.equal(world.commands.filter((c) => c.startsWith('gamemode')).length, 1);
-        // The camera's player is whitelisted by the backend, so no operator reads the run's RCON password for it.
-        assert.ok(world.commands.includes('whitelist add Steve_7'), `the player was not whitelisted: ${world.commands}`);
+        // The camera's player is whitelisted by the backend, so no operator reads the run's RCON password for it,
+        // and by the world's allow, not by command: `whitelist add` lists the account's online UUID, which the
+        // offline server never sees, and a gamemode command sent with the hello finds nobody (the server's
+        // force-gamemode makes the player a spectator as it joins). Found joining the deployed box, 2026-11-11.
+        await waitFor(() => world.allowed.includes('Steve_7'));
+        assert.deepEqual(world.allowed, ['Steve_7']);
+        assert.deepEqual(world.commands.filter((c) => c.startsWith('gamemode') || c.startsWith('whitelist')), [], 'the hello ran a command');
         assert.deepEqual((await api(base, '/api/status')).body.camera, { connected: true, player: 'Steve_7', driver: null, queue: 0, plot: null, streaming: null });
         // A placement frames its plot: the plot's number, its origin and the design's size, for the mod to fly to.
         const first = await livePlot(base, wsBase, world, 'not1');
@@ -1449,9 +1475,16 @@ test('the camera socket takes the mod by its key, puts its player in spectator m
         await first.client.next((m) => m.ok === true);
         await mod.next((m) => m.frame?.plot === first.plot.plot);
         assert.equal((await api(base, '/api/status')).body.camera.plot, first.plot.plot);
-        // A second mod is refused while one is connected; the mod going away shows in the status.
-        await assert.rejects(connect(`${wsBase}/camera?key=secret`).opened, 'a second camera was let in');
-        mod.close();
+        // A newer mod replaces the one connected, whose socket the backend closes: a game killed without
+        // closing its socket (the PC's nightly restart force-kills it) left that socket open on the box for
+        // ten minutes, and refusing the newer mod kept the camera off all that time (found on the deployed
+        // box, 2026-11-11). The replaced socket's close takes nothing away; the newer mod's hello has the frame.
+        const { mod: newer, hello: newerHello } = await cameraMod(wsBase);
+        assert.deepEqual(newerHello.frame, { plot: first.plot.plot, origin: first.plot.origin, size: first.plot.design.size });
+        await waitFor(() => mod.ws.readyState === WebSocket.CLOSED);
+        assert.equal((await api(base, '/api/status')).body.camera.connected, true, 'the replaced socket\'s close took the camera away');
+        // The mod going away shows in the status.
+        newer.close();
         await waitFor(async () => (await api(base, '/api/status')).body.camera.connected === false);
         // A hello that is not a player name is refused, the socket closed, and the game never asked.
         const bad = connect(`${wsBase}/camera?key=secret`);
@@ -1460,7 +1493,7 @@ test('the camera socket takes the mod by its key, puts its player in spectator m
         const refused = await bad.next((m) => m.error !== undefined);
         assert.match(refused.error, /player name/);
         await waitFor(() => bad.ws.readyState === WebSocket.CLOSED);
-        assert.equal(world.commands.filter((c) => c.startsWith('gamemode') || c.startsWith('whitelist')).length, 2, 'the bad name reached the game');
+        assert.deepEqual(world.allowed, ['Steve_7', 'Steve_7'], 'the bad name reached the game');
         // Without a key configured there is no camera at all.
         const plain = await live({ plots: 1 });
         try {
