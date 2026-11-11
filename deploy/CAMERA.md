@@ -39,8 +39,9 @@ no shell, no other forwarding. The game's port is fixed at 25565 by the
 backend's unit (`--game-port 25565`; without it the backend takes a free
 port at every start). It never opens to the internet and `online-mode`
 stays off, which is acceptable only because this tunnel is the one way in.
-The whitelist is on, and the backend adds your player's name to it when the
-mod says hello, so that nobody else can join through a leaked key.
+The whitelist is on, and the backend adds your player to it when the mod
+says hello, so that nobody else can join through a leaked key. Every player
+joins as a spectator (`force-gamemode` in the backend's server settings).
 
 ## On the PC, once
 
@@ -75,9 +76,10 @@ In PowerShell, as your user. Steps 1 and 2 need nothing from the box.
    Launch once; Prism fetches the game and, if it asks, a Java for it (26.3
    runs on Java 25). The mod reads the property at start, connects outbound
    to the backend, says hello with your player name, and the backend puts
-   you in spectator mode.
+   you on the whitelist; the server makes you a spectator when you join.
 
-5. **The game.** Video settings: render distance 12, max framerate 30, VSync
+5. **The game.** Video settings: render distance 16 (the server's view
+   distance; more shows nothing more), max framerate 30, VSync
    off, "pause on lost focus" off, fullscreen off at 1280 by 720 (the stream's
    size). Multiplayer, Direct Connect, `localhost:25565`. You appear as a
    spectator above the plots; the mod flies the camera from then on, and the

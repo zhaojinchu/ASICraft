@@ -19,7 +19,11 @@ or, before the link exists, the macOS JDK path.
 The Minecraft server is configured from `harness/data/server_profile.json`,
 the same file the harness uses: the gamerules that keep the world inert, the
 `server.properties` defaults and the JVM arguments. The backend's own
-differences go on top, explicitly: its motd, `online-mode=false`, and the
+differences go on top, explicitly: its motd, `online-mode=false`,
+`gamemode=spectator` with `force-gamemode=true` (the camera's player is the
+only one, and the server makes it a spectator as it joins), `view-distance`
+16 in place of the profile's 4 (the camera sees 256 blocks; the simulation
+distance stays 4, since the plots are forceloaded), and the
 `max_block_modifications` gamerule raised for its plot clears (the harness
 never fills past the game's default). `tools/live_test.mjs` and
 `harness/tests/test_server_profile.py` hold both sides to the file.
@@ -137,17 +141,23 @@ backend takes one more socket, `/camera?key=KEY`: the camera mod
 the server through an SSH tunnel as a spectator, whose view OBS streams to a
 relay on the box and the page plays (stage 14 of `docs/PLAN.md`;
 `server/camera.mjs`). The mod says `{"hello": "redfab-camera", "player":
-NAME}`; the backend runs `gamemode spectator NAME` and `whitelist add NAME`
-once (the whitelist is on in the profile, and nobody reads the run's RCON
-password for it) and answers `{"hello": "redfab-live", "frame": ...}`. The
+NAME}`; the backend puts the player on the run's `whitelist.json` by the
+UUID an offline server gives it and runs `whitelist reload` (26.3's
+whitelist is on by default, and nobody reads the run's RCON password for
+it; `whitelist add NAME` would list the account's online UUID, which the
+offline server never sees) and answers `{"hello": "redfab-live", "frame":
+...}`. The hello comes from the title screen, before the player joins, so
+spectator mode is the server's own (`force-gamemode`), not a command. The
 game's port is a free one at every start unless `--game-port N` fixes it
 (still on loopback), which a deployment with a camera does, so the PC's
 tunnel can name it. From then on it sends the mod where
 to look: `{"frame": {"plot": N, "origin": [x, y, z], "size": [sx, sy, sz]}}`
 on every placement and lever change while nobody drives, and a driver's
 inputs, `{"drive": {"move": [x, y, z], "look": [yaw, pitch], "plot": N,
-"owner": true|false}}`, as they come. One mod at a time (a second is refused
-with 409); the wrong key is 403; without a key there is no socket (404).
+"owner": true|false}}`, as they come. One mod at a time: a newer one's hello
+replaces the one connected, whose socket the backend closes (a game killed
+without closing its socket leaves it open on the box for minutes); the wrong
+key is 403; without a key there is no socket (404).
 
 Driving is asked for on a plot's `/live` socket: `{"drive": "take"}`,
 `{"drive": "release"}`, or `{"drive": {"move": [x, y, z], "look": [yaw,

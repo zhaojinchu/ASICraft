@@ -57,7 +57,8 @@ it exits 0 only if every step passed in time.
   when the game dies it exits 2 and `systemd` restarts both. If it keeps dying,
   the journal says why.
 - Updates: on the machine, as root,
-  `cd /opt/redfab && git pull && sudo -u redfab npm ci --no-audit --no-fund && sudo -u redfab tools/build_mod.sh`,
+  `cd /opt/redfab && sudo -u redfab git pull && sudo -u redfab npm ci --no-audit --no-fund && sudo -u redfab tools/build_mod.sh`
+  (git as the `redfab` user, who owns the checkout: as root it refuses with "dubious ownership"),
   from your machine `deploy/ship_core.sh root@NAME` if the core changed, then
   `systemctl restart redfab-live`. A restart releases every plot; do it when the
   status shows none in use.
