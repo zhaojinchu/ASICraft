@@ -81,7 +81,14 @@ In PowerShell, as your user. Steps 1 and 2 need nothing from the box.
 5. **The game.** Video settings: render distance 16 (the server's view
    distance; more shows nothing more), max framerate 30, VSync
    off, "pause on lost focus" off, fullscreen off at 1280 by 720 (the stream's
-   size). Multiplayer, Direct Connect, `localhost:25565`. You appear as a
+   size), and as plain as the game allows: clouds off, particles minimal,
+   entity shadows, smooth lighting, vignette, view bobbing and the
+   distortion and FOV effects off, biome blend 0, chunk fade-in 0. In
+   `options.txt` of the instance's `minecraft` folder, with the game closed:
+   `renderClouds:"false"`, `particles:2`, `entityShadows:false`, `ao:false`,
+   `vignette:false`, `bobView:false`, `screenEffectScale:0.0`,
+   `fovEffectScale:0.0`, `darknessEffectScale:0.0`, `biomeBlendRadius:0`,
+   `chunkSectionFadeInTime:0.0`. Multiplayer, Direct Connect, `localhost:25565`. You appear as a
    spectator above the plots; the mod flies the camera from then on, and the
    overlay line in the corner names the plot and who drives. The backend's
    log on the box says "camera: NAME connected".
