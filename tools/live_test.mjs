@@ -18,7 +18,7 @@ import { connect as netConnect, createServer as createNetServer } from 'node:net
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadCore } from '../playground/core.js';
-import { LIMITS } from '../playground/compile.js';
+import { EXAMPLES, LIMITS } from '../playground/compile.js';
 import { DEFAULTS, cliOptions, createLive } from '../server/live.mjs';
 import { smoke } from './smoke_remote.mjs';
 import { GAMERULES, LIVE_FLOOR_Y, LIVE_GROUND, MOTD, PROFILE_FILE, javaArgs, javaPath, killLeftover, observe, offlineUuid, requireEula, serverProperties, writeWhitelist } from '../server/minecraft.mjs';
@@ -649,6 +649,31 @@ test('a fresh plot nobody connects to is released after a short grace, not the i
     } finally {
         await backend.close();
     }
+});
+
+test('the examples asked for are compiled into the cache at start, so running one unedited waits for no compile', async () => {
+    // counter4 took 17 s to compile on the deployed box (2026-11-11); most first runs are an unedited example.
+    const { backend, base } = await live({ prewarm: ['not1', 'nor2'] });
+    try {
+        await backend.prewarmed;
+        assert.deepEqual(backend.sandbox.cache, { entries: 2, hits: 0, misses: 2 }, 'the two examples were not compiled at start');
+        const started = Date.now();
+        const reply = await submit(base, 'not1');
+        assert.equal(reply.status, 200, reply.body.error);
+        assert.equal(backend.sandbox.cache.hits, 1, 'the example was compiled again instead of served from the cache');
+        assert.ok(Date.now() - started < 1500, `an example already compiled took ${Date.now() - started} ms to submit`);
+    } finally {
+        await backend.close();
+    }
+    // A backend not asked compiles nothing at start (the tests' own, and the in-game check's).
+    const plain = await live();
+    try {
+        await plain.backend.prewarmed;
+        assert.deepEqual(plain.backend.sandbox.cache, { entries: 0, hits: 0, misses: 0 });
+    } finally {
+        await plain.backend.close();
+    }
+    assert.ok(EXAMPLES.includes('counter4') && EXAMPLES.every((n) => existsSync(join(root, 'designs', n, 'top.sv'))), 'every example the page offers is under designs/');
 });
 
 test('compiles run one at a time, the queue is bounded, and a source seen before is served from the cache', async () => {

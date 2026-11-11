@@ -158,9 +158,19 @@ try {
         check(await page.evaluate((n) => window.redfab.design?.name === n && window.redfab.mode === 'sim' && window.redfab.running, OPENING), 'the opening circuit is not running in the simulator');
         check(await page.$eval('#examples', (e) => e.value) === OPENING, 'the dropdown does not show the opening example');
         const status = await page.$eval('#status', (e) => [e.className, e.textContent]);
-        check(status[0] === 'ok' && new RegExp(`^${OPENING}, as built: \\d+ cells \\(the router manages about \\d+ today\\); \\d+ blocks in \\d+ x \\d+; clock clk at \\d+ ticks a cycle\\.`).test(status[1]), `the opening status reads ${JSON.stringify(status)}`);
-        check(/^About \d+ cells \(an 8-bit adder\) compile inside the \d+ s limit\.$/.test(await page.$eval('#capacity', (e) => e.textContent.trim())), 'the page does not state the size that works');
+        // The status line says what is on show in plain words; the numbers are the result card's (asked for 2026-11-11).
+        check(status[0] === 'ok' && status[1] === `${OPENING}, running in your browser.`, `the opening status reads ${JSON.stringify(status)}`);
+        check(await page.$('#capacity') === null, 'the capacity line is back under the editor');
+        // With no camera the tabs are hidden, and the circuit still fills the stage (it once collapsed to nothing).
+        check(await page.$eval('#tabs', (e) => e.hidden) && await page.$eval('#view', (e) => e.getBoundingClientRect().height) > 300, 'without a camera the circuit view does not fill the stage');
         check(!fetched.some((p) => p.includes('/pkg/@yowasp/yosys')), 'the compiler was fetched before anyone asked to compile');
+        // A still view draws nothing: with the simulation paused, no frame in half a second.
+        await page.evaluate(async () => { window.redfab.stop(); await window.redfab.idle(); });
+        await sleep(300);
+        const still = await page.evaluate(() => window.redfab.frames);
+        await sleep(500);
+        check(await page.evaluate(() => window.redfab.frames) === still, 'the view keeps drawing frames with nothing changing');
+        await page.evaluate(() => document.getElementById('run').click());
         check(await page.$('a[href="https://github.com/zhaojinchu/ASICraft"]') !== null, 'no link to the repository');
         check(await page.evaluate(async () => { await document.fonts.ready; return document.fonts.check('20px Monocraft'); }), 'the heading font did not load');
         check(await page.$eval('#mode', (e) => e.textContent.trim()) === 'simulated here', 'the mode badge does not say simulated here');
@@ -191,7 +201,16 @@ try {
         if (!bytes) failures.push('the opening circuit offered no world.nbt');
         else check(bytes.equals(readFileSync(join(root, 'build/designs', OPENING, 'world.nbt'))), "the opening circuit's world.nbt differs from the native build's");
         await client.detach();
-        console.log(`the page opened with ${OPENING} counting (${before}, then ${after}) before the compiler was fetched`);
+        // The report on the page is the plain one: no placement internals, no positions, no asides.
+        const report = await page.$eval('#report-text', (e) => e.textContent);
+        check(report.startsWith(`${OPENING}\n`) && /^ {2}cells: \d+$/m.test(report) && /^ {2}footprint: \d+ x \d+, \d+ high$/m.test(report) && /^ {2}clock: clk, \d+ ticks a cycle, [\d.]+ s$/m.test(report) && /^ {2}outputs: count\[3:0\]$/m.test(report), `the page's report reads ${JSON.stringify(report)}`);
+        check(!/[()]|forceload|lever at|lamp at|placement|tiles:|hold slack/.test(report), `the page's report carries the full report's detail: ${JSON.stringify(report)}`);
+        // Showing intent to compile (a click into the editor) fetches the compiler ahead of the compile.
+        await page.focus('#source');
+        const warmStarted = Date.now();
+        while (!fetched.some((p) => p.endsWith('/yosys.core.wasm')) && Date.now() - warmStarted < 10_000) await sleep(100);
+        check(fetched.some((p) => p.endsWith('/yosys.core.wasm')), 'a click into the editor did not fetch the compiler ahead of a compile');
+        console.log(`the page opened with ${OPENING} counting (${before}, then ${after}) before the compiler was fetched, which a click into the editor fetched`);
     }
 
     // --- the examples: every input combination against the native simulator
@@ -202,7 +221,7 @@ try {
             failures.push(`${name}: compile failed: ${status.text}`);
             continue;
         }
-        check(/^Built \w+: \d+ cells \(the router manages about \d+ today\); \d+ blocks in \d+ x \d+; outputs settle within \d+ ticks\.$/.test(status.text), `${name}: the built status reads ${JSON.stringify(status.text)}`);
+        check(status.text === `Built ${name}.`, `${name}: the built status reads ${JSON.stringify(status.text)}`);
         await page.evaluate(() => window.redfab.stop());
         const design = await page.evaluate(() => window.redfab.design);
         const inputs = design.inputs.map((p) => p.name);
@@ -269,6 +288,7 @@ try {
         }));
         check(/\b49 cells\b/.test(card.summary) && /\d+ blocks/.test(card.summary) && /\d+ x \d+/.test(card.summary), `the summary reads ${JSON.stringify(card.summary)}`);
         check(card.report.includes('cells: 49') && card.reportOpen && !card.logOpen, `the report is ${card.reportOpen ? 'open' : 'closed'} (${card.report.includes('cells: 49') ? 'with' : 'without'} its text), the log ${card.logOpen ? 'open' : 'closed'}`);
+        check(/^ {2}outputs settle in \d+( to \d+)? ticks, [\d.]+ s at most$/m.test(card.report) && /^ {2}inputs: a\[3:0\], b\[3:0\], cin$/m.test(card.report) && /proven equal to the source/.test(card.report), `adder4's report reads ${JSON.stringify(card.report)}`);
         console.log('adder4: the buses read 3 + 4 = 7, most significant bit first; the result card shows the numbers and the report');
     }
 
@@ -341,7 +361,8 @@ try {
         await page.evaluate((t) => window.redfab.setSource(t), INV);
         check(await page.$eval('#examples', (e) => e.value) === 'custom', 'editing the source did not select the custom entry');
         const status = await compileAndWait(page);
-        check(status.kind === 'ok' && status.text.startsWith('Built inv: 1 cells'), `inv: ${status.text}`);
+        const chips = await page.$$eval('#summary li', (items) => items.map((li) => li.textContent));
+        check(status.kind === 'ok' && status.text === 'Built inv.' && chips.includes('1 cells'), `inv: ${status.text}, chips ${JSON.stringify(chips)}`);
         check(await page.evaluate(() => window.redfab.built?.top) === 'inv', 'the top module was not detected as inv');
         await page.evaluate((t) => window.redfab.setSource(t), ESCAPED);
         const escaped = await compileAndWait(page);
@@ -418,8 +439,8 @@ try {
         check(await page.$eval('#source', (e) => e.value) === draft, 'the draft did not survive a reload');
         check(await page.$eval('#examples', (e) => e.value) === 'custom', 'the dropdown does not show custom after a reload with a draft');
         check(await page.evaluate(() => window.redfab.opening === 'shown') && /Your draft is in the editor/.test(await page.$eval('#status', (e) => e.textContent)), 'with a draft, the page did not open its circuit and say the draft is in the editor');
-        check(await page.$eval('footer', (e) => e.textContent.includes('NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.')), 'the footer lacks the Minecraft notice');
-        check(await page.$eval('footer', (e) => e.textContent.includes('kept only as the placed circuit and its recording while the plot is yours')), 'the footer lacks the line on what happens to a submitted source');
+        // The footer is the notice Mojang's guidelines require, and nothing else (asked for 2026-11-11).
+        check(await page.$eval('footer', (e) => e.textContent.trim()) === 'NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.', 'the footer is not the Minecraft notice alone');
     }
 
     // --- a clocked design: driven by hand through the native cycle protocol, then
@@ -430,7 +451,7 @@ try {
         if (status.kind !== 'ok') {
             failures.push(`counter4: compile failed: ${status.text}`);
         } else {
-            check(/clock clk at \d+ ticks a cycle\.$/.test(status.text), `counter4: the built status reads ${JSON.stringify(status.text)}`);
+            check(status.text === 'Built counter4.' && /clock clk, \d+ ticks a cycle/.test(await page.$eval('#summary', (e) => e.textContent)), `counter4: the built status reads ${JSON.stringify(status.text)}`);
             await page.evaluate(() => window.redfab.stop());
             const design = await page.evaluate(() => window.redfab.design);
             const seq = design.timing.sequential;
@@ -605,27 +626,48 @@ try {
         check(requests.includes('DELETE /api/plots/3?token=tok'), `leaving the page did not give the plot back: ${JSON.stringify(requests)}`);
         console.log('live mode against a faked backend: plot size shown and enforced, plot given back on Stop and on leaving');
 
-        // --- the camera panel (stage 14): shown when the backend has a camera, played on click over
-        // WHEP, driven with the keys through the plot's socket, and "on camera" when it is your plot
+        // --- the camera tab (stage 14, reworked 2026-11-11): a tab beside the circuit when the backend has a
+        // camera, the stream played while the tab is open and retried when the relay refuses, Auto view and
+        // Manual control as two buttons, and Run in the game opening the camera in place of the circuit
         await open(page, errors);
-        check(await page.$eval('#camera', (e) => !e.hidden), 'the camera panel is hidden although the backend has a camera');
-        check(/not up|off/i.test(await page.$eval('#camera-status', (e) => e.textContent)), `with no stream the camera status reads ${JSON.stringify(await page.$eval('#camera-status', (e) => e.textContent))}`);
+        check(await page.$eval('#tabs', (e) => !e.hidden), 'the tabs are hidden although the backend has a camera');
+        check(await page.evaluate(() => window.redfab.tab) === 'circuit' && await page.$eval('#camera', (e) => e.hidden), 'the page did not open on the circuit');
+        // With no stream the tab says so and asks the relay for nothing.
+        await page.click('#tab-camera');
+        check(await page.$eval('#view', (e) => e.hidden) && await page.$eval('#camera', (e) => !e.hidden), 'the camera tab did not take the stage');
+        check(/offline/i.test(await page.$eval('#camera-status', (e) => e.textContent)), `with no stream the camera status reads ${JSON.stringify(await page.$eval('#camera-status', (e) => e.textContent))}`);
+        check(whep.length === 0, 'the page asked the relay for a stream that is not up');
+        // Hidden behind the camera, the circuit draws nothing while its simulation runs.
+        const hiddenFrames = await page.evaluate(() => window.redfab.frames);
+        await sleep(500);
+        check(await page.evaluate(() => window.redfab.frames) === hiddenFrames, 'the hidden circuit kept drawing');
+        // The stream comes up: the open tab asks the relay with an SDP offer, shows the refusal and tries again.
         cameraStatus = { ...cameraStatus, streaming: true };
         await page.evaluate(() => window.redfab.camera.refresh());
-        check(/up|live/i.test(await page.$eval('#camera-status', (e) => e.textContent)), `with a stream the camera status reads ${JSON.stringify(await page.$eval('#camera-status', (e) => e.textContent))}`);
-        // Play asks the relay with an SDP offer; the relay's refusal is shown, and nothing plays.
-        await page.click('#camera-play');
         await page.waitForFunction(() => /503/.test(document.getElementById('camera-status').textContent), { timeout: 10_000 });
-        check(whep.length === 1 && whep[0].method === 'POST' && /^application\/sdp/.test(whep[0].type) && /^v=0/.test(whep[0].body ?? ''), `the WHEP request was ${JSON.stringify(whep.map((w) => [w.method, w.type, (w.body ?? '').slice(0, 10)]))}`);
+        check(whep.length >= 1 && whep[0].method === 'POST' && /^application\/sdp/.test(whep[0].type) && /^v=0/.test(whep[0].body ?? ''), `the WHEP request was ${JSON.stringify(whep.map((w) => [w.method, w.type, (w.body ?? '').slice(0, 10)]))}`);
         check(await page.evaluate(() => window.redfab.camera.playing === false), 'the page says it is playing after the relay refused');
-        // Driving, through the page's own hooks (the faked backend has no socket): take, the backend's
-        // answers, the keys into move and look, release.
+        const asked = whep.length;
+        await sleep(3500);
+        check(whep.length > asked, 'the page did not try the relay again after a refusal');
+        // Back to the circuit: the stream stops and the relay is asked no more.
+        await page.click('#tab-circuit');
+        await sleep(200);
+        const afterCircuit = whep.length;
+        await sleep(3500);
+        check(whep.length === afterCircuit && await page.evaluate(() => !window.redfab.camera.shown), 'the circuit tab kept asking the relay for the stream');
+        // The two modes, through the page's own hooks (the faked backend has no socket): take, the
+        // backend's answers, the keys into move and look, back to auto view.
+        const pressedState = () => [document.getElementById('camera-auto').getAttribute('aria-pressed'), document.getElementById('camera-manual').getAttribute('aria-pressed')];
+        check(JSON.stringify(await page.evaluate(pressedState)) === '["true","false"]', 'the camera does not start in auto view');
+        check(await page.$eval('#camera-manual', (e) => e.disabled), 'manual control is offered without a plot to drive from');
         const protocol = await page.evaluate(() => {
+            const pressed = () => [document.getElementById('camera-auto').getAttribute('aria-pressed'), document.getElementById('camera-manual').getAttribute('aria-pressed')];
             const c = window.redfab.camera;
             const out = [];
             out.push(c.take());
             c.receive({ drive: 'yours', seconds: 60 });
-            out.push([document.getElementById('drive').textContent.trim(), document.getElementById('camera-turn').textContent.trim(), c.driving]);
+            out.push([pressed(), document.getElementById('camera-turn').textContent.trim(), c.driving]);
             c.press('w', true);
             c.press('d', true);
             c.press('shift', true);
@@ -636,34 +678,41 @@ try {
             c.press('shift', false);
             out.push(c.input());
             c.receive({ drive: 'over', why: 'time: the turn is over' });
-            out.push([document.getElementById('drive').textContent.trim(), c.driving, document.getElementById('camera-status').textContent]);
+            out.push([pressed(), c.driving, document.getElementById('camera-status').textContent]);
             c.receive({ drive: 'queued', position: 2 });
             out.push(document.getElementById('camera-turn').textContent.trim());
             return out;
         });
         check(JSON.stringify(protocol[0]) === JSON.stringify({ drive: 'take' }), `take sends ${JSON.stringify(protocol[0])}`);
-        check(protocol[1][0] === 'Give it back' && /60/.test(protocol[1][1]) && protocol[1][2] === true, `after yours: ${JSON.stringify(protocol[1])}`);
+        check(JSON.stringify(protocol[1][0]) === '["false","true"]' && /60/.test(protocol[1][1]) && protocol[1][2] === true, `after yours: ${JSON.stringify(protocol[1])}`);
         check(JSON.stringify(protocol[2]) === JSON.stringify({ drive: { move: [1, -1, 1], look: [12, -3] } }), `w, d, shift and a look give ${JSON.stringify(protocol[2])}`);
         check(protocol[3] === null, `with nothing pressed the input is ${JSON.stringify(protocol[3])}, not null`);
-        check(protocol[4][0] === 'Take the camera' && protocol[4][1] === false && /over/.test(protocol[4][2]), `after over: ${JSON.stringify(protocol[4])}`);
+        check(JSON.stringify(protocol[4][0]) === '["true","false"]' && protocol[4][1] === false && /auto view/i.test(protocol[4][2]), `after over: ${JSON.stringify(protocol[4])}`);
         check(/2/.test(protocol[5]), `queued at 2 shows ${JSON.stringify(protocol[5])}`);
-        // On your plot: the badge says so once the camera is there.
+        // Run in the game: the camera takes the stage in place of the circuit, and knows the plot is yours.
         await loadExample(page, 'not1');
-        await compileAndWait(page);
+        const beforeLive = await compileAndWait(page);
+        if (!(await page.evaluate(() => window.redfab.built))) throw new Error(`the compile before Run in the game left no build: ${JSON.stringify(beforeLive)}`);
+        check(await page.evaluate(() => window.redfab.tab) === 'circuit', 'a compile did not show the circuit');
         await page.evaluate(() => { window.redfab.limits.plotSize = [512, 512]; });
         submitAnswer = { status: 200, body: { plot: 3, token: 'tok', design: await page.evaluate(() => window.redfab.built.design), report: 'design not1', origin: [0, 64, 0], placed_tick: 1, state: 'settling' } };
         await page.click('#live');
         await page.waitForFunction(() => window.redfab.livePlot !== null, { timeout: 10_000 });
+        check(await page.evaluate(() => window.redfab.tab) === 'camera' && await page.$eval('#view', (e) => e.hidden), 'Run in the game did not open the camera in place of the circuit');
+        check(await page.$eval('#camera-manual', (e) => !e.disabled), 'manual control is not offered while a plot is yours');
         await page.evaluate(() => window.redfab.camera.refresh());
-        check(await page.$eval('#camera-on', (e) => !e.hidden && /on camera/i.test(e.textContent)), 'the page does not say the camera is on your plot');
+        check(JSON.stringify(await page.evaluate(() => window.redfab.camera.watching)) === '{"plot":3,"yours":true}', 'the camera does not know it is on your plot');
         cameraStatus = { ...cameraStatus, plot: 1 };
         await page.evaluate(() => window.redfab.camera.refresh());
-        check(await page.$eval('#camera-on', (e) => e.hidden), 'the badge stays although the camera moved to another plot');
-        // Hidden pages stop playing to save the relay's bandwidth.
+        check(JSON.stringify(await page.evaluate(() => window.redfab.camera.watching)) === '{"plot":1,"yours":false}', 'the camera still says your plot after it moved to another');
+        // A hidden page stops the stream to save the relay's bandwidth, and asks for nothing while hidden.
         await page.evaluate(() => { window.redfab.camera.hidden(true); });
-        check(await page.evaluate(() => window.redfab.camera.playing === false), 'a hidden page kept playing');
+        const whileHidden = whep.length;
+        await sleep(3500);
+        check(await page.evaluate(() => window.redfab.camera.playing === false) && whep.length === whileHidden, 'a hidden page kept playing or kept asking the relay');
+        await page.evaluate(() => { window.redfab.camera.hidden(false); });
         await page.click('#release');
-        console.log('the camera panel: shown with the backend\'s camera, played over WHEP on click, driven through the keys, on camera on your plot');
+        console.log('the camera tab: beside the circuit, streamed while open and retried on a refusal, auto view and manual control, opened by Run in the game');
     }
 
     // The faked backend refuses once and has no WebSocket; the console reports both.
