@@ -24,7 +24,6 @@ const status = el('status');
 const log = el('log');
 const logDetails = el('log-details');
 const reportText = el('report-text');
-const summary = el('summary');
 const modeBadge = el('mode');
 const inputsPanel = el('inputs');
 const outputsPanel = el('outputs');
@@ -192,20 +191,20 @@ function cellsOf(report) {
     return Number(report?.match(/cells: (\d+)/)?.[1] ?? 0);
 }
 
-/// The status line after a build: `lead` ("Built NAME") and a warning when the
-/// server's plot cannot take it; the numbers are on the result card.
+/// The status after a build, as a build tool prints it: `lead` ("built NAME in
+/// 3.2 s"), and a warning when the server's plot cannot take the design.
 function describeBuilt({ design: d }, lead) {
     if (limits.plotSize && !fitsPlot(d)) {
-        return { text: `${lead}, but it is too large for the server's ${limits.plotSize[0]} x ${limits.plotSize[1]} plot.`, kind: 'warn' };
+        return { text: `${lead}, too large for the server's ${limits.plotSize[0]} x ${limits.plotSize[1]} plot`, kind: 'warn' };
     }
-    return { text: `${lead}.`, kind: 'ok' };
+    return { text: lead, kind: 'ok' };
 }
 
 function fitsPlot(d) {
     return !limits.plotSize || (d.size[0] <= limits.plotSize[0] && d.size[2] <= limits.plotSize[1]);
 }
 
-const seconds = (ticks) => `${(ticks / 20).toFixed(1)} s`;
+const seconds = (ticks) => `${(ticks / 20).toFixed(2)} s`;
 
 /// Pin names with each bus folded to name[msb:lsb], in the design's order.
 function pinNames(pins) {
@@ -226,51 +225,48 @@ function pinNames(pins) {
     return out.map((name) => {
         const bits = buses.get(name);
         return bits ? `${name}[${Math.max(...bits)}:${Math.min(...bits)}]` : name;
-    }).join(', ');
+    }).join(' ');
 }
 
-/// The report the page shows: what the design is and how it behaves, in plain
-/// words. The core's full report, with the placement, the lever and lamp
-/// positions and the /forceload line for a world of your own, is report.txt.
-function plainReport(d, cells, report) {
-    const lines = [d.name];
-    if (cells) lines.push(`  cells: ${cells}`);
-    lines.push(`  blocks: ${Object.keys(d.blocks).length}`);
-    lines.push(`  footprint: ${d.size[0]} x ${d.size[2]}, ${d.size[1]} high`);
-    if (typeof d.repeaters === 'number') lines.push(`  repeaters: ${d.repeaters}`);
+/// The report the page shows, in the terms of a timing report: area, the
+/// propagation delay or the clock period, clock-to-output, slack, the
+/// equivalence check. A tick is the game's, 50 ms. The core's full report, with
+/// the placement, the lever and lamp positions and the /forceload line for a
+/// world of your own, is the report.txt export.
+function technicalReport(d, cells, report) {
+    const rows = [];
+    const row = (key, value) => rows.push(`${key.padEnd(12)} ${value}`);
     const seq = d.timing?.sequential;
+    const edge = seq?.active === 'falling' ? '↓' : '↑';
+    const head = seq ? `${d.name}, sequential, ${seq.clock} ${edge}` : `${d.name}, combinational`;
+    if (cells) row('cells', cells);
+    if (seq?.flip_flops?.length) row('flip-flops', seq.flip_flops.length);
+    if (typeof d.repeaters === 'number') row('repeaters', d.repeaters);
+    row('blocks', Object.keys(d.blocks).length);
+    row('area', `${d.size[0]} x ${d.size[2]} x ${d.size[1]}`);
     if (seq) {
-        lines.push(`  clock: ${seq.clock}, ${seq.period} ticks a cycle, ${seconds(seq.period)}`);
-        lines.push(`  outputs ready ${seq.sample_at} ticks after each ${seq.active === 'falling' ? 'falling' : 'rising'} edge`);
+        row('T_clk', `${seq.period} ticks, ${seconds(seq.period)}`);
+        row('t_co', `${seq.sample_at} ticks`);
+        row('t_in', `${seq.input_change_from} to ${seq.input_change_by} ticks after ${edge}`);
+        const ffs = seq.flip_flops ?? [];
+        if (ffs.length) row('slack', `setup ${Math.min(...ffs.map((f) => f.setup_slack))}, hold ${Math.min(...ffs.map((f) => f.hold_slack))} ticks`);
     } else {
         const fastest = Math.min(...Object.values(d.timing?.outputs ?? {}).map((o) => o.min).filter((n) => typeof n === 'number'));
-        const range = Number.isFinite(fastest) && fastest < d.settle_ticks ? `${fastest} to ${d.settle_ticks}` : `${d.settle_ticks}`;
-        lines.push(`  outputs settle in ${range} ticks, ${seconds(d.settle_ticks)} at most`);
-        if (d.timing?.input_spacing) lines.push(`  inputs may change every ${d.timing.input_spacing} ticks`);
+        row('t_pd', Number.isFinite(fastest) && fastest < d.settle_ticks ? `min ${fastest}, max ${d.settle_ticks} ticks, ${seconds(d.settle_ticks)}` : `${d.settle_ticks} ticks, ${seconds(d.settle_ticks)}`);
+        if (d.timing?.input_spacing) row('t_in,min', `${d.timing.input_spacing} ticks`);
     }
-    lines.push(`  inputs: ${pinNames(d.inputs)}`);
-    lines.push(`  outputs: ${pinNames(d.outputs)}`);
-    if (/proven equal to the source/.test(report ?? '')) lines.push('  proven equal to the source');
-    return lines.join('\n');
+    row('inputs', pinNames(d.inputs));
+    row('outputs', pinNames(d.outputs));
+    if (/proven equal to the source/.test(report ?? '')) row('LEC', 'proven');
+    return [head, ...rows.map((r) => `  ${r}`)].join('\n');
 }
 
-/// The result card: the numbers, and the report.
+/// The report, in the terminal.
 function renderResult({ design: d, cells, report }) {
-    const items = [[`${cells} cells`], [`${Object.keys(d.blocks).length} blocks`], [`${d.size[0]} x ${d.size[2]} footprint`]];
-    const seq = d.timing?.sequential;
-    items.push([seq ? `clock ${seq.clock}, ${seq.period} ticks a cycle` : `settles in ${d.settle_ticks} ticks`]);
-    if (limits.plotSize && !fitsPlot(d)) items.push([`too large for the server's ${limits.plotSize[0]} x ${limits.plotSize[1]} plot`, 'warn']);
-    summary.replaceChildren(...items.map(([text, kind]) => {
-        const li = document.createElement('li');
-        li.textContent = text;
-        if (kind) li.className = kind;
-        return li;
-    }));
-    reportText.textContent = plainReport(d, cells, report);
+    reportText.textContent = technicalReport(d, cells, report);
 }
 
 function clearResult() {
-    summary.replaceChildren();
     reportText.textContent = '';
     log.textContent = '';
     logDetails.open = false;
@@ -302,17 +298,17 @@ async function compile() {
     const text = source.value;
     const started = Date.now();
     let phase = 'starting';
-    const progress = () => setStatus(`Compiling ${name}: ${phase}, ${Math.round((Date.now() - started) / 1000)} s`);
+    const progress = () => setStatus(`compiling ${name}: ${phase}, ${Math.round((Date.now() - started) / 1000)} s`);
     progress();
     const ticker = setInterval(progress, 1000);
     const deadline = setTimeout(() => {
-        startWorker(`Compiling took longer than ${limits.compileSeconds} s; stopped. Try a smaller design.`);
+        startWorker(`stopped: compiling took longer than ${limits.compileSeconds} s, try a smaller design`);
     }, limits.compileSeconds * 1000);
     try {
         const reply = await ask({ op: 'compile', source: text, top, name }, { phase: (p) => { phase = p; progress(); } });
         design = reply.design;
         built = { source: text, top, name, design: reply.design, cells: reply.cells, report: reply.report };
-        const { text: summaryText, kind } = describeBuilt(reply, `Built ${name}`);
+        const { text: summaryText, kind } = describeBuilt(reply, `built ${name} in ${((Date.now() - started) / 1000).toFixed(1)} s`);
         setStatus(summaryText, kind);
         renderResult(built);
         showDesign();
@@ -613,8 +609,8 @@ async function openWith(name, { draft }) {
         design = reply.design;
         const cells = cellsOf(report);
         built = { source: null, top: null, name, design, cells, report, designText: text, files: `/designs/${name}` };
-        const { text: summaryText, kind } = describeBuilt(built, `${name}, running in your browser`);
-        setStatus(`${summaryText}${draft ? ' Your draft is in the editor.' : ''}`, kind);
+        const { text: summaryText, kind } = describeBuilt(built, `simulating ${name} in the browser`);
+        setStatus(`${summaryText}${draft ? ', your draft is in the editor' : ''}`, kind);
         renderResult(built);
         showDesign();
         // The counter counts only when enabled: on, so the circuit moves on its own.
@@ -622,7 +618,7 @@ async function openWith(name, { draft }) {
         if (en >= 0) await toggle(en);
         opening = 'shown';
     } catch (err) {
-        if (g === generation) setStatus('Pick an example or paste a module, then Compile.');
+        if (g === generation) setStatus('pick an example or paste a module, then compile');
         log.textContent += `the opening circuit did not load: ${err.message}\n`;
     } finally {
         if (opening === 'loading') opening = 'none';
@@ -646,7 +642,7 @@ async function goLive() {
     }
     // A design built here already tells its footprint; do not send what cannot fit.
     if (built && built.source === source.value && built.top === top && !fitsPlot(built.design)) {
-        setStatus(`This design is ${built.design.size[0]} by ${built.design.size[2]} blocks; the server's plots are ${limits.plotSize[0]} by ${limits.plotSize[1]}. Not sent.`, 'bad');
+        setStatus(`not sent: ${built.design.size[0]} x ${built.design.size[2]} blocks, the server's plots are ${limits.plotSize[0]} x ${limits.plotSize[1]}`, 'bad');
         return;
     }
     design = null;
@@ -659,7 +655,7 @@ async function goLive() {
     clearPanels();
     view.clear();
     setMode('building on the server', true);
-    setStatus('Building on the server…');
+    setStatus('building on the server…');
     try {
         const reply = await fetch('/api/submit', {
             method: 'POST',
@@ -671,7 +667,7 @@ async function goLive() {
         design = body.design;
         livePlot = { plot: body.plot, token: body.token, origin: body.origin, source: source.value, top, name, levers: body.levers, report: body.report };
         renderResult({ design: body.design, cells: cellsOf(body.report), report: body.report });
-        setStatus('Placing it in the game…');
+        setStatus(`placing on plot ${body.plot}…`);
         showDesign();
         releaseButton.hidden = false;
         connectLive();
@@ -703,15 +699,15 @@ function connectLive() {
         if (m.lamps) setLamps(m.lamps);
         if (m.inputs) setLevers(m.inputs);
         if (m.state === 'live') {
-            setStatus('Live on server.', 'ok');
+            setStatus(`live on plot ${livePlot.plot}`, 'ok');
             setMode(`live in the game, plot ${livePlot.plot}`, true);
         }
         // The camera's answers (taking it, a turn, its end) go to the panel.
         if (m.drive !== undefined || (m.ok === false && /driv|camera/.test(m.error ?? ''))) camera.receive(m);
         // A lever change asked for before its slot goes out at the tick the server names.
-        if (m.ok === true && m.queued) setStatus(`Lever ${m.set} moves at tick ${m.tick}.`, 'ok');
+        if (m.ok === true && m.queued) setStatus(`lever ${m.set} moves at tick ${m.tick}`, 'ok');
         if (m.state === 'released') {
-            const why = `The server released plot ${livePlot.plot}: ${m.why}.`;
+            const why = `the server released plot ${livePlot.plot}: ${m.why}`;
             leaveLive({ release: false });
             clearAfterLive();
             setStatus(why, 'bad');
@@ -719,7 +715,7 @@ function connectLive() {
         if (m.ok === false) setStatus(m.error, 'bad');
     };
     liveSocket.onclose = () => {
-        if (mode === 'live') setStatus('The connection to the server closed.', 'bad');
+        if (mode === 'live') setStatus('the connection to the server closed', 'bad');
     };
     const socket = liveSocket;
     camera.attach((message) => {
@@ -768,7 +764,7 @@ async function release() {
     const gone = leaveLive();
     clearAfterLive();
     await gone;
-    setStatus(`Plot ${plot} released.`);
+    setStatus(`plot ${plot} released`);
 }
 
 // --- the files
@@ -791,7 +787,7 @@ async function download() {
         // Nothing built here matches what runs on the server; ask the server for it.
         const reply = await fetch(`/api/plots/${livePlot.plot}/structure?token=${livePlot.token}`).catch(() => null);
         if (!reply?.ok) {
-            setStatus('The server does not offer the structure; Compile here to download world.nbt for the same source.', 'bad');
+            setStatus('the server does not offer the structure; compile here to export world.nbt for the same source', 'bad');
             return;
         }
         bytes = new Uint8Array(await reply.arrayBuffer());
@@ -799,7 +795,7 @@ async function download() {
         // The opening circuit: the server built it and keeps its structure.
         const reply = await fetch(`${built.files}/world.nbt`).catch(() => null);
         if (!reply?.ok) {
-            setStatus('The server does not offer the structure; Compile here to download world.nbt for the same source.', 'bad');
+            setStatus('the server does not offer the structure; compile here to export world.nbt for the same source', 'bad');
             return;
         }
         bytes = new Uint8Array(await reply.arrayBuffer());
@@ -816,7 +812,7 @@ function downloadReport() {
     const report = mode === 'live' ? livePlot.report : built?.report;
     const name = livePlot ? livePlot.name : built?.name || 'design';
     if (typeof report !== 'string') {
-        setStatus('No report for this design.', 'bad');
+        setStatus('no report for this design', 'bad');
         return;
     }
     save(`${name}.report.txt`, report, 'text/plain');
