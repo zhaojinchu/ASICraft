@@ -347,7 +347,8 @@ export async function launchMinecraft({ runDir, log = () => {}, timeout = 240_00
     // Time stands still (advance_time is off), but a new world stands still at sunrise: noon,
     // for the camera's even light. The harness never looks, so this is the backend's alone.
     const noon = await rcon.command('time set noon');
-    if (!/set the time/i.test(noon)) log(`time set noon: ${noon.trim()}`);
+    // 26.3 answers "Set minecraft:overworld to time marker minecraft:noon"; anything else is logged.
+    if (!/set the time|time marker minecraft:noon/i.test(noon)) log(`time set noon: ${noon.trim()}`);
     const limitReply = await rcon.command(`gamerule max_block_modifications ${PROFILE.max_block_modifications}`);
     const fillLimit = limitReply.includes('is now set to') ? PROFILE.max_block_modifications : FILL_LIMIT;
     if (fillLimit === FILL_LIMIT) log(`fills stay under ${FILL_LIMIT} blocks (${limitReply.trim()})`);
