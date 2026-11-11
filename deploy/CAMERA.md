@@ -89,8 +89,8 @@ In PowerShell, as your user. Steps 1 and 2 need nothing from the box.
    `vignette:false`, `bobView:false`, `screenEffectScale:0.0`,
    `fovEffectScale:0.0`, `darknessEffectScale:0.0`, `biomeBlendRadius:0`,
    `chunkSectionFadeInTime:0.0`. Multiplayer, Direct Connect, `localhost:25565`. You appear as a
-   spectator above the plots; the mod flies the camera from then on, and the
-   overlay line in the corner names the plot and who drives. The backend's
+   spectator above the plots; the mod flies the camera from then on and draws
+   no HUD, so the stream is the game's picture alone. The backend's
    log on the box says "camera: NAME connected".
 
 6. **OBS.** Sources: Game Capture, mode "capture specific window", the game's
