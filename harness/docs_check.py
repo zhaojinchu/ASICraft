@@ -16,6 +16,9 @@ code without any test noticing. This ties each quoted fact to its source:
 - the burnout budget the documents state equals BURNOUT_BUDGET;
 - the fixture and recording counts in mechanics.md equal fixtures/mechanics.
 
+README.md is the short version and docs/REFERENCE.md holds the details, so every README
+check but the license reads the two as one text; the License section stays in README.md.
+
 Each function takes text and returns the problems it finds, so a drift can be tested
 without a tree; `problems(root)` reads the real one.
 """
@@ -174,13 +177,14 @@ def check_fixture_counts(mechanics: str, fixtures: int, recordings: int) -> list
 def problems(root: Path = ROOT) -> list[str]:
     """Every disagreement between the documents and the tree under `root`."""
     out = []
-    for required in ("README.md", "LICENSE", ".python-version"):
+    for required in ("README.md", "docs/REFERENCE.md", "LICENSE", ".python-version"):
         if not (root / required).is_file() or not (root / required).read_text().strip():
             out.append(f"{required} is missing or empty")
     if out:
         return out
     read = lambda rel: (root / rel).read_text()  # noqa: E731
     readme, plan, design, mechanics = read("README.md"), read("docs/PLAN.md"), read("docs/DESIGN.md"), read("docs/mechanics.md")
+    docs = readme + "\n" + read("docs/REFERENCE.md")
     pins = read_versions() if root == ROOT else {}
     python_pin = read(".python-version").strip()
     running = "%d.%d" % sys.version_info[:2]
@@ -194,15 +198,15 @@ def problems(root: Path = ROOT) -> list[str]:
     out += check_license(readme, read("LICENSE"), manifests)
     if "LICENSE" not in tomllib.loads(read("pyproject.toml"))["project"].get("license-files", []):
         out.append("pyproject.toml does not list LICENSE in license-files")
-    out += check_versions(readme, pins, python_pin, running)
+    out += check_versions(docs, pins, python_pin, running)
     sources = {p.name: p.read_text() for p in sorted((root / "tests" / "smoke").glob("*.sv"))}
-    out += check_refusals(readme, smoke_errors(sources))
-    out += check_designs(readme, plan, sorted(p.name for p in (root / "designs").iterdir() if p.is_dir()))
+    out += check_refusals(docs, smoke_errors(sources))
+    out += check_designs(docs, plan, sorted(p.name for p in (root / "designs").iterdir() if p.is_dir()))
     out += check_paths(section(plan, "Where things live"), "docs/PLAN.md Where things live", root)
-    out += check_paths(section(readme, "Where to read more"), "README.md Where to read more", root)
+    out += check_paths(section(docs, "Where to read more"), "docs/REFERENCE.md Where to read more", root)
     try:
         out += check_limits(
-            readme,
+            docs,
             constant(read("playground/compile.js"), r"measuredCells:\s*(\d+)", "playground/compile.js"),
             constant(read("crates/redfab-core/src/build.rs"), r"pub const MAX_INPUTS: usize = (\d+);", "build.rs"),
             re.search(r"plotSize:\s*\[(\d+),\s*(\d+)\]", read("server/live.mjs")).groups(),  # type: ignore[union-attr]
@@ -213,7 +217,7 @@ def problems(root: Path = ROOT) -> list[str]:
         )
     except (LookupError, AttributeError) as e:
         out.append(f"a constant moved: {e}")
-    out += check_commands(readme, read("tools/setup.sh"), read("check"))
+    out += check_commands(docs, read("tools/setup.sh"), read("check"))
     mech = root / "fixtures" / "mechanics"
     out += check_fixture_counts(mechanics, len(list(mech.glob("*.fixture.json"))), len(list(mech.glob("*.trace.json"))))
     return out

@@ -125,5 +125,9 @@ def test_fixture_count_drift_is_named():
 
 def test_a_missing_document_is_the_first_problem(tmp_path: Path):
     (tmp_path / "README.md").write_text("x")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "REFERENCE.md").write_text("x")
     (tmp_path / ".python-version").write_text("3.14\n")
     assert problems(tmp_path) == ["LICENSE is missing or empty"]
+    (tmp_path / "docs" / "REFERENCE.md").unlink()
+    assert problems(tmp_path) == ["docs/REFERENCE.md is missing or empty", "LICENSE is missing or empty"]
