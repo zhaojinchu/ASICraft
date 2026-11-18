@@ -37,26 +37,32 @@ With a camera behind the page, a Circuit and a Camera tab share the stage:
 Run in the game opens the camera, Compile the circuit. Under the editor: the
 three files as exports, then the terminal, whose first line is the status as
 a build tool prints it ("built not1 in 3.2 s", "live on plot 0"; red for an
-error, amber for a warning), with the report open and the raw log closed.
+error, amber for a warning; nothing, and no line, while the opening circuit
+runs), with the report open and the raw log closed.
 The report on the page is a timing report written from the design: cells,
 flip-flops, repeaters, blocks, area, then `T_clk`, `t_co` (when the outputs
 are valid after the edge), `t_in` (the input window) and the setup and hold
 slack for a clocked design, or `t_pd` (the propagation delay, min and max)
 and `t_in,min` (the least spacing between input changes) for a combinational
-one, in game ticks of 50 ms; the pins; and `LEC`, the equivalence proof. The
-core's full report, with the placement, the lever and lamp positions and the
-`/forceload` line for a world of your own, is the report.txt export.
+one, in game ticks of 50 ms; and the pins. Every build that reaches the page
+has passed the equivalence proof, so the report does not repeat it. The
+core's full report, with the proof, the placement, the lever and lamp
+positions and the `/forceload` line for a world of your own, is the
+report.txt export.
 White, with a redstone block's red as the accent (the title, the main action,
 a lever that is on, an error), the system font for the page and the code font
 for code and signals, Monocraft (`fonts/`, OFL 1.1) for the title; on a phone
 the circuit comes first and the rest stacks under it.
 
-Using it: pick an example or paste your own module. The top module is the one
-named `top`, or the only module in the source; name another one in the `top`
-field. Compile with the button or Ctrl+Enter (Cmd+Enter on a Mac). Edited
-source turns the dropdown to `custom` and is kept in the browser's local
-storage across reloads (the page still opens with the counter, and says the
-draft is in the editor); switching back to an example asks first. The
+Using it: pick an example or paste your own module. Each example opens with
+one comment line that names it ("Inverter", "4-Bit Adder") and nothing more.
+The top module is the one named `top`, or the only module in the source; name
+another one in the `top` field. Compile with the button or Ctrl+Enter
+(Cmd+Enter on a Mac). Edited source turns the dropdown to `custom` and is kept
+in the browser's local storage across reloads (the page still opens with the
+counter running, the draft in the editor); picking an example replaces the
+editor's source without asking, since the draft is already saved, and
+`custom` brings it back. The page raises no dialogs. The
 status shows the phase and the elapsed seconds while compiling, then "built
 NAME in N s" or why not; about 100 cells compile inside the 90 s limit
 (`LIMITS.measuredCells` in `compile.js`, measured on 2026-10-07 and held to

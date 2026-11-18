@@ -1,4 +1,4 @@
-// The smallest design: one inverter.
+// Inverter
 module top (
     input  logic a,
     output logic y

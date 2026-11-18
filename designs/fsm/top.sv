@@ -1,5 +1,4 @@
-// A small state machine: `hit` is high while the last three values of `x`
-// seen at clock edges, followed by the current one, read 1, 0, 1.
+// 101 Sequence Detector
 module top (
     input  logic clk,
     input  logic rst,

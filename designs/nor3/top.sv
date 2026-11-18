@@ -1,4 +1,4 @@
-// A three-input NOR, which uses all three input sides of the gate tile.
+// 3-Input NOR Gate
 module top (
     input  logic a,
     input  logic b,

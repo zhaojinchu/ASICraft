@@ -41,8 +41,10 @@
   #result .label { color: var(--dim); font-size: 12px; margin-right: 2px; }
   #result button { padding: 2px 8px; font-size: 12px; font-family: var(--mono); }
   #terminal { background: var(--term); color: var(--term-ink); min-height: 0; overflow: auto; font: 12px/1.4 var(--mono); }
-  /* The status is the terminal's first line, as a build tool prints it. */
+  /* The status is the terminal's first line, as a build tool prints it, and
+     takes no room when there is nothing to say. */
   #status { padding: 6px 12px; min-height: 28px; white-space: pre-wrap; }
+  #status:empty { display: none; }
   #status.bad { color: #ff7070; } #status.warn { color: #e8b04a; }
   #terminal details { border-top: 1px solid #333; }
   #terminal summary { padding: 5px 12px; cursor: pointer; color: #9aa0a8; font: 11px/1.4 system-ui, sans-serif; letter-spacing: .06em; text-transform: uppercase; }
@@ -103,7 +105,7 @@
 <body>
 <header>
   <h1>redfab</h1>
-  <p>Write a SystemVerilog module and redfab turns it into a redstone circuit that runs in Minecraft. It synthesises the design, proves the result equal to the source, places and routes it, and checks it against the game. <a href="https://github.com/zhaojinchu/ASICraft">Source on GitHub</a>.</p>
+  <p>A SystemVerilog to Minecraft redstone compiler. <a href="https://github.com/zhaojinchu/ASICraft">Source on GitHub</a>.</p>
 </header>
 <main>
   <section id="left">
@@ -121,7 +123,7 @@
       <button id="design-json" disabled title="The layout, timing and pins">design.json</button>
     </div>
     <div id="terminal">
-      <div id="status" role="status">loading counter4…</div>
+      <div id="status" role="status"></div>
       <details id="report-details" open><summary>report</summary><pre id="report-text"></pre></details>
       <details id="log-details"><summary>log</summary><pre id="log"></pre></details>
     </div>

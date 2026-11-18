@@ -1,4 +1,4 @@
-// A 4-bit counter with a synchronous reset and an enable: the first clocked design.
+// 4-Bit Counter
 module top (
     input  logic       clk,
     input  logic       rst,

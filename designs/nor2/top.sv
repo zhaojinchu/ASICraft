@@ -1,4 +1,4 @@
-// Stage 3's end-to-end slice: one NOR gate.
+// NOR Gate
 module top (
     input  logic a,
     input  logic b,

@@ -178,11 +178,6 @@ function saveDraft() {
     }
 }
 
-/// Whether the editor holds something other than what the dropdown loaded.
-function edited() {
-    return source.value.trim() !== '' && source.value !== loaded.text;
-}
-
 async function loadExample(name) {
     const reply = await fetch(`/designs/${name}/top.sv`);
     source.value = reply.ok ? await reply.text() : `// could not load ${name}`;
@@ -243,8 +238,9 @@ function pinNames(pins) {
 }
 
 /// The report the page shows, in the terms of a timing report: area, the
-/// propagation delay or the clock period, clock-to-output, slack, the
-/// equivalence check. A tick is the game's, 50 ms. The core's full report, with
+/// propagation delay or the clock period, clock-to-output, slack. A tick is
+/// the game's, 50 ms. A build that reaches the page has passed the
+/// equivalence proof, so the report does not repeat it. The core's full report, with
 /// the placement, the lever and lamp positions and the /forceload line for a
 /// world of your own, is the report.txt export.
 function technicalReport(d, cells, report) {
@@ -271,7 +267,6 @@ function technicalReport(d, cells, report) {
     }
     row('inputs', pinNames(d.inputs));
     row('outputs', pinNames(d.outputs));
-    if (/proven equal to the source/.test(report ?? '')) row('LEC', 'proven');
     return [head, ...rows.map((r) => `  ${r}`)].join('\n');
 }
 
@@ -742,9 +737,9 @@ function stopRunning() {
 
 // --- the opening circuit: built by the server from an example, shown at once
 
-/// Shows the example the server built, running, before any compile. With a
-/// draft in the editor the status says so: the view and the editor differ.
-async function openWith(name, { draft }) {
+/// Shows the example the server built, running, before any compile. The
+/// status stays empty: the circuit running is the news.
+async function openWith(name) {
     const g = generation;
     try {
         const [d, r] = await Promise.all([fetch(`/designs/${name}/design.json`), fetch(`/designs/${name}/report.txt`)]);
@@ -757,8 +752,6 @@ async function openWith(name, { draft }) {
         design = reply.design;
         const cells = cellsOf(report);
         built = { source: null, top: null, name, design, cells, report, designText: text, files: `/designs/${name}` };
-        const { text: summaryText, kind } = describeBuilt(built, `simulating ${name} in the browser`);
-        setStatus(`${summaryText}${draft ? ', your draft is in the editor' : ''}`, kind);
         renderResult(built);
         showDesign();
         // The counter counts only when enabled: on, so the circuit moves on its own.
@@ -1012,27 +1005,20 @@ view.onClick = (pos) => {
 for (const name of [...EXAMPLES, CUSTOM]) {
     const option = document.createElement('option');
     option.value = name;
-    option.textContent = name === CUSTOM ? 'custom (your draft)' : name;
+    option.textContent = name;
     examples.appendChild(option);
 }
 examples.addEventListener('change', async () => {
     const pick = examples.value;
     if (pick === CUSTOM) {
-        // Back to the draft, when there is one and the editor shows something else.
+        // Back to the draft, when there is one. An edited source is always
+        // the saved draft, so nothing is lost by switching without asking.
         const draft = readDraft();
         if (draft && draft.source !== source.value) {
-            if (edited() && !confirm('Replace the edited source with your saved draft?')) {
-                examples.value = lastPick;
-                return;
-            }
             source.value = draft.source;
             topField.value = draft.top || '';
         }
         lastPick = CUSTOM;
-        return;
-    }
-    if (edited() && !confirm(`Replace your source with the ${pick} example? Your draft stays saved in this browser.`)) {
-        examples.value = lastPick;
         return;
     }
     await loadExample(pick);
@@ -1085,7 +1071,7 @@ if (draft) {
     loadExample(OPENING);
 }
 startWorker();
-openWith(OPENING, { draft: draft !== null });
+openWith(OPENING);
 
 // For the automated checks: the state the page holds, and a way to step
 // deterministically with the clock stopped.
@@ -1124,7 +1110,6 @@ window.redfab = {
     setSource: (text) => { source.value = text; source.dispatchEvent(new Event('input')); },
     setTop: (text) => { topField.value = text; topField.dispatchEvent(new Event('input')); },
     get loadedExample() { return loaded.example; },
-    edited,
     ready: () => ask({ op: 'ping' }),
     live: goLive,
     release,

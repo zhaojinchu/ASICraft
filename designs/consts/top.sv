@@ -1,4 +1,4 @@
-// Outputs tied to constants, which synthesis keeps as constant nets.
+// Constant Outputs
 module top (
     input  logic a,
     output logic one,

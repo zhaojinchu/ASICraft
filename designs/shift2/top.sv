@@ -1,5 +1,4 @@
-// A two-stage shift register: the shortest possible path between two
-// flip-flops, which is where a hold-time violation shows first.
+// 2-Stage Shift Register
 module top (
     input  logic clk,
     input  logic d,

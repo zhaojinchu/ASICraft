@@ -1,4 +1,4 @@
-// A 4-bit ripple-carry adder with carry out: 9 input bits, 5 output bits.
+// 4-Bit Adder
 module top (
     input  logic [3:0] a,
     input  logic [3:0] b,

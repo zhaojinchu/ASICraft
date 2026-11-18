@@ -1,4 +1,4 @@
-// A full adder: the first design with more than one gate.
+// Full Adder
 module top (
     input  logic a,
     input  logic b,
