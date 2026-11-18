@@ -8,8 +8,8 @@
 // simulator, reads the lamps, and compares with the native simulator on the
 // natively built design. Then the page as a user meets it: the status while
 // compiling and after, a module not named top, a broken source, the time
-// limit's message, the examples dropdown with an edited draft and the draft
-// across a reload, Ctrl+Enter, Pause/Run, the three downloads (world.nbt,
+// limit's message, the examples dropdown switching away from an edited draft
+// with no dialog and bringing it back, the draft across a reload, Ctrl+Enter, Pause/Run, the three downloads (world.nbt,
 // report.txt and design.json, byte for byte the native build's files), the
 // dust behind a lever recolouring at once, a clocked design both free-running
 // under the page's own clock and driven cycle by cycle against the native
@@ -147,9 +147,9 @@ try {
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
     const fetched = [];
     page.on('request', (r) => fetched.push(new URL(r.url()).pathname));
+    // The page never raises a dialog (2026-11-17: the confirm before switching examples read as generated).
     const dialogs = [];
-    let answer = true;
-    page.on('dialog', (d) => { dialogs.push(d.message()); d[answer ? 'accept' : 'dismiss'](); });
+    page.on('dialog', (d) => { dialogs.push(d.message()); d.dismiss(); });
     await open(page, errors);
 
     // --- the page opens with the counter already built and counting, before the compiler is fetched
@@ -157,10 +157,12 @@ try {
         check(await page.evaluate(() => window.redfab.opening) === 'shown', `the page did not open with the ${OPENING} circuit`);
         check(await page.evaluate((n) => window.redfab.design?.name === n && window.redfab.mode === 'sim' && window.redfab.running, OPENING), 'the opening circuit is not running in the simulator');
         check(await page.$eval('#examples', (e) => e.value) === OPENING, 'the dropdown does not show the opening example');
-        const status = await page.$eval('#status', (e) => [e.className, e.textContent]);
-        // The status line says what is on show in plain words; the numbers are the result card's (asked for 2026-11-11).
-        // The status is the terminal's first line, as a build tool prints it (2026-11-11: the green sentence read as generated).
-        check(status[0] === 'ok' && status[1] === `simulating ${OPENING} in the browser`, `the opening status reads ${JSON.stringify(status)}`);
+        // The status is the terminal's first line, as a build tool prints it (2026-11-11: the green sentence read as generated),
+        // and the opening says nothing there, taking no room (2026-11-17: "simulating counter4 in the browser" was not needed).
+        const status = await page.$eval('#status', (e) => [e.textContent, getComputedStyle(e).display]);
+        check(status[0] === '' && status[1] === 'none', `the opening status reads ${JSON.stringify(status)}`);
+        // The header is one line (2026-11-17: the two sentences read as generated).
+        check(await page.$eval('header p', (e) => e.textContent.trim()) === 'A SystemVerilog to Minecraft redstone compiler. Source on GitHub.', 'the header is not the one line');
         check(await page.$eval('#status', (e) => e.parentElement.id) === 'terminal' && await page.$('#summary') === null, 'the status is not the terminal\'s first line, or the chips are back');
         check(/^\s*export\s+world\.nbt\s+report\.txt\s+design\.json\s*$/.test(await page.$eval('#result', (e) => e.textContent)), 'the files are not labelled as exports');
         check(await page.$('#capacity') === null, 'the capacity line is back under the editor');
@@ -204,14 +206,14 @@ try {
         if (!bytes) failures.push('the opening circuit offered no world.nbt');
         else check(bytes.equals(readFileSync(join(root, 'build/designs', OPENING, 'world.nbt'))), "the opening circuit's world.nbt differs from the native build's");
         await client.detach();
-        // The report on the page is a timing report's: area, T_clk, t_co, slack, LEC; no placement internals,
-        // no positions, no asides (the full one is the report.txt export).
+        // The report on the page is a timing report's: area, T_clk, t_co, slack; no placement internals,
+        // no positions, no asides, no LEC line (2026-11-17; the full one is the report.txt export).
         const report = await page.$eval('#report-text', (e) => e.textContent);
         const line = (key, value) => new RegExp(`^ {2}${key.padEnd(12).replace(/[[\]]/g, '\\$&')} ${value}$`, 'm').test(report);
         check(report.startsWith(`${OPENING}, sequential, clk ↑\n`) && line('cells', '\\d+') && line('flip-flops', '4') && line('area', '\\d+ x \\d+ x \\d+')
             && line('T_clk', '\\d+ ticks, [\\d.]+ s') && line('t_co', '\\d+ ticks') && line('slack', 'setup -?\\d+, hold -?\\d+ ticks')
             && line('outputs', 'count\\[3:0\\]') && line('inputs', 'clk en rst'), `the page's report reads ${JSON.stringify(report)}`);
-        check(!/[()]|forceload|lever at|lamp at|placement|tiles:/.test(report), `the page's report carries the full report's detail: ${JSON.stringify(report)}`);
+        check(!/[()]|forceload|lever at|lamp at|placement|tiles:|LEC/.test(report),`the page's report carries the full report's detail: ${JSON.stringify(report)}`);
         // Showing intent to compile (a click into the editor) fetches the compiler ahead of the compile.
         await page.focus('#source');
         const warmStarted = Date.now();
@@ -294,8 +296,8 @@ try {
         }));
         check(/^ {2}cells {8}49$/m.test(card.report) && card.reportOpen && !card.logOpen, `the report is ${card.reportOpen ? 'open' : 'closed'} (${/cells {8}49/.test(card.report) ? 'with' : 'without'} its text), the log ${card.logOpen ? 'open' : 'closed'}`);
         check(card.report.startsWith('adder4, combinational\n') && /^ {2}t_pd {9}(min \d+, max )?\d+ ticks, [\d.]+ s$/m.test(card.report) && /^ {2}t_in,min {5}\d+ ticks$/m.test(card.report)
-            && /^ {2}inputs {7}a\[3:0\] b\[3:0\] cin$/m.test(card.report) && /^ {2}LEC {10}proven$/m.test(card.report), `adder4's report reads ${JSON.stringify(card.report)}`);
-        console.log('adder4: the buses read 3 + 4 = 7, most significant bit first; the report gives t_pd, t_in,min and the LEC');
+            && /^ {2}inputs {7}a\[3:0\] b\[3:0\] cin$/m.test(card.report) && !/LEC/.test(card.report), `adder4's report reads ${JSON.stringify(card.report)}`);
+        console.log('adder4: the buses read 3 + 4 = 7, most significant bit first; the report gives t_pd and t_in,min');
     }
 
     // --- a phone: nothing wider than the screen, the circuit and the levers usable by touch
@@ -425,26 +427,24 @@ try {
         check(status[0] === 'ok', `Ctrl+Enter did not compile: ${status[1]}`);
     }
 
-    // --- the dropdown: an edited source is a draft, replacing it asks, and it survives a reload
+    // --- the dropdown: an edited source is a draft, another example replaces it without asking,
+    // the custom entry brings it back, and it survives a reload
     {
         const draft = INV.replace('inv', 'mine');
         await page.evaluate((t) => window.redfab.setSource(t), draft);
-        answer = false;
-        await page.select('#examples', 'nor2');
-        check(dialogs.at(-1)?.includes('nor2 example'), `no confirmation before replacing the draft: ${JSON.stringify(dialogs)}`);
-        check(await page.$eval('#source', (e) => e.value) === draft, 'dismissing the confirmation still replaced the source');
-        check(await page.$eval('#examples', (e) => e.value) === 'custom', 'dismissing the confirmation moved the dropdown');
-        answer = true;
         await page.select('#examples', 'nor2');
         await sleep(300);
-        check(await page.$eval('#source', (e) => e.value.includes('module top')), 'accepting the confirmation did not load the example');
+        check(dialogs.length === 0, `the page asked before switching examples: ${JSON.stringify(dialogs)}`);
+        check(await page.$eval('#source', (e) => e.value.includes('module top') && e.value.startsWith('// NOR Gate\n')), 'picking an example did not load it');
+        check(await page.$eval('#examples option[value="custom"]', (e) => e.textContent) === 'custom', 'the custom entry is not labelled custom');
         await page.select('#examples', 'custom');
         await sleep(100);
         check(await page.$eval('#source', (e) => e.value) === draft, 'the custom entry did not bring the draft back');
         await open(page, errors);
         check(await page.$eval('#source', (e) => e.value) === draft, 'the draft did not survive a reload');
         check(await page.$eval('#examples', (e) => e.value) === 'custom', 'the dropdown does not show custom after a reload with a draft');
-        check(await page.evaluate(() => window.redfab.opening === 'shown') && /your draft is in the editor/.test(await page.$eval('#status', (e) => e.textContent)), 'with a draft, the page did not open its circuit and say the draft is in the editor');
+        check(await page.evaluate(() => window.redfab.opening === 'shown') && await page.$eval('#status', (e) => e.textContent) === '', 'with a draft, the page did not open its circuit with nothing in the status');
+        check(dialogs.length === 0, `the page raised a dialog: ${JSON.stringify(dialogs)}`);
         // The footer is the notice Mojang's guidelines require, and nothing else (asked for 2026-11-11).
         check(await page.$eval('footer', (e) => e.textContent.trim()) === 'NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.', 'the footer is not the Minecraft notice alone');
     }

@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { runYosys } from '@yowasp/yosys';
 import { loadCore } from '../playground/core.js';
-import { compile, countCells, detectTop, explain, LIMITS, moduleNames, nameFor } from '../playground/compile.js';
+import { compile, countCells, detectTop, EXAMPLES, explain, LIMITS, moduleNames, nameFor } from '../playground/compile.js';
 import { buildWasm, root, wasmPath as wasm } from './common.mjs';
 import { OPENING, PACKAGES, PRECOMPRESS_MIN_BYTES, cacheControl, contentSecurityPolicy, prepareOpening, resolve, serve } from './playground_serve.mjs';
 
@@ -418,6 +418,17 @@ test('the page carries its font, its introduction and the repository link, and l
         assert.equal((await fetch(`${base}/fonts/Monocraft-LICENSE.txt`)).status, 200);
     } finally {
         server.close();
+    }
+});
+
+// Asked for 2026-11-17: an example's comment says what the module is, in a
+// few words on one line ("Inverter", "4-Bit Adder"), and explains nothing.
+test('every example opens with one short comment line that names the module', () => {
+    for (const name of EXAMPLES) {
+        const lines = readFileSync(join(root, 'designs', name, 'top.sv'), 'utf8').split('\n');
+        assert.match(lines[0], /^\/\/ \S+( \S+){0,3}$/, `${name} does not open with a name of at most four words: ${lines[0]}`);
+        assert.ok(!/[.:;,()]/.test(lines[0]), `${name}'s comment explains instead of naming: ${lines[0]}`);
+        assert.ok(!lines.slice(1).some((l) => l.trimStart().startsWith('//')), `${name} carries more comment lines than its name`);
     }
 });
 
