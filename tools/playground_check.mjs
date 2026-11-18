@@ -633,6 +633,9 @@ try {
         const requests = [];
         await page.setRequestInterception(true);
         let submitAnswer = { status: 503, body: { error: 'the game is down' } };
+        // A submission can be held, unanswered, until the check answers it.
+        let holdSubmit = false;
+        let held = null;
         // The camera (stage 14): the status carries it, and the relay's WHEP endpoint is faked.
         let cameraStatus = { connected: true, player: 'Steve_7', driver: null, queue: 0, plot: 3, streaming: false };
         const whep = [];
@@ -645,6 +648,11 @@ try {
             }
             if (url.pathname.startsWith('/api/')) {
                 requests.push(`${req.method()} ${url.pathname}${url.search}`);
+                if (url.pathname === '/api/submit' && holdSubmit) {
+                    held = req;
+                    holdSubmit = false;
+                    return;
+                }
                 if (url.pathname === '/api/submit') return req.respond({ status: submitAnswer.status, contentType: 'application/json', body: JSON.stringify(submitAnswer.body) });
                 return req.respond({ status: 200, contentType: 'application/json', body: '{"released":true}' });
             }
@@ -691,7 +699,37 @@ try {
         await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
         await sleep(300);
         check(requests.includes('DELETE /api/plots/3?token=tok'), `leaving the page did not give the plot back: ${JSON.stringify(requests)}`);
-        console.log('live mode against a faked backend: plot size shown and enforced, plot given back on Stop and on leaving');
+        // Run in the game while a compile is still running (found on the site 2026-11-18: the compile
+        // finished into the live run, a second set of levers and lamps appeared, and the log said
+        // "Cannot read properties of null (reading 'plot')"). The server's answer is held until the
+        // compile is done, so the compile lands in the gap, then the server answers.
+        await open(page, errors);
+        await page.evaluate(() => { window.redfab.limits.plotSize = [512, 512]; });
+        await loadExample(page, 'not1');
+        holdSubmit = true;
+        await page.click('#compile');
+        await page.click('#live');
+        await page.waitForFunction(() => window.redfab.asking === 0, { polling: 250, timeout: 120_000 });
+        for (let i = 0; i < 100 && held === null; i++) await sleep(100);
+        check(held !== null, 'Run in the game during a compile did not submit');
+        if (held) {
+            await held.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(submitAnswer.body) });
+            await page.waitForFunction(() => window.redfab.livePlot !== null, { polling: 100, timeout: 10_000 });
+        }
+        await sleep(300);
+        const raced = await page.evaluate(() => ({
+            levers: document.querySelectorAll('#inputs .lever').length,
+            lamps: document.querySelectorAll('#outputs .lamp').length,
+            status: [document.getElementById('status').className, document.getElementById('status').textContent],
+            log: document.getElementById('log').textContent,
+            mode: window.redfab.mode,
+        }));
+        check(raced.levers === 1 && raced.lamps === 1, `Run in the game during a compile left ${raced.levers} levers and ${raced.lamps} lamps for not1's one of each`);
+        // The faked backend has no socket, so the status ends on the connection closing; the log has
+        // nothing from the compile that was dropped.
+        check(raced.mode === 'live' && raced.log.trim() === '', `Run in the game during a compile: ${JSON.stringify({ ...raced, log: raced.log.slice(-200) })}`);
+        await page.click('#release');
+        console.log('live mode against a faked backend: plot size shown and enforced, plot given back on Stop and on leaving, a compile overtaken by Run in the game dropped');
 
         // --- the camera tab (stage 14, reworked 2026-11-11): a tab beside the circuit when the backend has a
         // camera, the stream played while the tab is open and retried when the relay refuses, Auto view and
