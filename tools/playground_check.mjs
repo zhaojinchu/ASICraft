@@ -445,8 +445,8 @@ try {
         check(await page.$eval('#examples', (e) => e.value) === 'custom', 'the dropdown does not show custom after a reload with a draft');
         check(await page.evaluate(() => window.redfab.opening === 'shown') && await page.$eval('#status', (e) => e.textContent) === '', 'with a draft, the page did not open its circuit with nothing in the status');
         check(dialogs.length === 0, `the page raised a dialog: ${JSON.stringify(dialogs)}`);
-        // The footer is the notice Mojang's guidelines require, and nothing else (asked for 2026-11-11).
-        check(await page.$eval('footer', (e) => e.textContent.trim()) === 'NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.', 'the footer is not the Minecraft notice alone');
+        // No footer under the page (asked for 2026-11-18), and the editor and the stage reach the bottom.
+        check(await page.$('footer') === null && await page.evaluate(() => Math.abs(document.querySelector('main').getBoundingClientRect().bottom - window.innerHeight) < 1), 'there is a footer under the page, or the page stops short of the bottom');
     }
 
     // --- a clocked design: driven by hand through the native cycle protocol, then

@@ -240,7 +240,8 @@ test('the dev server survives a malformed URL and serves nothing outside its all
         const page = await fetch(`${base}/`);
         assert.equal(page.status, 200, 'the server is still up after the malformed request');
         const html = await page.text();
-        assert.match(html, /<footer>NOT AN OFFICIAL MINECRAFT PRODUCT\. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT\.<\/footer>/, 'the footer is the notice Mojang requires, and nothing else');
+        // No footer (asked for 2026-11-18; the notice stays in the READMEs).
+        assert.ok(!/<footer|NOT AN OFFICIAL/.test(html), 'the page carries a footer again');
         assert.equal((await fetch(`${base}/node_modules/puppeteer-core/package.json`)).status, 404);
         assert.equal((await fetch(`${base}/pkg/puppeteer-core@1.0.0/package.json`)).status, 404);
         assert.equal((await fetch(`${base}/pkg/three@0.0.0/package.json`)).status, 200, 'the version in the path is a cache key only');
