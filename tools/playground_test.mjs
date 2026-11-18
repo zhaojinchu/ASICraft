@@ -425,7 +425,7 @@ test('the page carries its font, its introduction and the repository link, and l
 // few words on one line ("Inverter", "4-Bit Adder"), and explains nothing.
 test('every example opens with one short comment line that names the module', () => {
     for (const name of EXAMPLES) {
-        const lines = readFileSync(join(root, 'designs', name, 'top.sv'), 'utf8').split('\n');
+        const lines = readFileSync(join(root, 'designs', name, 'top.sv'), 'utf8').split(/\r?\n/);
         assert.match(lines[0], /^\/\/ \S+( \S+){0,3}$/, `${name} does not open with a name of at most four words: ${lines[0]}`);
         assert.ok(!/[.:;,()]/.test(lines[0]), `${name}'s comment explains instead of naming: ${lines[0]}`);
         assert.ok(!lines.slice(1).some((l) => l.trimStart().startsWith('//')), `${name} carries more comment lines than its name`);
