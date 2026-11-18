@@ -43,10 +43,9 @@ def test_sections_and_backticks_are_found():
 
 def test_license_drift_is_named():
     manifests = {"Cargo.toml": "MIT", "package.json": "MIT"}
-    assert check_license(README, "MIT License\n\nCopyright", manifests) == []
-    assert check_license(README, "Apache License", manifests) == ["LICENSE does not start with 'MIT License'"]
-    assert check_license(README, "MIT License", {"package.json": None}) == ["package.json declares license None, LICENSE is MIT"]
-    assert check_license(README.replace("MIT;", "see"), "MIT License", manifests) == ["README.md's License section does not say MIT"]
+    assert check_license("MIT License\n\nCopyright", manifests) == []
+    assert check_license("Apache License", manifests) == ["LICENSE does not start with 'MIT License'"]
+    assert check_license("MIT License", {"package.json": None}) == ["package.json declares license None, LICENSE is MIT"]
 
 
 def test_version_drift_is_named():

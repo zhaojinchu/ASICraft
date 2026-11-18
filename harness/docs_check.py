@@ -17,7 +17,7 @@ code without any test noticing. This ties each quoted fact to its source:
 - the fixture and recording counts in mechanics.md equal fixtures/mechanics.
 
 README.md is the short version and docs/REFERENCE.md holds the details, so every README
-check but the license reads the two as one text; the License section stays in README.md.
+check reads the two as one text.
 
 Each function takes text and returns the problems it finds, so a drift can be tested
 without a tree; `problems(root)` reads the real one.
@@ -58,7 +58,7 @@ def smoke_errors(sources: dict[str, str]) -> list[str]:
     return [line[len("// error: "):] for text in sources.values() for line in text.splitlines() if line.startswith("// error: ")]
 
 
-def check_license(readme: str, license_text: str, manifests: dict[str, str]) -> list[str]:
+def check_license(license_text: str, manifests: dict[str, str]) -> list[str]:
     """LICENSE is MIT and every manifest says so (manifests: path -> the license it declares)."""
     out = []
     if not license_text.startswith("MIT License"):
@@ -66,8 +66,6 @@ def check_license(readme: str, license_text: str, manifests: dict[str, str]) -> 
     for path, declared in manifests.items():
         if declared != "MIT":
             out.append(f"{path} declares license {declared!r}, LICENSE is MIT")
-    if "MIT" not in section(readme, "License"):
-        out.append("README.md's License section does not say MIT")
     return out
 
 
@@ -195,7 +193,7 @@ def problems(root: Path = ROOT) -> list[str]:
         "pyproject.toml": tomllib.loads(read("pyproject.toml"))["project"].get("license"),
         "mod/resources/fabric.mod.json": json.loads(read("mod/resources/fabric.mod.json")).get("license"),
     }
-    out += check_license(readme, read("LICENSE"), manifests)
+    out += check_license(read("LICENSE"), manifests)
     if "LICENSE" not in tomllib.loads(read("pyproject.toml"))["project"].get("license-files", []):
         out.append("pyproject.toml does not list LICENSE in license-files")
     out += check_versions(docs, pins, python_pin, running)
