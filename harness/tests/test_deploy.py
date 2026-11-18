@@ -132,47 +132,65 @@ def test_the_setup_script_has_a_server_mode_without_the_development_tools():
     assert 'CLIENT_JAR=.tools/mc/client-$MC_VERSION.jar' in build, "the mod build looks for the jar where setup.sh --client puts it"
 
 
-def test_the_pc_side_runs_from_a_clone_as_two_scheduled_tasks():
+def test_the_pc_side_runs_from_a_clone_as_three_scheduled_tasks():
     """Stage 14, the PC: deploy/pc/ holds the tunnel in a loop, the start (and restart) of the
-    game and OBS, and the installer of the two scheduled tasks; the config is one git-ignored
-    file copied from an example that defines every variable the scripts read; the runbook walks
-    from the clone to the tasks, through Prism's command line, which the nightly restart needs."""
+    game and OBS, the watchdog that brings the stream back, and the installer of the three
+    scheduled tasks; the config is one git-ignored file copied from an example that defines
+    every variable the scripts read; the runbook walks from the clone to the tasks, through
+    Prism's command line, which the nightly restart needs."""
     pc = DEPLOY / "pc"
-    scripts = {name: (pc / name).read_text() for name in ("tunnel.ps1", "start.ps1", "install.ps1")}
+    scripts = {name: (pc / name).read_text() for name in ("tunnel.ps1", "start.ps1", "watch.ps1", "install.ps1")}
+    obs = (pc / "obs.ps1").read_text()
     example = (pc / "config.example.ps1").read_text()
     assert "/deploy/pc/config.ps1" in (ROOT / ".gitignore").read_text(), "the filled config stays out of git"
     defined = set(re.findall(r"^\$(\w+)\s*=", example, re.M))
-    for name, text in scripts.items():
-        assert '"$PSScriptRoot\\config.ps1"' in text, f"{name} reads the config beside it"
+    for name, text in {**scripts, "obs.ps1": obs}.items():
+        if name != "obs.ps1":
+            assert '"$PSScriptRoot\\config.ps1"' in text, f"{name} reads the config beside it"
         for brace in "{}", "()":
             assert text.count(brace[0]) == text.count(brace[1]), f"{name}: unbalanced {brace}"
         used = {v for v in re.findall(r"\$([A-Z]\w+)\b", text) if v not in ("PSScriptRoot", "ErrorActionPreference")}
         assert used <= defined, f"{name} reads {used - defined} that config.example.ps1 does not define"
-    assert "while ($true)" in scripts["tunnel.ps1"], "the tunnel comes back after any drop"
-    assert "-N -L 25565:127.0.0.1:25565" in scripts["tunnel.ps1"] and "ExitOnForwardFailure=yes" in scripts["tunnel.ps1"]
-    assert '"camera@$Name"' in scripts["tunnel.ps1"], "the tunnel user is camera, the host the site's name"
+    tunnel = scripts["tunnel.ps1"]
+    assert "while ($true)" in tunnel, "the tunnel comes back after any drop"
+    assert "-N -L 25565:127.0.0.1:25565" in tunnel and "ExitOnForwardFailure=yes" in tunnel
+    assert '"camera@$Name"' in tunnel, "the tunnel user is camera, the host the site's name"
+    # Found on the PC, 2026-11-18: stopping the task stopped the script but not its ssh, so every
+    # restart left one more tunnel running (12 in a week). The script ends the old ones first.
+    orphans = tunnel.find("Stop-Process")
+    assert orphans != -1 and orphans < tunnel.find("while ($true)"), "the tunnel does not end the ones left by earlier runs"
+    assert "*-L 25565:127.0.0.1:25565*" in tunnel[orphans - 400:orphans], "the old tunnels are not picked by their own command line"
     start = scripts["start.ps1"]
     assert "redfab.camera.url" in start, "the game is found by the mod's property, so nothing else is killed"
     assert "'--launch', $Instance, '--server', 'localhost:25565'" in start, "Prism launches the instance joining through the tunnel"
-    assert "'--startstreaming'" in start and "'--disable-shutdown-check'" in start, "OBS streams at once and skips the safe-mode question after a kill"
+    assert '"$PSScriptRoot\\obs.ps1"' in start and start.find("Stop-Obs") < start.find("Start-Obs"), "the start stops OBS first and starts it last"
+    assert "'--startstreaming'" in obs and "'--disable-shutdown-check'" in obs, "OBS streams at once and skips the safe-mode question after a kill"
     # Found on the PC, 2026-11-11: OBS 32 keeps a sentinel per run under obs-studio\.sentinel and drops
     # it on a clean exit; after the restart's kill, the next OBS stopped on its "Crash Detected" dialog,
-    # flag or no flag, and streamed nothing. The start clears them before OBS runs again.
-    clear = start.find("obs-studio\\.sentinel")
-    assert clear != -1 and "Remove-Item" in start[clear - 200:clear + 200], "the start clears OBS's crash sentinels"
-    assert clear < start.find("Start-Process -FilePath $Obs"), "the sentinels are cleared before OBS starts"
-    assert "-WorkingDirectory (Split-Path $Obs)" in start, "OBS wants its own folder as the working directory"
+    # flag or no flag, and streamed nothing. OBS is started only after they are cleared.
+    clear = obs.find("obs-studio\\.sentinel")
+    assert clear != -1 and "Remove-Item" in obs[clear - 200:clear + 200], "OBS's crash sentinels are not cleared"
+    assert clear < obs.find("Start-Process -FilePath $Obs"), "the sentinels are cleared before OBS starts"
+    assert "-WorkingDirectory (Split-Path $Obs)" in obs, "OBS wants its own folder as the working directory"
+    assert "Get-Process -Name obs64" in obs[obs.find("function Start-Obs"):], "a second OBS would stop on its already-running dialog"
+    # Found on the PC, 2026-11-18: OBS's WHIP output does not reconnect; a moment's drop of the link
+    # to the relay stopped the stream for 11 hours, until the nightly restart was due.
+    watch = scripts["watch.ps1"]
+    assert "while ($true)" in watch and '"$PSScriptRoot\\obs.ps1"' in watch
+    assert "https://$Name/api/status" in watch and ".streaming -eq $false" in watch, "the watchdog does not ask the site for the stream"
+    assert "Start-Obs" in watch and "Start-ScheduledTask -TaskName 'redfab camera'" in watch, "the watchdog restarts neither OBS nor the camera"
+    assert ".State -eq 'Running'" in watch, "the watchdog does not leave the nightly restart alone"
     install = scripts["install.ps1"]
     assert "Register-ScheduledTask" in install and "-AtLogOn" in install and "-Daily -At" in install
     assert "-ExecutionPolicy Bypass" in install and "-WindowStyle Hidden" in install
     assert "-LogonType Interactive" in install, "the game and OBS need the user's desktop"
-    for task in ("'redfab tunnel'", "'redfab camera'"):
+    for task in ("'redfab tunnel'", "'redfab camera'", "'redfab watch'"):
         assert task in install, task
     assert "'redfab tunnel'" in start, "the restart brings the tunnel task back too"
-    for script in ("tunnel.ps1", "start.ps1"):
+    for script in ("tunnel.ps1", "start.ps1", "watch.ps1"):
         assert script in install, f"the installer registers {script}"
     doc = (DEPLOY / "CAMERA.md").read_text()
-    for name in ("git clone", "config.example.ps1", "config.ps1", "install.ps1", "tunnel.ps1", "start.ps1", "Prism", "-Dredfab.camera.url=wss://NAME/camera?key=KEY", "/camera/camera/whip"):
+    for name in ("git clone", "config.example.ps1", "config.ps1", "install.ps1", "tunnel.ps1", "start.ps1", "watch.ps1", "Prism", "-Dredfab.camera.url=wss://NAME/camera?key=KEY", "/camera/camera/whip"):
         assert name in doc, f"the runbook does not mention {name}"
     assert "passphrase" in doc, "the runbook says the tunnel's key has none, since the task runs unattended"
     assert "`pc/`" in (DEPLOY / "README.md").read_text(), "deploy/README.md names the PC's folder"
