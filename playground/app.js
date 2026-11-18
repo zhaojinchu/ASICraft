@@ -281,8 +281,12 @@ function clearResult() {
     logDetails.open = false;
 }
 
+/// Whether a compile is running in the worker, for Run in the game to stop.
+let compiling = false;
+
 async function compile() {
     generation += 1;
+    const g = generation;
     stopRunning();
     leaveLive();
     selectTab('circuit');
@@ -307,14 +311,20 @@ async function compile() {
     const text = source.value;
     const started = Date.now();
     let phase = 'starting';
-    const progress = () => setStatus(`compiling ${name}: ${phase}, ${Math.round((Date.now() - started) / 1000)} s`);
+    // Everything below that shows the compile checks it is still the page's latest action:
+    // Run in the game, pressed meanwhile, overtakes it (found on the site 2026-11-18, where a
+    // compile that finished into a live run added a second set of levers and lamps).
+    const current = () => g === generation;
+    const progress = () => { if (current()) setStatus(`compiling ${name}: ${phase}, ${Math.round((Date.now() - started) / 1000)} s`); };
     progress();
     const ticker = setInterval(progress, 1000);
     const deadline = setTimeout(() => {
         startWorker(`stopped: compiling took longer than ${limits.compileSeconds} s, try a smaller design`);
     }, limits.compileSeconds * 1000);
+    compiling = true;
     try {
         const reply = await ask({ op: 'compile', source: text, top, name }, { phase: (p) => { phase = p; progress(); } });
+        if (!current()) return;
         design = reply.design;
         built = { source: text, top, name, design: reply.design, cells: reply.cells, report: reply.report };
         const { text: summaryText, kind } = describeBuilt(reply, `built ${name} in ${((Date.now() - started) / 1000).toFixed(1)} s`);
@@ -322,13 +332,18 @@ async function compile() {
         renderResult(built);
         showDesign();
     } catch (err) {
+        if (!current()) return;
         setStatus(err.message.split('\n')[0], 'bad');
         log.textContent += `\n${err.message}\n`;
         logDetails.open = true;
     } finally {
         clearInterval(ticker);
         clearTimeout(deadline);
-        compileButton.disabled = false;
+        // Overtaken, the buttons are the newer action's to set.
+        if (current()) {
+            compiling = false;
+            compileButton.disabled = false;
+        }
     }
 }
 
@@ -759,8 +774,10 @@ async function openWith(name) {
         if (en >= 0) await toggle(en);
         opening = 'shown';
     } catch (err) {
-        if (g === generation) setStatus('pick an example or paste a module, then compile');
-        log.textContent += `the opening circuit did not load: ${err.message}\n`;
+        if (g === generation) {
+            setStatus('pick an example or paste a module, then compile');
+            log.textContent += `the opening circuit did not load: ${err.message}\n`;
+        }
     } finally {
         if (opening === 'loading') opening = 'none';
     }
@@ -771,6 +788,13 @@ async function openWith(name) {
 /// Sends the source to the server, which builds it and places it in the game.
 async function goLive() {
     generation += 1;
+    const g = generation;
+    // A compile still running would land in the live run; restarting the worker stops it.
+    if (compiling) {
+        compiling = false;
+        startWorker('overtaken by Run in the game');
+        compileButton.disabled = false; // the overtaken compile leaves it to this run
+    }
     stopRunning();
     leaveLive();
     let top;
@@ -804,6 +828,11 @@ async function goLive() {
             body: JSON.stringify({ source: source.value, top, name }),
         });
         const body = await reply.json();
+        if (g !== generation) {
+            // The page moved on while the server built it: the plot it gave goes straight back.
+            if (reply.ok) fetch(`/api/plots/${body.plot}?token=${body.token}`, { method: 'DELETE', keepalive: true }).catch(() => {});
+            return;
+        }
         if (!reply.ok) throw new Error(body.error || `the server answered ${reply.status}`);
         design = body.design;
         livePlot = { plot: body.plot, token: body.token, origin: body.origin, source: source.value, top, name, levers: body.levers, report: body.report };
@@ -815,14 +844,17 @@ async function goLive() {
         // In the game, the game is the picture: the camera's tab, when the backend has a camera.
         selectTab('camera');
     } catch (err) {
+        if (g !== generation) return;
         mode = 'sim';
         setMode(null);
         setStatus(err.message.split('\n')[0], 'bad');
         log.textContent += `\n${err.message}\n`;
         logDetails.open = true;
     } finally {
-        compileButton.disabled = false;
-        liveButton.disabled = false;
+        if (g === generation) {
+            compileButton.disabled = false;
+            liveButton.disabled = false;
+        }
     }
 }
 
@@ -1115,6 +1147,7 @@ window.redfab = {
     release,
     get mode() { return mode; },
     get livePlot() { return livePlot; },
+    get asking() { return pending.size; },
     get liveTick() { return liveTick; },
     camera,
     selectTab,

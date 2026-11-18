@@ -131,7 +131,9 @@ places it in the game, and streams the game's blocks back; the levers then
 reach the probe blocks in the world, and the stage shows the camera (or the
 game's blocks in the view, on the Circuit tab or with no camera). The live
 backend compiles the examples into its cache when it starts, so running one
-unedited waits for no compile. The plot is
+unedited waits for no compile. Run in the game pressed while a compile runs
+here stops that compile (the worker is restarted), so only the server's build
+reaches the panel. The plot is
 given back when you Stop, compile again, or leave the page. The world.nbt
 button stays: it serves the local build of the same source when there is one,
 and otherwise asks the server for `/api/plots/N/structure`.
