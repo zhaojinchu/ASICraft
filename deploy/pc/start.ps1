@@ -1,14 +1,16 @@
 # Starts the camera, or restarts it: closes the game and OBS if they run, brings
 # the tunnel task back, launches the Prism instance joining the server through
 # the tunnel, then OBS streaming to the tray. Runs hidden as the "redfab camera"
-# task at logon and daily at 04:00 (install.ps1); by hand, it is the restart.
+# task at logon and daily at 04:00 (install.ps1), and when watch.ps1 finds the
+# stream down; by hand, it is the restart.
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\config.ps1"
+. "$PSScriptRoot\obs.ps1"
 
 # The game is the Java process started with the mod's property; nothing else is touched.
 Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*redfab.camera.url*' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-Get-Process -Name obs64 -ErrorAction SilentlyContinue | Stop-Process -Force
+Stop-Obs
 Start-Sleep -Seconds 5
 
 # A fresh tunnel, if the tasks are registered (by hand before install.ps1, the hand-run one serves).
@@ -22,10 +24,4 @@ Start-Process -FilePath $Prism -ArgumentList '--launch', $Instance, '--server', 
 # The game loads and joins; then OBS's Game Capture has a window to hook.
 Start-Sleep -Seconds 90
 
-# OBS keeps a sentinel per run and drops it on a clean exit. The kill above leaves one, and OBS 32
-# then stops on its "Crash Detected" dialog at the next start, flag or no flag, streaming nothing.
-# This OBS is only ever stopped that way, so its sentinels are cleared first.
-Get-ChildItem -LiteralPath (Join-Path $env:APPDATA 'obs-studio\.sentinel') -Force -ErrorAction SilentlyContinue |
-    Remove-Item -Force -ErrorAction SilentlyContinue
-
-Start-Process -FilePath $Obs -WorkingDirectory (Split-Path $Obs) -ArgumentList '--startstreaming', '--minimize-to-tray', '--disable-shutdown-check'
+Start-Obs

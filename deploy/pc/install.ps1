@@ -1,7 +1,9 @@
-# Registers the two scheduled tasks as the logged-in user and starts them:
-# "redfab tunnel" at logon (tunnel.ps1, which loops forever) and "redfab camera"
-# at logon and daily at 04:00 (start.ps1, which restarts the game and OBS). Both
-# run in the user's own desktop session, hidden, and come back after a failure.
+# Registers the three scheduled tasks as the logged-in user and starts them:
+# "redfab tunnel" at logon (tunnel.ps1, which loops forever), "redfab camera"
+# at logon and daily at 04:00 (start.ps1, which restarts the game and OBS) and
+# "redfab watch" at logon (watch.ps1, which loops forever and brings the stream
+# back when it drops). All run in the user's own desktop session, hidden, and
+# come back after a failure. Running it again re-registers them and restarts all three.
 # Run once from the clone, after config.ps1 is filled in and everything worked by hand:
 #   powershell -ExecutionPolicy Bypass -File deploy\pc\install.ps1
 $ErrorActionPreference = 'Stop'
@@ -21,8 +23,15 @@ $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seco
 $atLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $nightly = New-ScheduledTaskTrigger -Daily -At '04:00'
 
-Register-ScheduledTask -TaskName 'redfab tunnel' -Action (Action 'tunnel.ps1') -Trigger $atLogon -Principal $principal -Settings $settings -Force | Out-Null
-Register-ScheduledTask -TaskName 'redfab camera' -Action (Action 'start.ps1') -Trigger @($atLogon, $nightly) -Principal $principal -Settings $settings -Force | Out-Null
-Start-ScheduledTask -TaskName 'redfab tunnel'
-Start-ScheduledTask -TaskName 'redfab camera'
-'registered and started: "redfab tunnel" (at logon) and "redfab camera" (at logon and 04:00); Task Scheduler lists them'
+$tasks = @(
+    @{ Name = 'redfab tunnel'; Script = 'tunnel.ps1'; Triggers = @($atLogon) },
+    @{ Name = 'redfab camera'; Script = 'start.ps1'; Triggers = @($atLogon, $nightly) },
+    @{ Name = 'redfab watch'; Script = 'watch.ps1'; Triggers = @($atLogon) }
+)
+foreach ($task in $tasks) {
+    # A task already running keeps its old script until stopped; the starts below run the new one.
+    Stop-ScheduledTask -TaskName $task.Name -ErrorAction SilentlyContinue
+    Register-ScheduledTask -TaskName $task.Name -Action (Action $task.Script) -Trigger $task.Triggers -Principal $principal -Settings $settings -Force | Out-Null
+}
+foreach ($task in $tasks) { Start-ScheduledTask -TaskName $task.Name }
+'registered and started: "redfab tunnel" and "redfab watch" (at logon), "redfab camera" (at logon and 04:00); Task Scheduler lists them'

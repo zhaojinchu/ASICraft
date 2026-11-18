@@ -107,15 +107,29 @@ In PowerShell, as your user. Steps 1 and 2 need nothing from the box.
 
        powershell -ExecutionPolicy Bypass -File deploy\pc\install.ps1
 
-   registers two scheduled tasks as your user and starts them: "redfab
+   registers three scheduled tasks as your user and starts them: "redfab
    tunnel" at logon (`tunnel.ps1`, the ssh command in a loop that brings it
-   back after any drop) and "redfab camera" at logon and daily at 04:00
-   (`start.ps1`: closes the game and OBS, restarts the tunnel task, launches
-   the instance joining `localhost:25565`, then OBS streaming to the tray).
-   The nightly restart is there because the game's login token expires
-   after a day and the client's memory grows over a long session. Within
-   two minutes of either trigger the page's camera is up, with no click on
-   the PC. Running `start.ps1` by hand restarts everything at any time.
+   back after any drop, which first ends any tunnel an earlier run left
+   behind), "redfab camera" at logon and daily at 04:00 (`start.ps1`: closes
+   the game and OBS, restarts the tunnel task, launches the instance joining
+   `localhost:25565`, then OBS streaming to the tray) and "redfab watch" at
+   logon (`watch.ps1`, below). The nightly restart is there because the
+   game's login token expires after a day and the client's memory grows
+   over a long session. Within two minutes of either trigger the page's
+   camera is up, with no click on the PC. Running `start.ps1` by hand
+   restarts everything at any time; running `install.ps1` again picks up
+   changed scripts.
+
+   OBS's WHIP output does not reconnect: when the link to the relay drops,
+   even for a moment, OBS stops streaming (its log says "PeerConnection
+   state is now: Failed", the relay's "peer connection closed"). On
+   2026-11-17 that left the camera offline for 11 hours, until the nightly
+   restart. `watch.ps1` asks `https://NAME/api/status` every 30 s; with the
+   game connected and no stream for 90 s it restarts OBS, and if the stream
+   is still missing 90 s later, or the game has not been connected for 5
+   minutes, it restarts the whole camera through its task. It does nothing
+   while the site does not answer or `start.ps1` runs, and it notes what it
+   did in `%LOCALAPPDATA%\redfab\watch.log`.
 
 8. **Power.** Never sleep, never hibernate; the display may turn off. Set
    the user to log in automatically, so that a Windows Update reboot ends
@@ -124,12 +138,14 @@ In PowerShell, as your user. Steps 1 and 2 need nothing from the box.
 
 ## When it stops
 
-- The page says "camera off: the stream is not up": OBS is not publishing.
-  Check OBS's status bar; the relay's log on the box is
+- The page says "Camera offline": OBS is not publishing. The watchdog
+  should bring it back within about two minutes; `watch.log` says whether
+  it tried. Check OBS's status bar and its newest log under
+  `%APPDATA%\obs-studio\logs`; the relay's log on the box is
   `journalctl -u redfab-relay -f`. An OBS window titled "OBS Studio Crash
-  Detected" means it was killed and found its run's sentinel; `start.ps1`
+  Detected" means it was killed and found its run's sentinel; `obs.ps1`
   clears `%APPDATA%\obs-studio\.sentinel` before it starts OBS, so running
-  it once fixes that.
+  `start.ps1` once fixes that.
 - The page says "camera off: the camera is not connected": the mod is not
   connected to the backend. Check that the game runs from the `redfab`
   instance with the `-Dredfab.camera.url` argument (the instance's log in
