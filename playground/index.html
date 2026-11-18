@@ -20,7 +20,7 @@
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   html, body { height: 100%; margin: 0; background: #fff; color: var(--ink); }
-  body { display: grid; grid-template-rows: auto 1fr auto; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: grid; grid-template-rows: auto 1fr; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
   h1 { font: 26px/1 Monocraft, monospace; color: var(--red); margin: 0; }
   header { display: flex; align-items: baseline; gap: 18px; padding: 10px 16px; border-bottom: 2px solid var(--red); }
   header p { margin: 0; color: var(--dim); font-size: 13px; max-width: 110ch; }
@@ -90,7 +90,6 @@
   .modes button[aria-pressed="true"] { background: var(--red); border-color: var(--red); color: #fff; }
   #camera-status { color: var(--dim); }
   #camera-turn { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
-  footer { padding: 5px 16px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; }
   @media (max-width: 800px) {
     html, body { height: auto; }
     body { min-height: 100%; }
@@ -165,7 +164,6 @@
     </div>
   </section>
 </main>
-<footer>NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.</footer>
 <script type="importmap">
 { "imports": { "three": "/pkg/three@0.186.1/build/three.module.js", "three/addons/": "/pkg/three@0.186.1/examples/jsm/" } }
 </script>

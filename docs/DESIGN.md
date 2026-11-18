@@ -539,7 +539,7 @@ The end goal: a web page with a code editor and a live view of the circuit runni
 - **The view is drawn in the browser, not streamed as video.** The browser already has the geometry from its own compile. A small observe-only Fabric server mod streams block-state changes with their tick number over a WebSocket, in the trace format from `trace-format.md`. Streaming a real game client would need about one GPU machine per camera.
 - **Web levers** place or remove a `redstone_block` at each input's probe position, the same mechanism the test harness uses.
 - **Server:** Fabric, because Paper can change redstone behaviour. One plot per submission. Limits on gate count, footprint and minimum clock period. All plots share the game's 20 ticks per second, so server tick time is monitored.
-- **Legal:** "Minecraft" can't be the site's main name, the site needs the "NOT AN OFFICIAL MINECRAFT PRODUCT" notice, any game footage must be free to view, and a public site can't ship Mojang's textures.
+- **Legal:** "Minecraft" can't be the site's main name, the site needs the "NOT AN OFFICIAL MINECRAFT PRODUCT" notice, any game footage must be free to view, and a public site can't ship Mojang's textures. (The notice was taken off the page on 2026-11-18 at the owner's request; it stays in the READMEs.)
 
 Things still to confirm, each at the start of the stage that needs it:
 
